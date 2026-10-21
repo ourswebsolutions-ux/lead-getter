@@ -216,9 +216,51 @@ Each number is checked **separately**. Baileys' lookup silently drops numbers th
 
 Click a **green** number. The composer shows the lead, the number, and when you last messaged it. Write your message and click **Send**.
 
-- Nothing is ever sent automatically, and there's no bulk sending: one message, one lead, one click.
+- From the lead table, one message goes to one lead per click. The only automatic sending is the opt-in outreach campaign below.
 - The main process checks again before sending that the lead exists, the number is confirmed on WhatsApp, WhatsApp is connected, and the text is 1–4000 characters. It also enforces at least 8 seconds between messages.
 - "Sent" appears only when WhatsApp returns a message ID; otherwise the composer shows WhatsApp's error and keeps your text. Every attempt is recorded in `whatsapp_messages` (lead, number, text, WhatsApp message ID, result).
+
+### Chats
+
+The **Leads | Chats | Outreach** switch in the header changes the workspace. Each view keeps its place when you switch: filters, the open chat, unsaved templates.
+
+**Chats** is a WhatsApp Web-style view of your linked account.
+
+- **Chat list:** contact name, number, the lead it matches (when the number is a lead), the last message, its time, unread count and profile picture. Avatars appear only when the contact shares one; otherwise initials are shown.
+- **Conversation:** messages in order, with day separators and delivery ticks (sending, sent, delivered, read, not sent) as reported by WhatsApp.
+- **Sending:** Enter sends and Shift+Enter starts a new line. Opening a chat sends read receipts, as WhatsApp Web does.
+- **Search:** by name, number or message text.
+
+What WhatsApp makes available, and what it doesn't:
+
+- **New messages** (incoming, and sent from this app or your phone) arrive live while WhatsApp is connected.
+- **History:** WhatsApp sends a device its **recent chats only when it is linked**. A device linked before this version needs to be linked again (WhatsApp menu → Unlink device → Link WhatsApp) to load past chats. **Older messages** of a chat can be requested with *Older messages*; whether and how many arrive is up to WhatsApp and your phone.
+- **Groups**, channels and status updates aren't shown. Photos, voice notes and documents show as a label with their caption; media files aren't downloaded.
+- **Privacy IDs:** some contacts appear under a WhatsApp privacy ID instead of a number. When WhatsApp shares the number, the chat is filed under it; otherwise the number shows as *not shared*.
+- **Storage:** message text is stored **encrypted** with the OS keychain in the lead database (`wa_chats`, `wa_chat_messages`).
+
+### Real-estate outreach
+
+**Outreach** sends a three-message introduction to leads whose numbers the automatic check confirmed on WhatsApp.
+
+> WhatsApp's terms don't allow automated messaging from unofficial apps, and numbers that send unexpected messages are often restricted or banned. Live sending asks you to accept this risk once. A **Test run** goes through the whole schedule without sending anything.
+
+- **Messages:** three editable messages, in Urdu or Roman Urdu. The defaults are a greeting, *Kaise hain aap?* and a question about their business.
+  - Placeholders: `{name}` and `{business}`. Each message has a version used when the name isn't known.
+  - The name is the contact's own WhatsApp name, or one word from the business name, such as *Zahid Properties* → *Zahid*. It's used only when the word looks like a name (not *Real*, *Estate*, *Properties*, a city or a number). Otherwise the no-name version is used.
+  - Names are never invented. You can edit or clear each contact's name before they're messaged. Previews show the exact text per contact.
+- **Schedule:** one campaign message per **45–60 minutes** (a random time within your range), and at most **10–15 unique contacts per day** (10 by default; every message to a contact that day counts once).
+  - The three messages to a contact are separated by at least the interval, and never sent back to back.
+  - The interval, the daily count and the next send time are kept in the database, so they survive restarts.
+- **Quiet hours** apply in the recipient's local time (from the country code; for example, Pakistan uses Pakistan time).
+- **Replies:** any reply stops the sequence for that contact and hands the conversation to you. Messages such as *stop*, *not interested*, *message na karein* or *میسج نہ کریں* opt the number out for good. You can also exclude or opt out any contact yourself.
+- **No duplicates:** each message to each contact is reserved in the database before it is sent, so retries, restarts, a second copy of the app or a reconnect can never send it twice.
+  - If the app closes or a send times out mid-send, that contact is marked *Check chat* and never resent automatically.
+  - Only one copy of Lead Finder runs at a time.
+- **WhatsApp refusals:** rate limits, restrictions or a logged-out session pause the whole campaign (*possible restriction*) until you resume it. Three failures in a row also pause it.
+- **Delivery:** sent, delivered and read states come from WhatsApp's receipts.
+- **Conditions:** sending needs an active subscription and a connected WhatsApp, and the app has to be unlocked with your PIN. The campaign waits otherwise.
+- **Storage:** campaign data is in `outreach_contacts`, `outreach_sends` and `outreach_optouts`.
 
 ### Security
 

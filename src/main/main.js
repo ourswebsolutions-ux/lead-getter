@@ -18,8 +18,22 @@ const RENDERER_FILE = path.join(__dirname, '..', '..', 'dist', 'renderer', 'inde
 // Test runs point the app at throwaway data directories.
 if (process.env.LEAD_FINDER_USER_DATA) app.setPath('userData', process.env.LEAD_FINDER_USER_DATA);
 
+// One running copy per data folder: two copies would also mean two outreach
+// schedulers. A second launch just brings the existing window forward.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+  process.exit(0);
+}
+app.on('second-instance', () => {
+  if (!win) return;
+  if (win.isMinimized()) win.restore();
+  win.focus();
+});
+
 let win = null;
 let updater = null;
+let chats = null; // ChatService
+let outreach = null; // Outreach scheduler
 let store = null;
 let search = null; // { controller, promise }
 const chrome = new ChromeConnection({
@@ -477,6 +491,86 @@ function keychainCipher() {
   return sessionCipher();
 }
 
+// --- WhatsApp chats and outreach ------------------------------------------------
+
+function initChatsAndOutreach(cipher) {
+  const { ChatStore, OutreachStore } = require('../database/wa-store');
+  const { ChatService } = require('../whatsapp/chats');
+  const { Outreach } = require('../whatsapp/outreach');
+  const { jidOfPhone } = require('../whatsapp/messages');
+  const chatStore = new ChatStore(store.db, cipher);
+  chats = new ChatService({ client: wa, store: chatStore });
+  outreach = new Outreach({
+    store: new OutreachStore(store.db),
+    state: { get: (k) => store.getState(k), set: (k, v) => store.setState(k, v) },
+    transport: { ready: () => wa.state === 'open', send: async (phone, text) => ({ id: await wa.send(phone, text) }) },
+    details: (c) => ({ business: c.leadId ? store.leadById(c.leadId)?.name || null : null }),
+    hasReplied: (phone, since) => Boolean(since) && chatStore.hasIncomingSince(jidOfPhone(phone), since),
+    canSend: async () => (await license.status()).allowed,
+  });
+  chats.on('update', (u) => send('chats:update', u));
+  chats.on('incoming', (m) => outreach.onIncoming({ phone: m.phone, text: m.text }));
+  chats.on('manual', ({ phone }) => phone && outreach.onManualMessage(phone));
+  chats.on('status', (st) => outreach.onStatus(st.id, st.status));
+  outreach.on('change', (snap) => send('outreach:state', snap));
+  outreach.on('replied', (e) => send('outreach:event', { type: e.optOut ? 'opted_out' : 'replied', phone: e.phone }));
+  outreach.on('sent', (e) => send('outreach:event', { type: 'sent', phone: e.phone, stage: e.stage, test: e.test }));
+  outreach.on('failed', (e) => send('outreach:event', { type: 'failed', phone: e.phone, stage: e.stage, error: e.error, paused: e.paused }));
+  outreach.init();
+}
+
+const isPhone = (v) => typeof v === 'string' && /^\+\d{6,15}$/.test(v);
+const isJid = (v) => typeof v === 'string' && v.length < 100 && /^[\w.:+-]+@(s\.whatsapp\.net|lid)$/.test(v);
+const unavailable = () => ({ ok: false, error: waInitError || 'WhatsApp is not available on this computer.' });
+
+// Leads the campaign may message: a valid number confirmed on WhatsApp by
+// the automatic check (the same rule as sending from the lead table).
+function eligibleLeads() {
+  const inCampaign = new Set((outreach ? outreach.store.contacts() : []).map((c) => c.phone));
+  const seen = new Set();
+  const out = [];
+  for (const l of store.listLeads({})) {
+    if (l.phoneStatus !== 'valid' || l.whatsapp !== 'available' || l.whatsappMethod === 'manual' || seen.has(l.phone)) continue;
+    seen.add(l.phone);
+    out.push({ id: l.id, name: l.name, phone: l.phone, category: l.category || null, inCampaign: inCampaign.has(l.phone), optedOut: outreach ? outreach.store.isOptedOut(l.phone) : false });
+  }
+  return out;
+}
+
+async function outreachAddLeads(ids) {
+  if (!outreach) return unavailable();
+  const { pickName } = require('../whatsapp/templates');
+  const { jidOfPhone } = require('../whatsapp/messages');
+  const allowed = new Map(eligibleLeads().map((l) => [l.id, l]));
+  const list = [];
+  for (const id of Array.isArray(ids) ? ids.slice(0, 500) : []) {
+    const lead = allowed.get(Number(id));
+    if (!lead) continue;
+    const chat = chats.store.chat(jidOfPhone(lead.phone));
+    list.push({ phone: lead.phone, leadId: lead.id, name: pickName({ contactName: chat?.name, businessName: lead.name }).name });
+  }
+  if (!list.length) return { ok: false, error: 'None of these leads can be added: only numbers confirmed on WhatsApp can be messaged.' };
+  return outreach.addLeads(list);
+}
+
+async function outreachStart(opts) {
+  if (!outreach) return unavailable();
+  if (!outreach.load().config.test) {
+    const sub = await requireSubscription();
+    if (!sub.ok) return sub;
+  }
+  return outreach.start({ acknowledge: Boolean(opts && opts.acknowledge === true) });
+}
+
+async function outreachResume() {
+  if (!outreach) return unavailable();
+  if (!outreach.load().config.test) {
+    const sub = await requireSubscription();
+    if (!sub.ok) return sub;
+  }
+  return outreach.resume();
+}
+
 function waSnapshot() {
   const snap = wa ? wa.snapshot() : { state: 'unavailable', qr: null, account: null, error: waInitError };
   let progress = null;
@@ -490,8 +584,18 @@ function sendWaState() {
   send('whatsapp:state', waSnapshot());
 }
 
+// End-to-end tests only (never in a packaged app): a scripted stand-in for
+// Baileys from test/, with a throwaway cipher, as Playwright's launch has no
+// system keychain.
+function testBaileys() {
+  const file = process.env.LEAD_FINDER_TEST_BAILEYS;
+  if (!file || app.isPackaged) return null;
+  return { load: async () => require(file), cipher: { encrypt: (t) => Buffer.from(String(t), 'utf8').reverse(), decrypt: (b) => Buffer.from(b).reverse().toString('utf8') } };
+}
+
 function initWhatsApp() {
-  const cipher = sessionCipher();
+  const fake = testBaileys();
+  const cipher = fake ? fake.cipher : sessionCipher();
   if (!cipher) {
     waInitError = 'No secure system keychain is available to protect the WhatsApp session, so linking is disabled on this computer.';
     return;
@@ -505,7 +609,8 @@ function initWhatsApp() {
     waInitError = `WhatsApp support could not be loaded (${err.message.split('\n')[0]}).`;
     return;
   }
-  wa = new WhatsAppClient({ dir: path.join(app.getPath('userData'), 'whatsapp-session'), cipher });
+  wa = new WhatsAppClient({ dir: path.join(app.getPath('userData'), 'whatsapp-session'), cipher, ...(fake ? { loadBaileys: fake.load } : {}) });
+  initChatsAndOutreach(cipher);
   verifier = new WhatsAppVerifier({
     client: wa,
     store,
@@ -520,6 +625,7 @@ function initWhatsApp() {
     sendWaState();
   });
   // A device linked earlier reconnects automatically.
+  if (fake) return wa.connect();
   wa.hasSession()
     .then(async (has) => has && (await license.status()).allowed && wa.connect())
     .catch(() => {});
@@ -750,6 +856,43 @@ app.whenReady().then(() => {
   handle('whatsapp:recheck', (phone) => waRecheck(phone));
   handle('whatsapp:send', (leadId, text) => waSend(leadId, text));
   handle('whatsapp:lastMessage', (leadId) => waLastMessage(leadId));
+  // Chats (WhatsApp Web-style view)
+  handle('chats:list', (search) => (chats ? { ok: true, chats: chats.list(typeof search === 'string' ? search.slice(0, 100) : '') } : unavailable()));
+  handle('chats:open', (jid) => (!chats ? unavailable() : isJid(jid) ? chats.open(jid) : { ok: false, error: 'Invalid chat.' }));
+  handle('chats:loadOlder', (jid) => (!chats ? unavailable() : isJid(jid) ? chats.loadOlder(jid) : { ok: false, error: 'Invalid chat.' }));
+  handle('chats:send', async (jid, text) => {
+    if (!chats) return unavailable();
+    if (!isJid(jid)) return { ok: false, error: 'Invalid chat.' };
+    const sub = await requireSubscription();
+    if (!sub.ok) return sub;
+    return chats.send(jid, text);
+  });
+  // Outreach campaign
+  handle('outreach:state', () => (outreach ? { ok: true, ...outreach.snapshot() } : unavailable()));
+  handle('outreach:eligible', () => (outreach ? { ok: true, leads: eligibleLeads() } : unavailable()));
+  handle('outreach:configure', (cfg) => (!outreach ? unavailable() : cfg && typeof cfg === 'object' ? outreach.configure(cfg) : { ok: false, error: 'Invalid settings.' }));
+  handle('outreach:addLeads', (ids) => outreachAddLeads(ids));
+  handle('outreach:start', (opts) => outreachStart(opts));
+  handle('outreach:pause', () => (outreach ? outreach.pause('user') : unavailable()));
+  handle('outreach:resume', () => outreachResume());
+  handle('outreach:stop', () => (outreach ? outreach.stop() : unavailable()));
+  for (const action of ['exclude', 'include', 'optOut', 'remove']) {
+    handle(`outreach:${action}`, (phone) => (!outreach ? unavailable() : isPhone(phone) ? outreach[action](phone) : { ok: false, error: 'Invalid number.' }));
+  }
+  handle('outreach:setName', (phone, name) => (!outreach ? unavailable() : isPhone(phone) ? outreach.setName(phone, typeof name === 'string' ? name : null) : { ok: false, error: 'Invalid number.' }));
+  // Preview of (possibly unsaved) templates for one campaign contact.
+  handle('outreach:render', (templates, phone) => {
+    if (!outreach || !Array.isArray(templates) || templates.length !== 3) return { ok: false };
+    const { render } = require('../whatsapp/templates');
+    const c = isPhone(phone) ? outreach.store.contact(phone) : null;
+    const values = c ? outreach.values(c) : { name: null, business: null };
+    return { ok: true, values, messages: templates.map((t) => render({ text: String(t?.text ?? '').slice(0, 1000), fallback: String(t?.fallback ?? '').slice(0, 1000) }, values)) };
+  });
+  handle('outreach:preview', (phone) => {
+    if (!outreach || !isPhone(phone)) return { ok: false };
+    const c = outreach.store.contact(phone);
+    return c ? { ok: true, messages: outreach.preview(c) } : { ok: false };
+  });
   handle('search:interrupted', () => interrupted);
   handle('search:dismissInterrupted', () => {
     interrupted = null;
@@ -765,7 +908,7 @@ app.whenReady().then(() => {
   createWindow();
   if (process.env.LEAD_FINDER_SMOKE_TEST) return smokeTest(process.env.LEAD_FINDER_SMOKE_TEST);
 
-  updater = new Updater({ app, shell, isBusy: () => Boolean(search), send: (st) => send('update:status', st), log: fileLog(process.env.LEAD_FINDER_UPDATE_LOG || path.join(app.getPath('userData'), 'update.log')) });
+  updater = new Updater({ app, shell, isBusy: () => Boolean(search) || Boolean(outreach?.busy), send: (st) => send('update:status', st), log: fileLog(process.env.LEAD_FINDER_UPDATE_LOG || path.join(app.getPath('userData'), 'update.log')) });
   handle('update:status', () => updater.status);
   handle('update:openDownload', () => updater.openDownload());
   if (process.env.LEAD_FINDER_NO_UPDATES !== '1') updater.start();
@@ -817,6 +960,7 @@ app.on('before-quit', (e) => {
   search?.controller.abort();
   Promise.resolve(search?.promise)
     .catch(() => {})
+    .then(() => outreach?.dispose())
     .then(() => chrome.disconnect())
     .then(() => wa?.disconnect()) // closes the connection; the linked session is kept
     .finally(() => {

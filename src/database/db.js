@@ -140,6 +140,74 @@ class LeadStore {
     this.migrateV1();
     this.migrateV2();
     this.migrateV3();
+    this.migrateV4();
+  }
+
+  // Version 4: WhatsApp chats (message text is stored encrypted with the OS
+  // keychain) and the real-estate outreach campaign. Adds tables only;
+  // existing data is untouched.
+  migrateV4() {
+    if (this.db.prepare('PRAGMA user_version').get().user_version >= 4) return;
+    this.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS wa_chats (
+          jid               TEXT PRIMARY KEY,
+          phone             TEXT,
+          name              TEXT,
+          last_ts           INTEGER,
+          last_preview      BLOB,
+          last_from_me      INTEGER,
+          unread            INTEGER NOT NULL DEFAULT 0,
+          avatar            TEXT,
+          avatar_checked_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS wa_chats_last ON wa_chats (last_ts);
+        CREATE INDEX IF NOT EXISTS wa_chats_phone ON wa_chats (phone);
+        CREATE TABLE IF NOT EXISTS wa_chat_messages (
+          jid     TEXT NOT NULL,
+          id      TEXT NOT NULL,
+          from_me INTEGER NOT NULL,
+          sender  TEXT,
+          ts      INTEGER NOT NULL,
+          kind    TEXT NOT NULL,
+          body    BLOB,
+          status  TEXT,
+          PRIMARY KEY (jid, id)
+        );
+        CREATE INDEX IF NOT EXISTS wa_chat_messages_ts ON wa_chat_messages (jid, ts);
+        CREATE TABLE IF NOT EXISTS outreach_contacts (
+          phone        TEXT PRIMARY KEY,
+          lead_id      INTEGER REFERENCES businesses(id) ON DELETE SET NULL,
+          name         TEXT,
+          stage        INTEGER NOT NULL DEFAULT 0,
+          state        TEXT NOT NULL CHECK (state IN ('queued', 'active', 'replied', 'opted_out', 'excluded', 'done', 'failed', 'uncertain')),
+          last_sent_at INTEGER,
+          added_at     INTEGER NOT NULL,
+          updated_at   INTEGER NOT NULL,
+          note         TEXT
+        );
+        CREATE TABLE IF NOT EXISTS outreach_sends (
+          id         INTEGER PRIMARY KEY,
+          phone      TEXT NOT NULL,
+          stage      INTEGER NOT NULL,
+          test       INTEGER NOT NULL DEFAULT 0,
+          day        TEXT NOT NULL,
+          status     TEXT NOT NULL CHECK (status IN ('pending', 'sent', 'delivered', 'read', 'failed', 'unknown')),
+          wa_id      TEXT,
+          error      TEXT,
+          created_at INTEGER NOT NULL,
+          sent_at    INTEGER,
+          UNIQUE (phone, stage, test)
+        );
+        CREATE INDEX IF NOT EXISTS outreach_sends_day ON outreach_sends (day, test);
+        CREATE INDEX IF NOT EXISTS outreach_sends_wa ON outreach_sends (wa_id);
+        CREATE TABLE IF NOT EXISTS outreach_optouts (
+          phone  TEXT PRIMARY KEY,
+          reason TEXT,
+          at     INTEGER NOT NULL
+        );
+        PRAGMA user_version = 4;`);
+    });
   }
 
   // Version 3: WhatsApp checks may also be 'failed' (with the reason), and

@@ -10,6 +10,7 @@
 const { EventEmitter } = require('node:events');
 const QRCode = require('qrcode');
 const { useEncryptedAuthState, hasSession, wipeSession } = require('./auth-state');
+const { normalizeMessage, normalizeStatus, isPersonJid, phoneOfJid, jidOfPhone, toMs } = require('./messages');
 
 const RECONNECT_DELAYS = [2000, 5000, 15_000, 30_000, 60_000];
 
@@ -89,15 +90,67 @@ class WhatsAppClient extends EventEmitter {
       logger: silentLogger,
       browser: Browsers.appropriate('Lead Finder'),
       markOnlineOnConnect: false,
+      // Recent chats when a device is linked, and older messages of a chat
+      // when asked for (fetchHistory); never the full archive.
       syncFullHistory: false,
-      shouldSyncHistoryMessage: () => false,
       generateHighQualityLinkPreview: false,
     });
     this.sock = sock;
     this.reasons = DisconnectReason;
     sock.ev.on('creds.update', () => auth.saveCreds().catch(() => {}));
-    sock.ev.on('messages.update', (updates) => this.emit('messages.update', updates));
     sock.ev.on('connection.update', (u) => this.onUpdate(sock, u, auth).catch(() => {}));
+    // Chats: normalized, one-to-one only, LIDs resolved to phone numbers.
+    const own = (fn) => (data) => sock === this.sock && fn(data).catch((err) => this.emit('sync-error', err));
+    sock.ev.on('messages.upsert', own(async ({ messages, type }) => this.emitMessages(sock, messages, { live: type === 'notify' })));
+    sock.ev.on('messaging-history.set', own(async ({ chats, contacts, messages }) => {
+      await this.emitMeta(sock, [...(contacts || []).map(contactMeta), ...(chats || []).map(chatMeta)]);
+      await this.emitMessages(sock, messages || [], { live: false });
+    }));
+    sock.ev.on('chats.upsert', own(async (chats) => this.emitMeta(sock, chats.map(chatMeta))));
+    sock.ev.on('chats.update', own(async (chats) => this.emitMeta(sock, chats.map(chatMeta))));
+    sock.ev.on('contacts.upsert', own(async (contacts) => this.emitMeta(sock, contacts.map(contactMeta))));
+    sock.ev.on('contacts.update', own(async (contacts) => this.emitMeta(sock, contacts.map(contactMeta))));
+    sock.ev.on('messages.update', own(async (updates) => {
+      const list = [];
+      for (const u of updates) {
+        const st = normalizeStatus(u);
+        if (st) list.push({ ...st, jid: await this.canonical(sock, st.jid) });
+      }
+      if (list.length) this.emit('chat-status', list);
+    }));
+  }
+
+  // A phone-number JID when the phone is known, so a contact who writes
+  // from a privacy ID (LID) stays in the same chat.
+  async canonical(sock, jid, alt = null) {
+    let phone = phoneOfJid(jid) || phoneOfJid(alt);
+    if (!phone && String(jid).endsWith('@lid')) {
+      try {
+        phone = phoneOfJid(await sock.signalRepository?.lidMapping?.getPNForLID?.(jid));
+      } catch {}
+    }
+    return phone ? jidOfPhone(phone) : jid;
+  }
+
+  async emitMessages(sock, raw, { live }) {
+    const list = [];
+    for (const m of raw) {
+      const n = normalizeMessage(m);
+      if (!n) continue;
+      const jid = await this.canonical(sock, n.jid, m.key?.remoteJidAlt || m.key?.senderPn);
+      list.push({ ...n, jid, phone: n.phone || phoneOfJid(jid) });
+    }
+    if (list.length) this.emit('chat-messages', list, { live });
+  }
+
+  async emitMeta(sock, items) {
+    const list = [];
+    for (const it of items) {
+      if (!it || !isPersonJid(it.jid)) continue;
+      const jid = await this.canonical(sock, it.jid, it.alt);
+      list.push({ ...it, jid, phone: phoneOfJid(jid) });
+    }
+    if (list.length) this.emit('chat-meta', list);
   }
 
   async onUpdate(sock, u, auth) {
@@ -208,6 +261,62 @@ class WhatsAppClient extends EventEmitter {
     if (!id) throw new Error('WhatsApp did not confirm the message');
     return id;
   }
+}
+
+// --- chat view -----------------------------------------------------------------
+
+Object.assign(WhatsAppClient.prototype, {
+  // Sends a text to a chat (phone or LID JID). Resolves with the message id.
+  async sendToChat(jid, text) {
+    this.requireOpen();
+    if (!isPersonJid(jid)) throw new Error('Only one-to-one chats are supported.');
+    const msg = await withTimeout(this.sock.sendMessage(jid, { text }), 30_000, 'Sending timed out');
+    const id = msg?.key?.id;
+    if (!id) throw new Error('WhatsApp did not confirm the message');
+    return { id, ts: toMs(msg.messageTimestamp) || Date.now() };
+  },
+
+  // Read receipts for messages the user has now seen (as WhatsApp Web does).
+  async markRead(jid, ids) {
+    this.requireOpen();
+    if (!ids.length) return;
+    await withTimeout(this.sock.readMessages(ids.map((id) => ({ remoteJid: jid, id, fromMe: false }))), 15_000, 'WhatsApp did not answer in time');
+  },
+
+  // The contact's profile picture as a data: URL (the window only shows
+  // local images), or null when they don't share one.
+  async avatar(jid) {
+    this.requireOpen();
+    let url;
+    try {
+      url = await this.sock.profilePictureUrl(jid, 'preview', 15_000);
+    } catch {
+      return null; // not set, or hidden by the contact's privacy settings
+    }
+    if (!url || !/^https:\/\/[^/]*\.whatsapp\.net\//.test(url)) return null;
+    const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+    const type = res.headers.get('content-type') || '';
+    if (!res.ok || !/^image\/(jpeg|png|webp)/.test(type)) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length > 200_000) return null;
+    return `data:${type.split(';')[0]};base64,${buf.toString('base64')}`;
+  },
+
+  // Asks the phone for older messages of a chat; they arrive later as
+  // 'chat-messages' (WhatsApp decides how many, if any).
+  async fetchHistory(jid, oldest, count = 50) {
+    this.requireOpen();
+    await withTimeout(this.sock.fetchMessageHistory(count, { remoteJid: jid, id: oldest.id, fromMe: oldest.fromMe }, Math.floor(oldest.ts / 1000)), 20_000, 'WhatsApp did not answer in time');
+  },
+});
+
+function chatMeta(c) {
+  return { jid: c.id, alt: c.pnJid || c.phoneNumber || null, name: c.name || null, unread: Number.isInteger(c.unreadCount) ? Math.max(0, c.unreadCount) : null, lastTs: toMs(c.conversationTimestamp) };
+}
+
+function contactMeta(c) {
+  // name: as saved in the phone's address book; notify: the contact's own WhatsApp name.
+  return { jid: c.id, alt: c.phoneNumber || c.jid || null, name: c.name || c.notify || c.verifiedName || null, savedName: c.name || null, pushName: c.notify || null };
 }
 
 function withTimeout(p, ms, text) {

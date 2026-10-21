@@ -5,6 +5,8 @@ import AgentCard from './AgentCard.jsx';
 import Celebration from './Celebration.jsx';
 import CategoryManager from './CategoryManager.jsx';
 import WhatsAppPanel from './WhatsAppPanel.jsx';
+import ChatsView from './ChatsView.jsx';
+import OutreachView from './OutreachView.jsx';
 import Composer from './Composer.jsx';
 import { currentTheme, setTheme } from './theme.js';
 import Plans, { statusLine } from './Plans.jsx';
@@ -309,6 +311,23 @@ export default function App({ onLock }) {
   const [sub, setSub] = useState(null);
   const [plansOpen, setPlansOpen] = useState(null); // null | { notice }
   const [changePin, setChangePin] = useState(false);
+  // Leads | Chats | Outreach. Views stay mounted once opened, so switching
+  // keeps each one's place (scroll, open chat, unsaved templates).
+  const [workspace, setWorkspaceState] = useState(() => {
+    try {
+      return ['leads', 'chats', 'outreach'].includes(localStorage.getItem('workspace')) ? localStorage.getItem('workspace') : 'leads';
+    } catch {
+      return 'leads';
+    }
+  });
+  const [visited, setVisited] = useState(() => new Set([workspace]));
+  const setWorkspace = (w) => {
+    setWorkspaceState(w);
+    setVisited((v) => (v.has(w) ? v : new Set([...v, w])));
+    try {
+      localStorage.setItem('workspace', w);
+    } catch {}
+  };
 
   const [today, setToday] = useState(localDate());
   const [view, setView] = useState('today');
@@ -514,6 +533,17 @@ export default function App({ onLock }) {
           </svg>
           <h1 className="brand-name">Lead Finder</h1>
         </div>
+        <nav className="segmented workspace-switch" aria-label="Workspace">
+          {[
+            ['leads', 'Leads', 'inbox'],
+            ['chats', 'Chats', 'chat'],
+            ['outreach', 'Outreach', 'send'],
+          ].map(([id, label, icon]) => (
+            <button key={id} type="button" className={workspace === id ? 'on' : ''} aria-pressed={workspace === id} onClick={() => setWorkspace(id)}>
+              <Icon name={icon} size={14} /> {label}
+            </button>
+          ))}
+        </nav>
         <div className={`conn ${status.profile && status.phase !== 'connection' ? 'on' : ''}`} title="Chrome profile used for searching">
           <span className="conn-dot" />
           {status.profile ? <span>Chrome · {status.profile}</span> : <span>Chrome not connected</span>}
@@ -532,7 +562,9 @@ export default function App({ onLock }) {
         <LockMenu onLock={onLock} onChangePin={() => setChangePin(true)} />
       </header>
 
-      <main className="content">
+      {visited.has('chats') && <ChatsView wa={wa} notify={notify} hidden={workspace !== 'chats'} />}
+      {visited.has('outreach') && <OutreachView wa={wa} notify={notify} hidden={workspace !== 'outreach'} />}
+      <main className="content" hidden={workspace !== 'leads'}>
         <section className="panel search-panel">
           <form className="search" onSubmit={start}>
             <div className="field grow">
