@@ -1,6 +1,6 @@
 {
   "name": "lead-finder",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Finds Google Maps businesses with or without websites using your own Chrome.",
   "main": "src/main/main.js",
   "scripts": {
@@ -28,6 +28,7 @@
     "@fontsource/ibm-plex-mono": "^5.3.0",
     "@fontsource/ibm-plex-sans": "^5.3.0",
     "baileys": "^7.0.0-rc14",
+    "electron-updater": "^6.8.9",
     "libphonenumber-js": "^1.13.15",
     "playwright-core": "^1.64.1",
     "qrcode": "^1.5.4",
@@ -73,7 +74,8 @@
     },
     "mac": {
       "target": [
-        "dmg"
+        "dmg",
+        "zip"
       ],
       "category": "public.app-category.business",
       "icon": "build/icon.png"
@@ -89,7 +91,15 @@
     "artifactName": "Lead-Finder-${version}-${os}-${arch}.${ext}",
     "deb": {
       "artifactName": "lead-finder_${version}_${arch}.${ext}"
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "ourswebsolutions-ux",
+        "repo": "lead-getter",
+        "releaseType": "release"
+      }
+    ]
   },
   "homepage": "https://github.com/ourswebsolutions-ux/lead-getter",
   "repository": {

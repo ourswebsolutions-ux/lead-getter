@@ -8,6 +8,7 @@ import '@fontsource/ibm-plex-mono/latin-500.css';
 import { useEffect, useState } from 'react';
 import App from './App.jsx';
 import LockScreen from './LockScreen.jsx';
+import UpdateBanner from './UpdateBanner.jsx';
 import { initTheme } from './theme.js';
 import './styles.css';
 
@@ -19,14 +20,20 @@ function Root() {
     window.leadFinder.lockState().then(setLock);
   }, []);
   if (!lock) return null;
-  if (!lock.unlocked) return <LockScreen configured={lock.configured} onUnlocked={() => setLock({ configured: true, unlocked: true })} />;
   return (
-    <App
-      onLock={async () => {
-        await window.leadFinder.lockNow();
-        setLock({ configured: true, unlocked: false });
-      }}
-    />
+    <>
+      <UpdateBanner />
+      {!lock.unlocked ? (
+        <LockScreen configured={lock.configured} onUnlocked={() => setLock({ configured: true, unlocked: true })} />
+      ) : (
+        <App
+          onLock={async () => {
+            await window.leadFinder.lockNow();
+            setLock({ configured: true, unlocked: false });
+          }}
+        />
+      )}
+    </>
   );
 }
 

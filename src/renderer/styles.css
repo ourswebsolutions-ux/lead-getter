@@ -889,3 +889,9 @@ html.theme-anim *, html.theme-anim *::before, html.theme-anim *::after {
 .plans-status.reason-trial { color: var(--accent); }
 
 .field-hint { font-size: 12px; margin-top: 2px; }
+
+/* Automatic updates */
+.update-banner { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 60; display: flex; align-items: center; gap: 10px; max-width: min(640px, calc(100vw - 32px)); padding: 8px 10px 8px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--text); font-size: 13px; box-shadow: 0 6px 24px rgb(0 0 0 / 12%); }
+.update-banner .btn { padding: 4px 10px; font-size: 12px; }
+.update-error { border-color: color-mix(in srgb, var(--danger) 40%, var(--line)); }
+.update-restarting, .update-ready, .update-waiting { border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }

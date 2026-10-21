@@ -11,7 +11,7 @@ const { execFileSync } = require('node:child_process');
 const path = require('node:path');
 
 const root = path.join(__dirname, '..');
-const TARGETS = { linux: ['--linux', 'deb', 'AppImage'], win32: ['--win', 'nsis'], darwin: ['--mac', 'dmg'] };
+const TARGETS = { linux: ['--linux', 'deb', 'AppImage'], win32: ['--win', 'nsis'], darwin: ['--mac', 'dmg', 'zip'] };
 
 const targets = TARGETS[process.platform];
 if (!targets) {

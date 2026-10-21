@@ -1,0 +1,140 @@
+# End-to-end automatic update test against real, published GitHub Releases.
+# Installs the published release `from`, starts it with no user input, and
+# waits until the app has updated itself to `to` (the latest release) and is
+# running that version, with the user's data folder intact.
+#
+# Run after publishing `to`:  gh workflow run update-test.yml -f from=1.1.0 -f to=1.1.1
+
+name: Update test
+
+on:
+  workflow_dispatch:
+    inputs:
+      from:
+        description: Installed (older) version, e.g. 1.1.0
+        required: true
+      to:
+        description: Latest published version it must update to, e.g. 1.1.1
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  FROM: ${{ inputs.from }}
+  TO: ${{ inputs.to }}
+
+jobs:
+  windows-nsis:
+    runs-on: windows-latest
+    steps:
+      - name: Install the older release
+        shell: pwsh
+        run: |
+          gh release download "v$env:FROM" -R $env:GITHUB_REPOSITORY -p "Lead-Finder-Setup-$env:FROM.exe" -D old
+          Start-Process (Get-ChildItem old\*.exe).FullName -ArgumentList '/S' -Wait
+          $exe = Get-ChildItem "$env:LOCALAPPDATA\Programs" -Recurse -Filter 'Lead Finder.exe' | Select-Object -First 1
+          "EXE=$($exe.FullName)" >> $env:GITHUB_ENV
+          "Installed: $((Get-Item $exe.FullName).VersionInfo.ProductVersion)"
+
+      - name: Start it and wait for the automatic update
+        shell: pwsh
+        run: |
+          $log = "$env:RUNNER_TEMP\update.log"
+          $env:LEAD_FINDER_UPDATE_LOG = $log
+          Start-Process $env:EXE
+          $data = "$env:APPDATA\Lead Finder"
+          $deadline = (Get-Date).AddMinutes(4)
+          while (-not (Test-Path "$data\leads.db") -and (Get-Date) -lt $deadline) { Start-Sleep 2 }
+          $created = (Get-Item "$data\leads.db").CreationTimeUtc
+          $want = '"event":"started","version":"' + $env:TO + '"'
+          $deadline = (Get-Date).AddMinutes(12)
+          while ((Get-Date) -lt $deadline) {
+            if ((Test-Path $log) -and (Select-String -Path $log -SimpleMatch $want -Quiet)) { break }
+            Start-Sleep 5
+          }
+          Get-Content $log
+          if (-not (Select-String -Path $log -SimpleMatch $want -Quiet)) { throw "the app did not restart as $env:TO" }
+          $now = (Get-Item $env:EXE).VersionInfo.ProductVersion
+          "Installed now: $now"
+          if (-not $now.StartsWith($env:TO)) { throw "installed version is $now" }
+          if ((Get-Item "$data\leads.db").CreationTimeUtc -ne $created) { throw 'the lead database was recreated' }
+          'User data kept: leads.db unchanged since before the update'
+          Get-Process 'Lead Finder' -ErrorAction SilentlyContinue | Stop-Process -Force
+
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        format: [appimage, deb]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prepare a desktop session
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb libfuse2t64 >/dev/null
+          # Ubuntu 24.04 blocks the Chromium sandbox's user namespaces; an
+          # updated app relaunches itself without extra flags.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # Started separately so it outlives the first app process.
+          Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+
+      - name: Install the older release
+        run: |
+          mkdir -p ~/Applications
+          if [ "${{ matrix.format }}" = appimage ]; then
+            gh release download "v$FROM" -R $GITHUB_REPOSITORY -p "Lead-Finder-$FROM-linux-x86_64.AppImage" -D ~/Applications
+            chmod +x ~/Applications/*.AppImage
+            echo "APP=$(ls ~/Applications/*.AppImage)" >> $GITHUB_ENV
+          else
+            gh release download "v$FROM" -R $GITHUB_REPOSITORY -p "lead-finder_${FROM}_amd64.deb" -D old
+            sudo apt-get install -y -qq ./old/*.deb >/dev/null
+            dpkg -s lead-finder | grep Version
+            echo "APP=/opt/Lead Finder/lead-finder" >> $GITHUB_ENV
+            # Desktops ask for the password through pkexec; this runner has no
+            # polkit agent, so let the updater use (passwordless) sudo instead.
+            sudo rm -f /usr/bin/pkexec
+          fi
+
+      - name: Start it and wait for the automatic update
+        run: |
+          export LEAD_FINDER_UPDATE_LOG="$RUNNER_TEMP/update.log"
+          "$APP" >"$RUNNER_TEMP/app.out" 2>&1 &
+          data="$HOME/.config/Lead Finder"
+          for i in $(seq 120); do [ -f "$data/leads.db" ] && break; sleep 2; done
+          inode=$(stat -c %i "$data/leads.db")
+          want="\"event\":\"started\",\"version\":\"$TO\""
+          for i in $(seq 150); do grep -qF "$want" "$LEAD_FINDER_UPDATE_LOG" 2>/dev/null && break; sleep 5; done
+          cat "$LEAD_FINDER_UPDATE_LOG"
+          grep -qF "$want" "$LEAD_FINDER_UPDATE_LOG" || { tail -50 "$RUNNER_TEMP/app.out"; echo "the app did not restart as $TO"; exit 1; }
+          if [ "${{ matrix.format }}" = appimage ]; then
+            ls -la ~/Applications
+            test -x ~/Applications/Lead-Finder-$TO-linux-x86_64.AppImage
+            test ! -e ~/Applications/Lead-Finder-$FROM-linux-x86_64.AppImage
+          else
+            dpkg -s lead-finder | grep "Version: $TO"
+          fi
+          [ "$(stat -c %i "$data/leads.db")" = "$inode" ] || { echo "the lead database was recreated"; exit 1; }
+          echo "User data kept: leads.db unchanged since before the update"
+          pkill -f "Lead Finder|lead-finder|Lead-Finder" || true
+
+  macos-notice:
+    runs-on: macos-latest
+    steps:
+      - name: Install the older release
+        run: |
+          gh release download "v$FROM" -R $GITHUB_REPOSITORY -p "Lead-Finder-$FROM-mac-arm64.dmg" -D old
+          hdiutil attach old/*.dmg -nobrowse -mountpoint /tmp/lf
+          cp -R "/tmp/lf/Lead Finder.app" ~/Applications/ 2>/dev/null || { mkdir -p ~/Applications && cp -R "/tmp/lf/Lead Finder.app" ~/Applications/; }
+          hdiutil detach /tmp/lf
+
+      - name: Start it and wait for the update notice
+        run: |
+          export LEAD_FINDER_UPDATE_LOG="$RUNNER_TEMP/update.log"
+          ~/Applications/"Lead Finder.app"/Contents/MacOS/"Lead Finder" >"$RUNNER_TEMP/app.out" 2>&1 &
+          for i in $(seq 60); do grep -qF "\"available\":\"$TO\"" "$LEAD_FINDER_UPDATE_LOG" 2>/dev/null && break; sleep 5; done
+          cat "$LEAD_FINDER_UPDATE_LOG"
+          grep -q "\"event\":\"available\".*\"available\":\"$TO\"" "$LEAD_FINDER_UPDATE_LOG" || { echo "no update notice for $TO"; exit 1; }
+          pkill -f "Lead Finder" || true

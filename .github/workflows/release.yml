@@ -49,7 +49,7 @@ jobs:
 
       - name: Unit tests (no network)
         shell: bash
-        run: node --test test/axora.test.js test/subscription.test.js test/applock.test.js test/categories.test.js test/csv.test.js test/db.test.js test/phone.test.js test/session.test.js test/website.test.js test/whatsapp.test.js test/chrome.test.js test/maps-dom.test.js
+        run: node --test test/updater.test.js test/axora.test.js test/subscription.test.js test/applock.test.js test/categories.test.js test/csv.test.js test/db.test.js test/phone.test.js test/session.test.js test/website.test.js test/whatsapp.test.js test/chrome.test.js test/maps-dom.test.js
 
       - name: Build installers
         run: npm run release -- ${{ matrix.args }}
@@ -98,11 +98,16 @@ jobs:
         with:
           name: installers-${{ runner.os }}
           if-no-files-found: error
+          # Installers plus what installed apps update from: latest*.yml
+          # (version + sha512), .blockmap (delta downloads), the macOS .zip.
           path: |
             release/*.deb
             release/*.AppImage
             release/*.exe
             release/*.dmg
+            release/*.zip
+            release/*.blockmap
+            release/latest*.yml
 
   publish:
     needs: build
@@ -119,6 +124,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           ls -la dist-installers
+          for f in latest.yml latest-linux.yml latest-mac.yml; do test -f "dist-installers/$f" || { echo "missing update metadata $f"; exit 1; }; done
           cat > notes.md <<NOTES
           ## Lead Finder ${GITHUB_REF_NAME}
 
@@ -132,5 +138,9 @@ jobs:
           Requires Google Chrome. The installers are not code-signed yet:
           Windows shows a SmartScreen notice (More info → Run anyway); on macOS
           right-click the app → Open the first time.
+
+          Installed copies update themselves: Windows and the AppImage install
+          the update and restart automatically, the .deb asks for the
+          administrator password, macOS shows a download link.
           NOTES
           gh release create "$GITHUB_REF_NAME" dist-installers/* --title "Lead Finder ${GITHUB_REF_NAME}" --notes-file notes.md --generate-notes --verify-tag

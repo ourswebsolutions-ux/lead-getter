@@ -10,6 +10,7 @@ const { ChromeConnection, ChromeError, ConnectCancelled } = require('../browser/
 const { SearchSession, WEBSITE_FILTERS } = require('../browser/search-session');
 const { AppLock } = require('./applock');
 const { LicenseClient, readScreenshot } = require('./license');
+const { Updater, fileLog } = require('./updater');
 
 const DEV_URL = process.env.VITE_DEV_SERVER_URL || '';
 const RENDERER_FILE = path.join(__dirname, '..', '..', 'dist', 'renderer', 'index.html');
@@ -18,6 +19,7 @@ const RENDERER_FILE = path.join(__dirname, '..', '..', 'dist', 'renderer', 'inde
 if (process.env.LEAD_FINDER_USER_DATA) app.setPath('userData', process.env.LEAD_FINDER_USER_DATA);
 
 let win = null;
+let updater = null;
 let store = null;
 let search = null; // { controller, promise }
 const chrome = new ChromeConnection({
@@ -89,7 +91,7 @@ function trustedSender(event) {
 // Until the PIN is entered, only the lock screen's own calls are answered;
 // everything else is refused here in the main process, so reloading or
 // manipulating the window cannot reach leads or features.
-const LOCK_FREE = new Set(['lock:state', 'lock:setup', 'lock:unlock']);
+const LOCK_FREE = new Set(['lock:state', 'lock:setup', 'lock:unlock', 'update:status', 'update:openDownload']);
 
 function handle(channel, fn) {
   ipcMain.handle(channel, async (event, ...args) => {
@@ -369,6 +371,7 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
       }
     } finally {
       search = null;
+      updater?.idle(); // an update waiting for the search can install now
       sendSummary({ keyword, category: category.name, startedAt, stats });
       try {
         store.setState('lastSearch', { keyword, category: category.name, state: lastStatus.state, endedAt: new Date().toISOString() });
@@ -760,7 +763,12 @@ app.whenReady().then(() => {
   handle('lead:open', (url) => openListing(url));
 
   createWindow();
-  if (process.env.LEAD_FINDER_SMOKE_TEST) smokeTest(process.env.LEAD_FINDER_SMOKE_TEST);
+  if (process.env.LEAD_FINDER_SMOKE_TEST) return smokeTest(process.env.LEAD_FINDER_SMOKE_TEST);
+
+  updater = new Updater({ app, shell, isBusy: () => Boolean(search), send: (st) => send('update:status', st), log: fileLog(process.env.LEAD_FINDER_UPDATE_LOG) });
+  handle('update:status', () => updater.status);
+  handle('update:openDownload', () => updater.openDownload());
+  if (process.env.LEAD_FINDER_NO_UPDATES !== '1') updater.start();
 });
 
 // Release check (CI): the installed app must start on its own, show its UI

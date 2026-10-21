@@ -51,4 +51,8 @@ contextBridge.exposeInMainWorld('leadFinder', {
   onStatus: (cb) => subscribe('search:status', cb),
   onLead: (cb) => subscribe('leads:added', cb),
   onSummary: (cb) => subscribe('search:summary', cb),
+  // Automatic updates
+  updateStatus: () => ipcRenderer.invoke('update:status'),
+  openUpdateDownload: () => ipcRenderer.invoke('update:openDownload'),
+  onUpdate: (cb) => subscribe('update:status', cb),
 });
