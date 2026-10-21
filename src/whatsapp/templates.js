@@ -10,7 +10,7 @@ const PLACEHOLDERS = ['name', 'business'];
 const DEFAULT_TEMPLATES = [
   { text: 'Assalam-o-Alaikum {name} bhai.', fallback: 'Assalam-o-Alaikum.' },
   { text: 'Kaise hain aap? Umeed hai aap khairiyat se honge.', fallback: '' },
-  { text: 'Kya aap real estate ka kaam karte hain, ya kisi aur business se related hain?', fallback: '' },
+  { text: 'Kya aap {business} ke naam se real estate ka kaam karte hain, ya kisi aur business se related hain?', fallback: 'Kya aap real estate ka kaam karte hain, ya kisi aur business se related hain?' },
 ];
 
 // Words that describe a business rather than name it.
@@ -49,6 +49,16 @@ function extractName(raw) {
   return null;
 }
 
+// The business name as listed on Google Maps, without the extras listings
+// often carry ("Zahid Properties - Best Agency in DHA", "... | Lahore").
+// null when nothing usable is left (no Latin letters, or too long).
+function cleanBusiness(raw) {
+  if (typeof raw !== 'string') return null;
+  const name = raw.split(/\s+[-–—|:•]\s+|\s*\||\s*\(|,/)[0].replace(/\s+/g, ' ').trim();
+  if (!name || name.length > 40 || !/[A-Za-z]{2}/.test(name)) return null;
+  return name;
+}
+
 // The best name for a contact, with where it came from.
 // sources: { contactName (saved in the phone), pushName (their own WhatsApp
 // name), businessName (Google Maps) }.
@@ -81,8 +91,11 @@ function validateTemplates(list) {
     for (const p of [...usedPlaceholders(text), ...usedPlaceholders(fallback)]) {
       if (!PLACEHOLDERS.includes(p)) errors.push(`${n} uses an unknown placeholder {${p}}. Use {name} or {business}.`);
     }
-    if (usedPlaceholders(text).includes('name') && !fallback) errors.push(`${n} uses {name}, so it needs a version for contacts without a known name.`);
-    if (usedPlaceholders(fallback).includes('name')) errors.push(`${n}: the version without a name can't use {name}.`);
+    for (const p of PLACEHOLDERS) {
+      const what = p === 'name' ? 'a known name' : 'a business name';
+      if (usedPlaceholders(text).includes(p) && !fallback) errors.push(`${n} uses {${p}}, so it needs a version for contacts without ${what}.`);
+      if (usedPlaceholders(fallback).includes(p)) errors.push(`${n}: the second version is used when {${p}} is missing, so it can't use {${p}}.`);
+    }
   });
   return errors;
 }
@@ -106,4 +119,4 @@ function isOptOut(text) {
   return OPT_OUT.test(String(text || ''));
 }
 
-module.exports = { DEFAULT_TEMPLATES, extractName, pickName, render, validateTemplates, usedPlaceholders, isOptOut };
+module.exports = { DEFAULT_TEMPLATES, extractName, cleanBusiness, pickName, render, validateTemplates, usedPlaceholders, isOptOut };

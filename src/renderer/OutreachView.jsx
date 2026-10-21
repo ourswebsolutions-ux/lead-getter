@@ -385,14 +385,14 @@ export default function OutreachView({ wa, notify, hidden }) {
             </label>
           </div>
           <p className="muted small">
-            One message per send window, in this order. Use <code>{'{name}'}</code> and <code>{'{business}'}</code>; the second box is used when the name isn’t known.
+            One message per send window, in this order. Use <code>{'{name}'}</code> and <code>{'{business}'}</code> (the business name from Google Maps); the second box is used when that isn’t known.
           </p>
           <fieldset disabled={running}>
             {draft.templates.map((t, i) => (
               <div key={i} className="template">
                 <span className="field-label">Message {i + 1}</span>
                 <textarea rows={2} dir="auto" value={t.text} onChange={(e) => editTemplate(i, 'text', e.target.value)} aria-label={`Message ${i + 1}`} />
-                <textarea rows={1} dir="auto" value={t.fallback} placeholder="Without a name (optional unless {name} is used)" onChange={(e) => editTemplate(i, 'fallback', e.target.value)} aria-label={`Message ${i + 1} without a name`} />
+                <textarea rows={1} dir="auto" value={t.fallback} placeholder="Version without {name} / {business} (needed when they are used)" onChange={(e) => editTemplate(i, 'fallback', e.target.value)} aria-label={`Message ${i + 1} without a name`} />
                 {preview && (
                   <p className="template-preview" dir="auto">
                     <span className="muted small">Preview:</span> {preview.messages[i]}

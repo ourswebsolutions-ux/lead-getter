@@ -15,7 +15,7 @@
 //     rules on automated messages. Test mode sends nothing.
 
 const { EventEmitter } = require('node:events');
-const { DEFAULT_TEMPLATES, render, validateTemplates, isOptOut } = require('./templates');
+const { DEFAULT_TEMPLATES, render, validateTemplates, isOptOut, cleanBusiness } = require('./templates');
 
 const LIMITS = { intervalMin: 45, intervalMax: 60, capMin: 10, capMax: 15 };
 const DEFAULT_CONFIG = { templates: DEFAULT_TEMPLATES, intervalMin: 45, intervalMax: 60, dailyCap: 10, quietStart: 21, quietEnd: 9, test: true };
@@ -387,9 +387,9 @@ class Outreach extends EventEmitter {
 
   // Template values: the name chosen when the lead was added (and editable
   // by the user; null = use the version without a name), and the business
-  // name from Google Maps.
+  // name from Google Maps (cleaned; null = use the version without it).
   values(contact) {
-    return { name: contact.name ?? null, business: this.details(contact).business ?? null };
+    return { name: contact.name ?? null, business: cleanBusiness(this.details(contact).business) };
   }
 
   preview(contact) {

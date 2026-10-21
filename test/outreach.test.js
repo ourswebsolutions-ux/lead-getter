@@ -10,7 +10,7 @@ const path = require('node:path');
 const { LeadStore } = require('../src/database/db');
 const { OutreachStore } = require('../src/database/wa-store');
 const { Outreach, timeZoneOf, inQuietHours, isRestriction } = require('../src/whatsapp/outreach');
-const { extractName, pickName, render, validateTemplates, isOptOut, DEFAULT_TEMPLATES } = require('../src/whatsapp/templates');
+const { extractName, cleanBusiness, pickName, render, validateTemplates, isOptOut, DEFAULT_TEMPLATES } = require('../src/whatsapp/templates');
 
 const MIN = 60_000;
 // 10:00 in Pakistan (UTC+5), a Wednesday.
@@ -80,7 +80,14 @@ test('templates: placeholders, fallbacks, validation, Urdu and Roman Urdu', () =
   assert.equal(render(greet, { name: 'Zahid' }), 'Assalam-o-Alaikum Zahid bhai.');
   assert.equal(render(greet, { name: null }), 'Assalam-o-Alaikum.');
   assert.equal(render(intro, {}), 'Kaise hain aap? Umeed hai aap khairiyat se honge.');
-  assert.equal(render(ask, {}), 'Kya aap real estate ka kaam karte hain, ya kisi aur business se related hain?');
+  assert.equal(render(ask, { business: 'Zahid Properties' }), 'Kya aap Zahid Properties ke naam se real estate ka kaam karte hain, ya kisi aur business se related hain?');
+  assert.equal(render(ask, {}), 'Kya aap real estate ka kaam karte hain, ya kisi aur business se related hain?', 'no business name: the version without it');
+  assert.equal(cleanBusiness('Zahid Properties - Best Real Estate Agency in DHA'), 'Zahid Properties');
+  assert.equal(cleanBusiness('Al Noor Estate | Bahria Town'), 'Al Noor Estate');
+  assert.equal(cleanBusiness('Khan Associates (Pvt) Ltd'), 'Khan Associates');
+  assert.equal(cleanBusiness('خان اسٹیٹ ایجنسی'), null, 'not put into Roman Urdu text');
+  assert.equal(cleanBusiness('A'.repeat(41)), null);
+  assert.match(validateTemplates([greet, intro, { text: 'Kya {business}?', fallback: '' }]).join(' '), /needs a version for contacts without a business name/);
   assert.equal(render({ text: 'السلام علیکم {name} بھائی', fallback: 'السلام علیکم' }, { name: null }), 'السلام علیکم');
   assert.equal(render({ text: 'Hello {business} team', fallback: '' }, {}), 'Hello team');
   assert.deepEqual(validateTemplates(DEFAULT_TEMPLATES), []);
@@ -110,6 +117,7 @@ test('three stages, one message per 45-60 minutes, never back to back', async ()
   assert.equal(h.sent[1].text, 'Kaise hain aap? Umeed hai aap khairiyat se honge.');
   await run(h, 60 * MIN);
   assert.equal(h.sent.length, 3);
+  assert.equal(h.sent[2].text, 'Kya aap Name0 Real Estate ke naam se real estate ka kaam karte hain, ya kisi aur business se related hain?', 'message 3 names the business');
   assert.ok(h.sent[2].at - h.sent[1].at >= 45 * MIN);
   await run(h, 3 * 60 * MIN);
   assert.equal(h.sent.length, 3, 'three messages, then nothing');

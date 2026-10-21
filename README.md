@@ -245,8 +245,9 @@ What WhatsApp makes available, and what it doesn't:
 
 > WhatsApp's terms don't allow automated messaging from unofficial apps, and numbers that send unexpected messages are often restricted or banned. Live sending asks you to accept this risk once. A **Test run** goes through the whole schedule without sending anything.
 
-- **Messages:** three editable messages, in Urdu or Roman Urdu. The defaults are a greeting, *Kaise hain aap?* and a question about their business.
-  - Placeholders: `{name}` and `{business}`. Each message has a version used when the name isn't known.
+- **Messages:** three editable messages, in Urdu or Roman Urdu. The defaults are a greeting, *Kaise hain aap?* and a question about their business that names it.
+  - Placeholders: `{name}` and `{business}`. Each message that uses one has a second version for when it isn't known.
+  - Message 3 names the business by default: *Kya aap {business} ke naam se real estate ka kaam karte hain…?* `{business}` is the name on Google Maps without extras such as *"- Best Agency in DHA"* or *"| Lahore"*. Without a usable name, the plain version is sent.
   - The name is the contact's own WhatsApp name, or one word from the business name, such as *Zahid Properties* → *Zahid*. It's used only when the word looks like a name (not *Real*, *Estate*, *Properties*, a city or a number). Otherwise the no-name version is used.
   - Names are never invented. You can edit or clear each contact's name before they're messaged. Previews show the exact text per contact.
 - **Schedule:** one campaign message per **45–60 minutes** (a random time within your range), and at most **10–15 unique contacts per day** (10 by default; every message to a contact that day counts once).

@@ -132,6 +132,7 @@ test('WhatsApp chats and outreach: history, live messages, campaign, replies, re
   await win.waitForFunction(() => document.querySelector('.template-preview')?.textContent.includes('Assalam-o-Alaikum.'));
   await out.getByLabel('Preview for contact').selectOption('+923001234567');
   await win.waitForFunction(() => document.querySelector('.template-preview')?.textContent.includes('Assalam-o-Alaikum Zahid bhai.'));
+  await win.waitForFunction(() => document.querySelectorAll('.template-preview')[2]?.textContent.includes('Kya aap Zahid Properties ke naam se real estate'));
   // Limits are enforced.
   await out.locator('.campaign-settings input[type=number]').nth(2).fill('20');
   await out.getByRole('button', { name: 'Save settings' }).click();
