@@ -1,0 +1,16 @@
+{
+  "name": "lead-finder-license-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Subscription applications, email approval and signed licence status for Lead Finder.",
+  "main": "src/index.js",
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "setup": "node scripts/setup.js",
+    "start": "node --env-file=.env src/index.js",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "nodemailer": "^7.0.6"
+  }
+}

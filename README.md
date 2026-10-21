@@ -1,0 +1,215 @@
+# Lead Finder
+
+A desktop app that searches Google Maps in **your own, already-open Google Chrome** and lists businesses that have no website of their own. You watch every step in the visible Chrome window; qualified leads appear in the app as they're found and are saved locally in SQLite.
+
+## Requirements
+
+- Google Chrome **144 or newer**, installed normally (Linux, Windows, or macOS)
+- Node.js 22+ and npm (only for building from source)
+
+## Install and run
+
+```bash
+npm install
+npm run dev          # development: Vite dev server + Electron
+npm start            # build the UI, then run the app
+npm test             # unit tests (mocked pages; uses a throwaway headless Chrome)
+npm run test:e2e     # drives the real Electron app (temporary data): flows, design, themes/agent/background
+npm run dist:linux   # release/Lead Finder-<version>.AppImage
+npm run dist:win     # Windows NSIS installer (build on Windows)
+npm run dist:mac     # macOS dmg (build on macOS)
+```
+
+## Connecting to your Chrome
+
+Lead Finder attaches to the Chrome you already use: same profile, same Google login. It doesn't embed a browser, create or copy a profile, or read cookies.
+
+### One-time setup (normal Chrome profile folder)
+
+Chrome 136+ deliberately ignores debugging flags for its normal profile folder, to protect your cookies from malware ([Chrome announcement](https://developer.chrome.com/blog/remote-debugging-port)). The only way Chrome allows another app to use your real profile is a switch that you turn on yourself. Chrome **remembers** it, so you do this once:
+
+1. Click **Start Search**. If the switch is off, Lead Finder puts `chrome://inspect/#remote-debugging` on your clipboard and tells you what to do. (Chrome refuses `chrome://` addresses sent by other programs, so the app can't open the page for you.)
+2. In Chrome, paste the address into the address bar and turn on **Allow remote debugging for this browser instance**.
+3. Chrome asks whether to allow the connection. Click **Allow**.
+
+Lead Finder waits up to 5 minutes and continues by itself; you don't need to click Start Search again. From then on, Chrome starts its debugging server whenever it starts (it listens on `127.0.0.1:9222` and writes `DevToolsActivePort` in its profile folder), and only the Allow prompt appears, once per Lead Finder session.
+
+### What happens on Start Search
+
+1. **Find Chrome and the profile.** Lead Finder locates the Chrome installation and the running Chrome process, and reads the profile it's using from the process's `--profile-directory`, or else the most recently used open profile in Chrome's `Local State`. You're never asked to pick one. If Chrome isn't running, it's started normally with that profile.
+2. **Connect** through Chrome's endpoint, then verify by opening `chrome://version` in a new tab and reading the profile path. The app reports "connected" only after this real connection succeeds.
+3. **If there's no endpoint:**
+   - **Switch on, but this Chrome was started before it was saved:** Lead Finder offers to **restart Chrome** (you confirm in a dialog). Chrome closes normally, never force-closed, reopens with the same profile, and restores your tabs. Then the app reconnects and starts the search.
+   - **Chrome uses a custom profile folder (`--user-data-dir`):** debugging flags work there, so the same confirmed restart relaunches that folder and profile with debugging enabled.
+   - **Switch never turned on:** the one-time setup above.
+4. **Search:** opens Google Maps, types your keyword exactly as entered, and submits it. If Enter doesn't submit, it presses Maps' Search button. It checks that Maps really searched for *that* keyword; if nothing happened, it retries once through the equivalent search address. A search that never ran is reported as a search error, never as "no results".
+
+If something can't be done, the status shows a **Chrome connection** or **Search** label with the specific reason: Chrome missing or too old, the switch off (with exactly which files and ports were checked), the restart declined, Chrome not closing, Maps not returning results, and so on.
+
+## How a search works
+
+1. Types your keyword into Google Maps' search box in a new tab and runs the search.
+2. Reads the result list, scrolling it step by step (and pressing *See more* / *Load more* when Maps shows them) until Maps reports the end of the list or you press **Stop Search**.
+3. Clicks each listing and reads its public name, phone, address, and website link.
+4. Applies the website rules below, saves the result, and adds qualified leads to the table right away.
+
+Pacing is deliberately slow: a few seconds between listings and a longer break every 25 listings.
+
+### Website rules (conservative)
+
+| Situation | Result |
+|---|---|
+| Maps shows a website link to the business's own domain | Excluded |
+| Maps shows only a Facebook / Instagram / WhatsApp / Linktree / similar link, and the web check finds no own site | **Lead**: "No website (social page only)" |
+| Maps shows no website, and a Google web search for the business finds no matching site | **Lead**: "No website found" |
+| The web search shows a knowledge-panel website, or a result domain that matches the business name | Excluded (website or possible website) |
+| Details didn't fully load, the web check failed or timed out, or it was blocked | Unverified: kept out of the table and re-checked on a later search |
+| Permanently closed | Excluded |
+
+Lead Finder never fetches a business's website itself, so a site that is temporarily down can't make a business look website-less. Directory and listing sites (Zameen, Yelp, OLX, Google listings, and so on) never count as the business's own website. Matching domains to names is a heuristic that errs toward excluding a business.
+
+## Categories, Today and Past leads
+
+- **Category** (next to the keyword): every search is filed under a category, for example keyword `Software House in Lahore`, category `Software House`. Typing shows saved categories as suggestions; click one, or use the arrow keys and Enter, to pick it. New names are saved automatically when the search starts. Capitalisation is normalised (`software house` becomes `Software House`), and names that differ only in case or spacing are treated as the same category. A category is required to start a search.
+- **Today / Past leads:** switch between them with the control at the top of the leads panel.
+- **Today's leads** is the default view: only leads discovered on the computer's current local date. Older leads are hidden, not deleted, and the view rolls over at midnight.
+- **Open Past Leads** shows earlier days: all past dates, one date, or a date range, optionally narrowed to one category. **Back to Today** returns to the default view.
+- **Show category** filters either view by category (with lead counts), including *Uncategorized* for leads saved before categories existed.
+
+### Export
+
+- **Export CSV (n)** exports exactly the leads shown: the current category and/or date, or the date range.
+- **Export all** exports every saved lead.
+
+Columns: `Business Name, Phone, Phone Status, Address, Google Maps URL, Website Status, WhatsApp, Category, Date Discovered`. Files are UTF-8 with a BOM, saved through a native save dialog.
+
+### Delete
+
+- **Delete** on a row, **Delete selected (n)** for checked rows, or **Delete all shown** for everything matching the current filters. Every delete asks for confirmation first, and bulk deletes run in a single transaction.
+- Deleting removes the lead's name and contact details but keeps a minimal marker (the Maps place id), so a later search won't add the same business back. Saved categories and other records aren't affected.
+
+## Phone numbers
+
+Numbers are normalized with [libphonenumber](https://github.com/catamphetamine/libphonenumber-js) using full metadata, so each number is checked against its country's real numbering plan.
+
+- A number written in international form (`+…` or `00…`) keeps its own country code: `+1 212 555 0123` → `+12125550123`.
+- A local number is converted only when the listing's address names its country: `03001234567` on a "…, Pakistan" address → `+923001234567`, and the landline `0673361621` → `+92673361621`. Lead Finder never assumes `+92`.
+- **Unverified:** the country can't be determined, or the number isn't valid in it. The number is shown exactly as found, with an *Unverified* tag.
+- **Invalid:** too short or malformed. Shown struck through and never presented as a phone number.
+- The original text is always kept in the database (`phone_raw`). A later search never replaces a validated number with a worse one. The table and CSV show the same format, and the CSV has a *Phone Status* column.
+
+## WhatsApp (linked by QR code)
+
+Lead Finder can link **your own WhatsApp account** to check whether lead numbers use WhatsApp and to send individual messages. It uses [Baileys](https://github.com/WhiskeySockets/Baileys), the open-source WhatsApp Web library, running inside Lead Finder itself, so there's no third-party server, API key or monthly plan.
+
+> **Read this first.** Baileys is **not an official WhatsApp API**; it works the way WhatsApp Web does. WhatsApp's terms don't allow automated or unofficial clients, and WhatsApp may restrict or ban accounts used this way, especially ones that message many people who don't know them. Use a number you can afford to have restricted, keep volumes low, and only message businesses you have a genuine reason to contact.
+
+### Linking
+
+1. Click the **WhatsApp** button in the header, then **Link WhatsApp**.
+2. On your phone: WhatsApp → **Settings → Linked devices → Link a device**, then scan the QR code. The code refreshes automatically; if it runs out, click **Show a new QR code**.
+3. The header shows **WhatsApp connected**. The link is remembered and reconnects automatically when Lead Finder starts.
+
+- **Disconnect:** closes the connection and keeps the link.
+- **Unlink device:** logs this device out of WhatsApp and deletes the session from this computer. Your leads and check results are kept.
+- **Connection drops:** Lead Finder retries 5 times, spaced from 2 s to 60 s. If another WhatsApp Web session takes over, or the phone unlinks the device, it stops and says so rather than fighting for the session.
+
+### Automatic checks
+
+While WhatsApp is connected, every saved lead with a **validated international number** is checked in the background, one number every 4 seconds. The checks never slow down a Maps search, and new leads are queued as they're found.
+
+| Status | Shown as | Meaning |
+|---|---|---|
+| Available | **green number** + **Message** button | WhatsApp positively confirmed the number has an account |
+| Unavailable | normal colour, "No WhatsApp" | WhatsApp answered and the number isn't on WhatsApp |
+| Check failed | normal colour, "Check failed" tag (hover for the reason) | No reliable answer (timeout, connection problem). Retried automatically after an hour, or click **Check again** |
+| Not checked | normal colour | Not checked yet, or WhatsApp isn't connected |
+
+Each number is checked **separately**. Baileys' lookup silently drops numbers that aren't on WhatsApp, so a batched check couldn't tell "not on WhatsApp" from "no answer". A missing answer is only counted as *Unavailable* when the query itself succeeded; anything else is *Check failed*, never green. Results are saved in SQLite (`whatsapp_checks`) and not repeated. Marks made with the earlier manual flow aren't treated as confirmed: they show as *Not checked* and are re-checked automatically. The CSV *WhatsApp* column uses the same four statuses.
+
+### Sending a message
+
+Click a **green** number or its **Message** button. The composer shows the lead, the number, and when you last messaged it. Write your message and click **Send**.
+
+- Nothing is ever sent automatically, and there's no bulk sending: one message, one lead, one click.
+- The main process checks again before sending that the lead exists, the number is confirmed on WhatsApp, WhatsApp is connected, and the text is 1–4000 characters. It also enforces at least 8 seconds between messages.
+- "Sent" appears only when WhatsApp returns a message ID; otherwise the composer shows WhatsApp's error and keeps your text. Every attempt is recorded in `whatsapp_messages` (lead, number, text, WhatsApp message ID, result).
+
+### Security
+
+- **Session encryption:** the WhatsApp session (keys and credentials) is stored in `whatsapp-session/` inside the app's data folder. Every file is encrypted with the OS keychain (Electron `safeStorage`: Keychain on macOS, DPAPI on Windows, GNOME Keyring or KWallet on Linux), written atomically, and readable only by your user account. Without a real keychain, linking is disabled rather than storing the session weakly.
+- **Kept in the main process:** the session never reaches the app's window. The window only receives the connection state, the QR image while linking, and the linked number.
+- **No logging:** Baileys runs with a silent logger, so message content and keys aren't written anywhere.
+
+## Chrome closing during a search
+
+If Chrome, or Lead Finder's tab, closes while a search is running, the search pauses and Lead Finder reopens Chrome with the **same profile folder and profile**. It makes up to 3 attempts, after 5 s, 15 s and 30 s, and you can click Stop at any time. Then it reconnects and continues the same keyword and category, skipping every business already processed, so nothing is duplicated.
+
+- With the normal Chrome folder, Chrome may ask you to **Allow** the new connection. Lead Finder says so and continues as soon as you do.
+- If Chrome reopens with a **different profile**, Lead Finder stops rather than switch accounts.
+- If Lead Finder itself closes mid-search, the next launch offers **Resume search** for that keyword and category.
+
+## Interface
+
+- **Light and dark mode:** use the sun/moon button in the header. Your choice is remembered; until you pick one, Lead Finder follows the system setting. Colours cross-fade when switching, and the WhatsApp green is tuned for each theme (at least 4.5:1 contrast).
+- **Agent card:** while a search runs, a small card in the bottom left shows what the agent is doing: *online → Initializing Chrome connection → now working → Searching for potential clients → Analyzing business listings → Finding businesses without websites*. Each line appears only after its real event; "now working" only after Chrome is actually connected.
+- **Completion card:** when a search finishes or you stop it, a card shows the real numbers. *New leads* is counted in the database (businesses that first became leads during this search), alongside *Listings processed* and *Already saved*. A short confetti burst plays only when new leads were found. Failed searches show their error instead, never a success card.
+- **Background:** a slow ambient glow (GPU-only CSS) and faint connected nodes along the window edges (Canvas 2D). It runs at 24 fps during a search and 12 fps when idle, pauses when the window is hidden or unfocused, never takes mouse input, and is static under reduced motion. Measured renderer CPU: about 1.3% idle and 2% while searching.
+- **Manage categories:** the pencil button next to the category filter renames or deletes saved categories. Renaming onto an existing name offers to **merge** the two. Deleting a category keeps its leads as *Uncategorized*. Leads are never deleted by category changes.
+- **Reduced motion:** with the system's reduce-motion setting on, animations, confetti and the moving background are switched off.
+
+## CAPTCHAs, limits, and errors
+
+- If Google shows a CAPTCHA, an "unusual traffic" page, or a consent page, the search **pauses** and keeps its place. Lead Finder never solves or gets around it. Each recovery step is used **at most once per search**, so a persistent block never becomes a cycle of new tabs or restarts:
+  1. After 45 s, a **fresh tab in the same Chrome session** reloads the exact page that was blocked. If it isn't blocked, the search continues there.
+  2. After 2 min, if Chrome can be restarted with your profile, a **confirmed graceful restart**, then reconnect and continue.
+  3. Otherwise it waits for **you** to solve it in Chrome, then resumes after a cool-down at half speed. Collected leads are kept and nothing is duplicated.
+- Network loss: limited retries (5 s, 15 s, 30 s), then the search stops.
+- Chrome closed, or Lead Finder's tab closed: the search stops with a **Chrome connection** message.
+- After each listing, Lead Finder goes back to the result list with Maps' own Back button, so scrolling continues through all results until Maps shows "You've reached the end of the list".
+- Every lead is saved the moment it's found, so a crash or a stop loses nothing.
+
+## Data
+
+- Database: `leads.db` in the app's standard user-data folder (`~/.config/Lead Finder` on Linux, `%APPDATA%\Lead Finder` on Windows, `~/Library/Application Support/Lead Finder` on macOS).
+- Table `businesses` is keyed by the Google Maps place id, so a business is never stored twice. Every checked listing is recorded so it isn't revisited. Phone and address are kept **only for qualified leads**. A later search fills in missing fields but never blanks existing ones, and a failed re-check never demotes a verified lead. Each lead has `category_id` (pointing to `categories`) and `discovered_date`, the local calendar date. A lead keeps the category and date from when it was first found.
+- Phone columns: `phone` (E.164 when validated, else as found), `phone_raw` (original), `phone_status` (`valid` / `unverified` / `invalid`), `phone_country`. Table `whatsapp_checks` holds the per-number result you recorded, and `app_state` holds the last search, for resuming after a crash.
+- Table `categories` stores each category once, with a normalised key that ignores case and spacing.
+- Schema upgrades are versioned (`PRAGMA user_version`, currently 2) and each runs once in a transaction. Version 2 converts stored phone numbers with the address's country and keeps the originals. Upgrading from the first version keeps every existing lead, computes its date from its recorded discovery time, and leaves its category empty (*Uncategorized*), because no category was ever recorded for it.
+- Nothing is uploaded anywhere. Lead Finder doesn't read cookies or passwords.
+
+## Google Maps terms: read this
+
+The [Google Maps Terms of Service](https://www.google.com/help/terms_maps/), section 2, say you may not "copy the content" (2.2) or "mass download or create bulk feeds of the content" (2.3) without permission. Automatically collecting listing details into a database conflicts with those terms. Lead Finder is **not** verified as compliant. You use it at your own risk and are responsible for how you use it and the data it collects. It doesn't bypass CAPTCHAs, rate limits, or sign-in, and it keeps a slow, single-user pace. The browser layer (`src/browser/maps.js`) is separate from the UI and storage, so you can replace it with an authorized data source without changing the app.
+
+## Project layout
+
+```
+src/main/       Electron main process: window, validated IPC, search lifecycle
+src/preload/    Restricted bridge (window.leadFinder)
+src/renderer/   React UI (Vite)
+src/browser/    chrome.js (discovery + CDP attach), maps.js (Maps page ops),
+                website.js (qualification rules), web-check.js, search-session.js
+src/database/   SQLite store (node:sqlite, built into Electron)
+src/export/     CSV generation
+test/           Unit tests, Electron E2E test, real-Chrome integration script
+```
+
+Security: context isolation on, Node integration off, sandboxed renderer, strict CSP in builds, IPC accepted only from the app's own page, navigation and new windows blocked, and only Google Maps URLs can be opened externally.
+
+## Real-Chrome integration tests
+
+Automatic restart path, using its own temporary profile folder. A Chrome window opens; your own Chrome isn't touched. Optionally it also runs a short real Maps search:
+
+```bash
+node test/integration/restart-flow.js                       # restart + reconnect + tab restore
+node test/integration/restart-flow.js "Real Estate Lahore" 5
+```
+
+Your everyday Chrome, with the switch on:
+
+```bash
+node test/integration/real-chrome.js "Real Estate Lahore" 6
+```
+
+It connects (click Allow in Chrome), prints the detected profile, processes about 6 listings in a visible tab, prints what it found (into a temporary database, not the app's), closes its own tabs, and disconnects, leaving Chrome running.

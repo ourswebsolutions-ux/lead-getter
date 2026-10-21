@@ -1,0 +1,50 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Maps fixture</title>
+<style>body{margin:0;display:flex;font:14px sans-serif} #list{width:360px;height:600px;overflow:auto} #detail{flex:1;padding:12px} .card{height:120px;border-bottom:1px solid #ccc}</style>
+</head><body>
+<div id="list" role="main" aria-label="Results for Real Estate Lahore">
+  <div role="feed" aria-label="Results for Real Estate Lahore" id="feed"></div>
+</div>
+<div id="detail"></div>
+<script>
+// Mimics the parts of Google Maps' DOM Lead Finder reads: a scrollable feed
+// of article cards and a details panel with data-item-id info rows.
+const PLACES = [
+  { id: '0x1:0xa', name: 'Al Noor Real Estate', phone: '+923001234567', phoneText: '0300 1234567', address: '12 Main Blvd, Gulberg III, Lahore, Pakistan' },
+  { id: '0x2:0xb', name: 'Zahid Properties', website: 'https://www.google.com/url?q=https://zahidproperties.pk/&opi=1', address: 'DHA Phase 5, Lahore' },
+  { id: '0x3:0xc', name: 'خان اسٹیٹ ایجنسی', address: 'جوہر ٹاؤن، لاہور', website: 'https://www.facebook.com/khanestate' },
+  { id: '0x4:0xd', name: 'Closed Realty', address: 'Model Town, Lahore', closed: true },
+];
+for (let i = 5; i <= 12; i++) PLACES.push({ id: `0x${i}:0x${i}`, name: `Estate ${i}`, address: 'Lahore' });
+let rendered = 0;
+const feed = document.getElementById('feed');
+function render(n) {
+  for (; rendered < Math.min(n, PLACES.length); rendered++) {
+    const p = PLACES[rendered];
+    const card = document.createElement('div');
+    card.className = 'card'; card.setAttribute('role', 'article'); card.setAttribute('aria-label', p.name);
+    const a = document.createElement('a');
+    a.href = `https://www.google.com/maps/place/${encodeURIComponent(p.name)}/data=!4m7!3m6!1s${p.id}!8m2!3d31.5!4d74.3?authuser=0&hl=en`;
+    a.setAttribute('aria-label', p.name); a.textContent = p.name;
+    a.addEventListener('click', (e) => { e.preventDefault(); setTimeout(() => showDetail(p), 150); });
+    card.appendChild(a); feed.appendChild(card);
+  }
+  if (rendered >= PLACES.length && !document.getElementById('end')) {
+    const end = document.createElement('span'); end.id = 'end'; end.textContent = "You've reached the end of the list."; feed.appendChild(end);
+  }
+}
+render(5);
+document.getElementById('list').addEventListener('scroll', () => render(rendered + 4));
+function showDetail(p) {
+  const d = document.getElementById('detail');
+  d.innerHTML = '';
+  const main = document.createElement('div'); main.setAttribute('role', 'main'); main.setAttribute('aria-label', p.name);
+  main.innerHTML = `<h1 class="DUwDvf">${p.name}</h1>` + (p.closed ? '<span>Permanently closed</span>' : '');
+  const add = (html) => main.insertAdjacentHTML('beforeend', html);
+  if (p.address) add(`<button data-item-id="address" aria-label="Address: ${p.address}"><span></span>${p.address}</button>`);
+  if (p.website) add(`<a data-item-id="authority" aria-label="Website: x" href="${p.website}">site</a>`);
+  if (p.phone) add(`<button data-item-id="phone:tel:${p.phone}" aria-label="Phone: ${p.phoneText}">${p.phoneText}</button>`);
+  d.appendChild(main);
+}
+</script>
+</body></html>

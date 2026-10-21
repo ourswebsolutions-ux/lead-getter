@@ -1,0 +1,9 @@
+node_modules/
+dist/
+release/
+*.db
+*.db-wal
+*.db-shm
+server/.env
+server/data/
+server/node_modules/

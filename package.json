@@ -1,0 +1,75 @@
+{
+  "name": "lead-finder",
+  "version": "1.0.0",
+  "description": "Finds Google Maps businesses without websites using your own Chrome.",
+  "main": "src/main/main.js",
+  "scripts": {
+    "dev": "node scripts/dev.js",
+    "build": "vite build",
+    "start": "vite build && node scripts/dev.js --prod",
+    "test": "node --test test/*.test.js",
+    "test:integration": "node test/integration/real-chrome.js",
+    "dist:linux": "vite build && electron-builder --linux AppImage",
+    "dist:win": "vite build && electron-builder --win nsis",
+    "dist:mac": "vite build && electron-builder --mac dmg",
+    "test:e2e": "vite build && node --test --test-timeout=200000 test/e2e/app.e2e.js test/e2e/design.e2e.js test/e2e/premium.e2e.js test/e2e/whatsapp.e2e.js"
+  },
+  "author": "Lead Finder",
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.1.2",
+    "electron": "^44.9.2",
+    "electron-builder": "^26.15.3",
+    "vite": "^8.3.4"
+  },
+  "dependencies": {
+    "@fontsource/ibm-plex-mono": "^5.3.0",
+    "@fontsource/ibm-plex-sans": "^5.3.0",
+    "baileys": "^7.0.0-rc14",
+    "libphonenumber-js": "^1.13.15",
+    "playwright-core": "^1.64.1",
+    "qrcode": "^1.5.4",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "productName": "Lead Finder",
+  "private": true,
+  "build": {
+    "appId": "com.leadfinder.app",
+    "productName": "Lead Finder",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "src/main/**",
+      "src/preload/**",
+      "src/browser/**",
+      "src/database/**",
+      "src/export/**",
+      "src/whatsapp/**",
+      "dist/renderer/**",
+      "package.json"
+    ],
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Office"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.business"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}
