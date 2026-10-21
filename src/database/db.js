@@ -141,6 +141,88 @@ class LeadStore {
     this.migrateV2();
     this.migrateV3();
     this.migrateV4();
+    this.migrateV5();
+  }
+
+  // Version 5: several outreach campaigns. The existing campaign (settings,
+  // status, contacts, progress) becomes "Campaign 1"; every send keeps its
+  // record. Sends are not tied to the campaign's lifetime: deleting or
+  // resetting a campaign never erases who was contacted.
+  migrateV5() {
+    if (this.db.prepare('PRAGMA user_version').get().user_version >= 5) return;
+    this.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS outreach_campaigns (
+          id            INTEGER PRIMARY KEY,
+          name          TEXT NOT NULL,
+          config        TEXT NOT NULL,
+          status        TEXT NOT NULL DEFAULT 'stopped' CHECK (status IN ('stopped', 'running', 'paused')),
+          pause_reason  TEXT,
+          next_due_at   INTEGER,
+          current_phone TEXT,
+          failures      INTEGER NOT NULL DEFAULT 0,
+          created_at    INTEGER NOT NULL,
+          updated_at    INTEGER NOT NULL
+        );
+        CREATE TABLE outreach_contacts_v5 (
+          campaign_id  INTEGER NOT NULL REFERENCES outreach_campaigns(id) ON DELETE CASCADE,
+          phone        TEXT NOT NULL,
+          lead_id      INTEGER REFERENCES businesses(id) ON DELETE SET NULL,
+          name         TEXT,
+          stage        INTEGER NOT NULL DEFAULT 0,
+          state        TEXT NOT NULL CHECK (state IN ('queued', 'active', 'replied', 'opted_out', 'excluded', 'skipped', 'done', 'failed', 'uncertain')),
+          last_sent_at INTEGER,
+          added_at     INTEGER NOT NULL,
+          updated_at   INTEGER NOT NULL,
+          note         TEXT,
+          PRIMARY KEY (campaign_id, phone)
+        );
+        CREATE TABLE outreach_sends_v5 (
+          id            INTEGER PRIMARY KEY,
+          campaign_id   INTEGER,
+          campaign_name TEXT,
+          phone         TEXT NOT NULL,
+          stage         INTEGER NOT NULL,
+          test          INTEGER NOT NULL DEFAULT 0,
+          day           TEXT NOT NULL,
+          status        TEXT NOT NULL CHECK (status IN ('pending', 'sent', 'delivered', 'read', 'failed', 'unknown')),
+          wa_id         TEXT,
+          error         TEXT,
+          created_at    INTEGER NOT NULL,
+          sent_at       INTEGER,
+          UNIQUE (campaign_id, phone, stage, test)
+        );`);
+      const hasOld = this.db.prepare('SELECT COUNT(*) n FROM outreach_contacts').get().n + this.db.prepare('SELECT COUNT(*) n FROM outreach_sends').get().n;
+      const row = this.db.prepare("SELECT value FROM app_state WHERE key = 'outreach'").get();
+      let saved = null;
+      try {
+        saved = row ? JSON.parse(row.value) : null;
+      } catch {}
+      if (hasOld || saved) {
+        const now = Date.now();
+        const status = ['running', 'paused'].includes(saved?.status) ? saved.status : 'stopped';
+        const cfg = { ...(saved?.config || {}), name: 'Campaign 1' };
+        this.db
+          .prepare('INSERT INTO outreach_campaigns (id, name, config, status, pause_reason, next_due_at, current_phone, failures, created_at, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+          .run('Campaign 1', JSON.stringify(cfg), status, saved?.pauseReason ?? null, saved?.nextDueAt ?? null, saved?.current ?? null, saved?.failures ?? 0, now, now);
+        this.db.exec(`
+          INSERT INTO outreach_contacts_v5 (campaign_id, phone, lead_id, name, stage, state, last_sent_at, added_at, updated_at, note)
+            SELECT 1, phone, lead_id, name, stage, state, last_sent_at, added_at, updated_at, note FROM outreach_contacts;
+          INSERT INTO outreach_sends_v5 (id, campaign_id, campaign_name, phone, stage, test, day, status, wa_id, error, created_at, sent_at)
+            SELECT id, 1, 'Campaign 1', phone, stage, test, day, status, wa_id, error, created_at, sent_at FROM outreach_sends;`);
+        if (saved?.acknowledgedAt) this.db.prepare("INSERT INTO app_state (key, value) VALUES ('outreach.ack', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(saved.acknowledgedAt));
+      }
+      this.db.exec(`
+        DROP TABLE outreach_contacts;
+        ALTER TABLE outreach_contacts_v5 RENAME TO outreach_contacts;
+        DROP TABLE outreach_sends;
+        ALTER TABLE outreach_sends_v5 RENAME TO outreach_sends;
+        CREATE INDEX IF NOT EXISTS outreach_sends_day ON outreach_sends (day, test);
+        CREATE INDEX IF NOT EXISTS outreach_sends_wa ON outreach_sends (wa_id);
+        CREATE INDEX IF NOT EXISTS outreach_sends_phone ON outreach_sends (phone, test);
+        DELETE FROM app_state WHERE key = 'outreach';
+        PRAGMA user_version = 5;`);
+    });
   }
 
   // Version 4: WhatsApp chats (message text is stored encrypted with the OS

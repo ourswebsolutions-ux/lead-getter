@@ -112,14 +112,21 @@ test('WhatsApp chats and outreach: history, live messages, campaign, replies, re
 
   // --- Outreach: only verified leads can be added; names are safe.
   const out = win.locator('.outreach');
-  await out.getByRole('heading', { name: 'Real-estate outreach' }).waitFor();
+  await out.getByText('No campaigns yet').waitFor();
+  await out.getByRole('button', { name: 'New campaign' }).click();
+  await out.getByRole('heading', { name: 'Campaign 1', exact: true }).waitFor();
+  const cid = (await win.evaluate(() => window.leadFinder.outreachOverview())).campaigns[0].id;
+  const stateOf = (id) => win.evaluate((i) => window.leadFinder.outreachState(i), id);
   await out.getByRole('button', { name: 'Add verified leads' }).click();
   const picker = win.getByRole('dialog', { name: 'Add verified leads' });
   await picker.waitFor();
+  await win.waitForFunction(() => /verified contacts? eligible/.test(document.querySelector('.picker-count')?.textContent || ''));
   const names = await picker.locator('.picker-name').allInnerTexts();
   assert.deepEqual(names.sort(), ['Best Realty', 'Zahid Properties'], 'only WhatsApp-confirmed numbers');
   await picker.getByRole('button', { name: /Select all/ }).click();
-  await picker.getByRole('button', { name: 'Add 2 leads' }).click();
+  assert.match(await picker.locator('.picker-count').innerText(), /2 verified contacts eligible/);
+  assert.equal(await picker.locator('.picker-list .wa-dot').count(), 2, 'green verified indicator');
+  await picker.getByRole('button', { name: 'Add 2 contacts' }).click();
   await picker.waitFor({ state: 'detached' });
   const rows = out.locator('.campaign-contacts tbody tr');
   await win.waitForFunction(() => document.querySelectorAll('.campaign-contacts tbody tr').length === 2);
@@ -134,26 +141,26 @@ test('WhatsApp chats and outreach: history, live messages, campaign, replies, re
   await win.waitForFunction(() => document.querySelector('.template-preview')?.textContent.includes('Assalam-o-Alaikum Zahid bhai.'));
   await win.waitForFunction(() => document.querySelectorAll('.template-preview')[2]?.textContent.includes('Kya aap Zahid Properties ke naam se real estate'));
   // Limits are enforced.
-  await out.locator('.campaign-settings input[type=number]').nth(2).fill('20');
+  await out.getByLabel('Daily limit').fill('20');
   await out.getByRole('button', { name: 'Save settings' }).click();
   await win.locator('.toast.error').filter({ hasText: /between 10 and 15/ }).waitFor();
-  await out.locator('.campaign-settings input[type=number]').nth(2).fill('12');
+  await out.getByLabel('Daily limit').fill('12');
   // Quiet hours (recipient time, Pakistan) placed away from the current hour,
   // so the test can send whenever it runs.
   const pkHour = (new Date().getUTCHours() + 5) % 24;
-  await out.getByLabel('Quiet hours start').selectOption(String((pkHour + 6) % 24));
-  await out.getByLabel('Quiet hours end').selectOption(String((pkHour + 10) % 24));
+  await out.getByLabel('Sending hours from').selectOption(String((pkHour + 10) % 24));
+  await out.getByLabel('Sending hours to').selectOption(String((pkHour + 6) % 24));
   await out.getByRole('button', { name: 'Save settings' }).click();
   await win.locator('.toast').filter({ hasText: 'Campaign settings saved.' }).waitFor();
 
   // --- Test run: the schedule runs, nothing reaches WhatsApp.
   // A contact's messages go about a minute apart.
   await out.getByRole('button', { name: 'Start' }).click();
-  await win.waitForFunction(() => document.querySelectorAll('.campaign-history tbody tr').length === 1, null, { timeout: 15_000 });
-  assert.match(await out.locator('.campaign-history').innerText(), /test run[\s\S]*1 of 3[\s\S]*Sent/i);
+  await win.waitForFunction(() => document.querySelectorAll('.campaign-sent tbody tr').length === 1, null, { timeout: 15_000 });
+  assert.match(await out.locator('.campaign-sent').innerText(), /test run[\s\S]*1 of 3[\s\S]*Sent/i);
   assert.match(await out.locator('.campaign-status').innerText(), /Next message to the same contact in about a minute/);
-  await win.waitForFunction(() => document.querySelectorAll('.campaign-history tbody tr').length === 2, null, { timeout: 120_000 });
-  const sim = (await win.evaluate(() => window.leadFinder.outreachState())).sends;
+  await win.waitForFunction(() => document.querySelectorAll('.campaign-sent tbody tr').length === 2, null, { timeout: 120_000 });
+  const sim = (await stateOf(cid)).sends;
   const simGap = (sim[0].sentAt - sim[1].sentAt) / 1000;
   assert.ok(simGap >= 55 && simGap <= 100, `test run: message 2 ${simGap}s after message 1`);
   assert.equal(sim[0].phone, sim[1].phone, 'the same contact');
@@ -167,7 +174,7 @@ test('WhatsApp chats and outreach: history, live messages, campaign, replies, re
   await out.getByRole('button', { name: 'Live' }).click();
   await out.getByRole('button', { name: 'Save settings' }).click();
   await win.locator('.toast').filter({ hasText: 'Campaign settings saved.' }).last().waitFor();
-  assert.equal(await out.locator('.campaign-history tbody tr').count(), 0, 'the simulation was cleared');
+  assert.equal(await out.locator('.campaign-sent tbody tr').count(), 0, 'the simulation was cleared');
   await win.waitForFunction(() => document.querySelectorAll('.campaign-contacts .stage-dots span.on').length === 0);
   await out.getByRole('button', { name: 'Start' }).click();
   const ack = win.getByRole('dialog', { name: 'Start live outreach' });
@@ -175,14 +182,14 @@ test('WhatsApp chats and outreach: history, live messages, campaign, replies, re
   assert.ok(await ack.getByRole('button', { name: 'Start sending' }).isDisabled());
   await ack.getByRole('checkbox').check();
   await ack.getByRole('button', { name: 'Start sending' }).click();
-  await win.waitForFunction(() => document.querySelectorAll('.campaign-history tbody tr').length === 1, null, { timeout: 15_000 });
+  await win.waitForFunction(() => document.querySelectorAll('.campaign-sent tbody tr').length === 1, null, { timeout: 15_000 });
   const live = sends(log).slice(1);
   assert.equal(live.length, 1, 'exactly one campaign message');
   assert.deepEqual([live[0].jid, live[0].text], ['923001234567@s.whatsapp.net', 'Assalam-o-Alaikum Zahid bhai.']);
   const facts = await out.locator('.campaign-facts').innerText();
   assert.match(facts, /1 \/ 12 contacts/);
   assert.match(facts, /Test Account/);
-  const firstState = await win.evaluate(() => window.leadFinder.outreachState());
+  const firstState = await stateOf(cid);
   const soon = (firstState.nextDueAt - live[0].at) / 1000;
   assert.ok(soon >= 55 && soon <= 66, `message 2 to the same contact due ${soon}s later`);
   assert.equal(firstState.current, '+923001234567');
@@ -196,7 +203,7 @@ test('WhatsApp chats and outreach: history, live messages, campaign, replies, re
   // his last message.
   let replyState;
   for (let i = 0; i < 90; i++) {
-    replyState = await win.evaluate(() => window.leadFinder.outreachState());
+    replyState = await stateOf(cid);
     if (replyState.current === null) break; // the scheduler's next tick (every 30 s) moves on
     await new Promise((r) => setTimeout(r, 1000));
   }
@@ -212,12 +219,48 @@ test('WhatsApp chats and outreach: history, live messages, campaign, replies, re
   await win.getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: 'Outreach' }).waitFor();
   await win.waitForFunction(() => document.querySelector('.campaign-facts'), null, { timeout: 20_000 }).catch(() => {});
   if (!(await win.locator('.outreach').isVisible())) await win.getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: 'Outreach' }).click();
-  const after = await win.evaluate(() => window.leadFinder.outreachState());
+  const after = await win.evaluate((i) => window.leadFinder.outreachState(i), cid);
   assert.equal(after.status, 'running');
   assert.equal(after.nextDueAt, nextDue, 'the next send time survived the restart');
   assert.equal(after.today.recipients, 1);
   await new Promise((r) => setTimeout(r, 5000)); // a few scheduler ticks
   assert.equal(sends(log).length, 2, 'nothing sent again after the restart');
   assert.ok(!sends(log).some((x) => x.jid === '923007654321@s.whatsapp.net'), 'the excluded contact was never messaged');
+
+  // --- Acceptance: Zahid (messaged by Campaign 1) is not eligible for
+  // Campaign 2 and appears only under "Previously contacted"; deleting
+  // Campaign 1 changes nothing.
+  const out2 = win.locator('.outreach');
+  await out2.getByRole('button', { name: 'New campaign' }).click();
+  await out2.getByRole('heading', { name: 'Campaign 2', exact: true }).waitFor();
+  const checkCampaign2 = async (expectCampaignName) => {
+    await out2.getByRole('button', { name: 'Add verified leads' }).click();
+    const p2 = win.getByRole('dialog', { name: 'Add verified leads' });
+    await p2.waitFor();
+    await win.waitForFunction(() => /verified contacts? eligible/.test(document.querySelector('.picker-count')?.textContent || ''));
+    assert.deepEqual(await p2.getByRole('list', { name: 'Eligible contacts' }).locator('.picker-name').allInnerTexts(), ['Best Realty']);
+    assert.match(await p2.locator('.picker-count').innerText(), /1 verified contact eligible[\s\S]*1 contacted before/);
+    await p2.getByRole('button', { name: /Previously contacted \(1\)/ }).click();
+    const prev = p2.getByRole('list', { name: 'Previously contacted' });
+    assert.match(await prev.innerText(), /Zahid Properties[\s\S]*\+923001234567[\s\S]*(Sent|Delivered|Read)/);
+    assert.match(await prev.innerText(), new RegExp(expectCampaignName));
+    assert.ok(await prev.getByRole('checkbox').isDisabled(), 'not selectable without the override');
+    await p2.getByRole('button', { name: 'Cancel' }).click();
+    await p2.waitFor({ state: 'detached' });
+    assert.match(await out2.getByRole('table', { name: 'Previously contacted' }).innerText(), /Zahid Properties[\s\S]*\+923001234567/);
+  };
+  await checkCampaign2('Campaign 1');
+  // Delete Campaign 1 (checkbox, bulk action, confirmation).
+  await out2.getByRole('checkbox', { name: 'Select Campaign 1' }).check();
+  await out2.getByRole('button', { name: 'Delete selected' }).click();
+  const confirmDlg = win.getByRole('alertdialog', { name: 'Delete campaigns?' });
+  await confirmDlg.waitFor();
+  assert.match(await confirmDlg.innerText(), /Campaign 1[\s\S]*Previously contacted/);
+  await confirmDlg.getByRole('button', { name: 'Delete 1' }).click();
+  await win.locator('.toast').filter({ hasText: '1 campaign deleted.' }).waitFor();
+  assert.deepEqual((await win.evaluate(() => window.leadFinder.outreachOverview())).campaigns.map((c) => c.name), ['Campaign 2']);
+  await checkCampaign2('Campaign 1');
+  if (shots) await win.screenshot({ path: path.join(shots, 'campaigns.png') });
+  assert.equal(sends(log).length, 2, 'still nothing more sent');
   assert.deepEqual(errors, []);
 });

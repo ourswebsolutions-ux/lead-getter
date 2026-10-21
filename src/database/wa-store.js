@@ -165,6 +165,7 @@ class OutreachStore {
   }
 
   tx(fn) {
+    if (this.db.isTransaction) return fn();
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const out = fn();
@@ -175,6 +176,57 @@ class OutreachStore {
       throw err;
     }
   }
+
+  // --- campaigns ---------------------------------------------------------------
+
+  createCampaign(name, config, now = Date.now()) {
+    const r = this.db.prepare('INSERT INTO outreach_campaigns (name, config, created_at, updated_at) VALUES (?, ?, ?, ?)').run(name, JSON.stringify(config), now, now);
+    return Number(r.lastInsertRowid);
+  }
+
+  campaign(id) {
+    const r = this.db.prepare('SELECT * FROM outreach_campaigns WHERE id = ?').get(id);
+    return r ? toCampaign(r) : null;
+  }
+
+  campaigns() {
+    return this.db.prepare('SELECT * FROM outreach_campaigns ORDER BY created_at, id').all().map(toCampaign);
+  }
+
+  saveCampaign(c, now = Date.now()) {
+    this.db
+      .prepare('UPDATE outreach_campaigns SET name = ?, config = ?, status = ?, pause_reason = ?, next_due_at = ?, current_phone = ?, failures = ?, updated_at = ? WHERE id = ?')
+      .run(c.name, JSON.stringify(c.config), c.status, c.pauseReason ?? null, c.nextDueAt ?? null, c.current ?? null, c.failures ?? 0, now, c.id);
+  }
+
+  // Removes the campaign, its queue and its settings. Real sends stay in the
+  // contact history (with the campaign's name); simulated ones go.
+  deleteCampaign(id) {
+    this.tx(() => {
+      const c = this.campaign(id);
+      if (!c) return;
+      this.db.prepare('UPDATE outreach_sends SET campaign_name = COALESCE(campaign_name, ?), campaign_id = NULL WHERE campaign_id = ? AND test = 0').run(c.name, id);
+      this.db.prepare('DELETE FROM outreach_sends WHERE campaign_id = ? AND test = 1').run(id);
+      this.db.prepare('DELETE FROM outreach_contacts WHERE campaign_id = ?').run(id);
+      this.db.prepare('DELETE FROM outreach_campaigns WHERE id = ?').run(id);
+    });
+  }
+
+  // Back to a fresh, stopped campaign with the same settings: its queue and
+  // progress are cleared. Real sends stay, so everyone already messaged
+  // remains "previously contacted" and this campaign can never send them the
+  // same message again.
+  resetCampaign(id, now = Date.now()) {
+    this.tx(() => {
+      const c = this.campaign(id);
+      if (!c) return;
+      this.db.prepare('DELETE FROM outreach_contacts WHERE campaign_id = ?').run(id);
+      this.db.prepare('DELETE FROM outreach_sends WHERE campaign_id = ? AND test = 1').run(id);
+      this.saveCampaign({ ...c, status: 'stopped', pauseReason: null, nextDueAt: null, current: null, failures: 0 }, now);
+    });
+  }
+
+  // --- global contact history (all campaigns, kept forever) -----------------------
 
   isOptedOut(phone) {
     return Boolean(this.db.prepare('SELECT 1 FROM outreach_optouts WHERE phone = ?').get(phone));
@@ -187,62 +239,122 @@ class OutreachStore {
     });
   }
 
-  // Adds leads to the campaign. Opted-out, already added and duplicate
-  // numbers are skipped. Returns { added, skipped }.
-  addContacts(list, now = Date.now()) {
-    let added = 0;
-    let skipped = 0;
-    this.tx(() => {
-      const ins = this.db.prepare(
-        `INSERT INTO outreach_contacts (phone, lead_id, name, stage, state, added_at, updated_at) VALUES (?, ?, ?, 0, 'queued', ?, ?)
-         ON CONFLICT (phone) DO NOTHING`,
-      );
-      for (const c of list) {
-        if (this.isOptedOut(c.phone)) {
-          skipped++;
-          continue;
-        }
-        if (ins.run(c.phone, c.leadId ?? null, c.name ?? null, now, now).changes === 1) added++;
-        else skipped++;
-      }
-    });
-    return { added, skipped };
+  // A real message reached (or may have reached) WhatsApp for this number,
+  // in any campaign, optionally other than `exceptCampaign`. Only a definite
+  // failure doesn't count.
+  wasContacted(phone, exceptCampaign = null) {
+    return Boolean(
+      this.db.prepare("SELECT 1 FROM outreach_sends WHERE phone = ? AND test = 0 AND status <> 'failed' AND (? IS NULL OR campaign_id IS NULL OR campaign_id <> ?) LIMIT 1").get(phone, exceptCampaign, exceptCampaign),
+    );
   }
 
-  contact(phone) {
-    const r = this.db.prepare('SELECT * FROM outreach_contacts WHERE phone = ?').get(phone);
+  contactedPhones() {
+    return new Set(this.db.prepare("SELECT DISTINCT phone FROM outreach_sends WHERE test = 0 AND status <> 'failed'").all().map((r) => r.phone));
+  }
+
+  // One row per number ever messaged for real: the best status WhatsApp
+  // confirmed (read > delivered > sent; 'unknown' when a send was
+  // interrupted), when, how many messages, and in which campaign.
+  history() {
+    const rows = this.db
+      .prepare(
+        `SELECT s.phone, s.stage, s.status, COALESCE(s.sent_at, s.created_at) AS at, COALESCE(c.name, s.campaign_name) AS campaign
+         FROM outreach_sends s LEFT JOIN outreach_campaigns c ON c.id = s.campaign_id
+         WHERE s.test = 0 AND s.status <> 'failed' ORDER BY at`,
+      )
+      .all();
+    const rank = { read: 5, delivered: 4, sent: 3, unknown: 2, pending: 1 };
+    const out = new Map();
+    for (const r of rows) {
+      const h = out.get(r.phone) || { phone: r.phone, messages: 0, status: null, firstAt: r.at, lastAt: r.at, campaign: r.campaign };
+      h.messages++;
+      h.lastAt = r.at;
+      h.campaign = r.campaign;
+      if ((rank[r.status] || 0) > (rank[h.status] || 0)) h.status = r.status;
+      out.set(r.phone, h);
+    }
+    const leads = this.db.prepare("SELECT phone, MIN(name) AS name FROM businesses WHERE phone LIKE '+%' GROUP BY phone").all();
+    const names = new Map(leads.map((l) => [l.phone, l.name]));
+    return [...out.values()].map((h) => ({ ...h, leadName: names.get(h.phone) || null, optedOut: this.isOptedOut(h.phone) })).sort((a, b) => b.lastAt - a.lastAt);
+  }
+
+  // --- campaign contacts ----------------------------------------------------------
+
+  // Adds numbers to a campaign. Opted-out numbers, numbers already in it and
+  // (unless allowPrevious) numbers contacted before are skipped.
+  addContacts(campaignId, list, { allowPrevious = false } = {}, now = Date.now()) {
+    let added = 0;
+    const skipped = { optedOut: 0, previous: 0, duplicate: 0 };
+    this.tx(() => {
+      const ins = this.db.prepare(
+        `INSERT INTO outreach_contacts (campaign_id, phone, lead_id, name, stage, state, added_at, updated_at) VALUES (?, ?, ?, ?, 0, 'queued', ?, ?)
+         ON CONFLICT (campaign_id, phone) DO NOTHING`,
+      );
+      const seen = new Set();
+      for (const c of list) {
+        if (seen.has(c.phone)) {
+          skipped.duplicate++;
+          continue;
+        }
+        seen.add(c.phone);
+        if (this.isOptedOut(c.phone)) skipped.optedOut++;
+        else if (!allowPrevious && this.wasContacted(c.phone)) skipped.previous++;
+        else if (ins.run(campaignId, c.phone, c.leadId ?? null, c.name ?? null, now, now).changes === 1) added++;
+        else skipped.duplicate++;
+      }
+    });
+    return { added, skipped: skipped.optedOut + skipped.previous + skipped.duplicate, skippedDetail: skipped };
+  }
+
+  contact(campaignId, phone) {
+    const r = this.db.prepare('SELECT * FROM outreach_contacts WHERE campaign_id = ? AND phone = ?').get(campaignId, phone);
     return r ? toContact(r) : null;
   }
 
-  contacts() {
-    return this.db.prepare('SELECT * FROM outreach_contacts ORDER BY added_at, rowid').all().map(toContact);
+  contacts(campaignId) {
+    return this.db.prepare('SELECT * FROM outreach_contacts WHERE campaign_id = ? ORDER BY added_at, rowid').all(campaignId).map(toContact);
   }
 
-  setContact(phone, fields, now = Date.now()) {
+  // A number in any campaign (for replies and receipts).
+  contactsByPhone(phone) {
+    return this.db.prepare('SELECT * FROM outreach_contacts WHERE phone = ?').all(phone).map(toContact);
+  }
+
+  setContact(campaignId, phone, fields, now = Date.now()) {
     const cols = Object.keys(fields);
     if (!cols.length) return;
     const map = { state: 'state', name: 'name', stage: 'stage', lastSentAt: 'last_sent_at', note: 'note' };
     const set = cols.map((k) => `${map[k]} = ?`).join(', ');
-    this.db.prepare(`UPDATE outreach_contacts SET ${set}, updated_at = ? WHERE phone = ?`).run(...cols.map((k) => fields[k]), now, phone);
+    this.db.prepare(`UPDATE outreach_contacts SET ${set}, updated_at = ? WHERE campaign_id = ? AND phone = ?`).run(...cols.map((k) => fields[k]), now, campaignId, phone);
   }
 
-  removeContact(phone) {
-    this.db.prepare("DELETE FROM outreach_contacts WHERE phone = ? AND stage = 0 AND state IN ('queued', 'excluded')").run(phone);
+  removeContact(campaignId, phone) {
+    this.db.prepare("DELETE FROM outreach_contacts WHERE campaign_id = ? AND phone = ? AND stage = 0 AND state IN ('queued', 'excluded', 'skipped')").run(campaignId, phone);
   }
 
-  // Reserves one stage for one contact before anything is sent. Returns the
-  // send id, or null when that stage was already attempted (so it can never
-  // be sent twice, whatever retries, restarts or duplicate events happen).
-  reserve({ phone, stage, test, day, now = Date.now() }) {
-    try {
-      const r = this.db
-        .prepare("INSERT INTO outreach_sends (phone, stage, test, day, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)")
-        .run(phone, stage, test ? 1 : 0, day, now);
-      return Number(r.lastInsertRowid);
-    } catch (err) {
-      if (/UNIQUE/.test(err.message)) return null;
-      throw err;
-    }
+  // --- sends --------------------------------------------------------------------
+
+  // Reserves one stage for one contact in one campaign before anything is
+  // sent. Returns the send id, or null when that stage was already sent or
+  // might have been (pending / unknown / sent...), so it can never be sent
+  // twice. Only a definite failure is reused for a retry.
+  reserve({ campaignId, campaignName = null, phone, stage, test, day, now = Date.now() }) {
+    return this.tx(() => {
+      const failed = this.db.prepare("SELECT id FROM outreach_sends WHERE campaign_id = ? AND phone = ? AND stage = ? AND test = ? AND status = 'failed'").get(campaignId, phone, stage, test ? 1 : 0);
+      if (failed) {
+        this.db.prepare("UPDATE outreach_sends SET status = 'pending', error = NULL, wa_id = NULL, day = ?, created_at = ?, sent_at = NULL WHERE id = ?").run(day, now, failed.id);
+        return failed.id;
+      }
+      try {
+        const r = this.db
+          .prepare("INSERT INTO outreach_sends (campaign_id, campaign_name, phone, stage, test, day, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)")
+          .run(campaignId, campaignName, phone, stage, test ? 1 : 0, day, now);
+        return Number(r.lastInsertRowid);
+      } catch (err) {
+        if (/UNIQUE/.test(err.message)) return null;
+        throw err;
+      }
+    });
   }
 
   // Frees a reservation that certainly never reached WhatsApp.
@@ -258,7 +370,7 @@ class OutreachStore {
     this.db.prepare('UPDATE outreach_sends SET status = ?, error = ? WHERE id = ?').run(status, String(error).slice(0, 300), id);
   }
 
-  // Delivery receipts for campaign messages.
+  // Delivery receipts: only WhatsApp's own receipts move a message on.
   updateStatus(waId, status) {
     const row = this.db.prepare('SELECT id, status FROM outreach_sends WHERE wa_id = ?').get(waId);
     if (!row) return false;
@@ -268,7 +380,8 @@ class OutreachStore {
     return true;
   }
 
-  // Unique recipients messaged on `day` (failed attempts don't count).
+  // Unique real (or, for test runs, simulated) recipients on `day`, across
+  // all campaigns: the daily limit can't be multiplied by campaigns.
   recipientsOn(day, test) {
     return this.db.prepare("SELECT COUNT(DISTINCT phone) n FROM outreach_sends WHERE day = ? AND test = ? AND status <> 'failed'").get(day, test ? 1 : 0).n;
   }
@@ -277,6 +390,8 @@ class OutreachStore {
     return Boolean(this.db.prepare("SELECT 1 FROM outreach_sends WHERE phone = ? AND day = ? AND test = ? AND status <> 'failed'").get(phone, day, test ? 1 : 0));
   }
 
+  // The latest campaign message (all campaigns): the gap to the next
+  // contact is measured from it.
   lastSendAt(test) {
     return this.db.prepare("SELECT MAX(COALESCE(sent_at, created_at)) t FROM outreach_sends WHERE test = ? AND status <> 'failed'").get(test ? 1 : 0).t || null;
   }
@@ -284,42 +399,57 @@ class OutreachStore {
   // Reservations left 'pending' by a crash or a forced quit: whether they
   // reached WhatsApp is unknown, so they are never sent again.
   settleInterrupted(olderThan) {
-    const rows = this.db.prepare("SELECT id, phone FROM outreach_sends WHERE status = 'pending' AND created_at < ?").all(olderThan);
+    const rows = this.db.prepare("SELECT id, campaign_id, phone FROM outreach_sends WHERE status = 'pending' AND created_at < ?").all(olderThan);
     for (const r of rows) {
       this.markFailed(r.id, 'Lead Finder closed while this message was being sent; it may or may not have been delivered.', 'unknown');
-      this.db.prepare("UPDATE outreach_contacts SET state = 'uncertain', note = 'Interrupted while sending; check the chat before continuing.' WHERE phone = ? AND state IN ('queued', 'active')").run(r.phone);
+      this.db
+        .prepare("UPDATE outreach_contacts SET state = 'uncertain', note = 'Interrupted while sending; check the chat before continuing.' WHERE campaign_id = ? AND phone = ? AND state IN ('queued', 'active')")
+        .run(r.campaign_id, r.phone);
     }
     return rows.length;
   }
 
-  sends({ test, limit = 200 } = {}) {
+  sends({ campaignId, test, limit = 200 } = {}) {
     return this.db
-      .prepare('SELECT s.*, c.name, c.lead_id FROM outreach_sends s LEFT JOIN outreach_contacts c ON c.phone = s.phone WHERE s.test = ? ORDER BY s.created_at DESC LIMIT ?')
-      .all(test ? 1 : 0, limit)
+      .prepare(
+        `SELECT s.*, c.name, c.lead_id FROM outreach_sends s LEFT JOIN outreach_contacts c ON c.campaign_id = s.campaign_id AND c.phone = s.phone
+         WHERE s.campaign_id = ? AND s.test = ? ORDER BY s.created_at DESC, s.id DESC LIMIT ?`,
+      )
+      .all(campaignId, test ? 1 : 0, limit)
       .map((r) => ({ id: r.id, phone: r.phone, stage: r.stage, day: r.day, status: r.status, waId: r.wa_id, error: r.error, createdAt: r.created_at, sentAt: r.sent_at, name: r.name, leadId: r.lead_id }));
   }
 
-  // Leaving test mode: forget the simulated progress (real sends and
-  // opt-outs stay).
-  clearTest() {
+  // Leaving test mode: forget this campaign's simulated progress (real sends
+  // and opt-outs stay).
+  clearTest(campaignId) {
     this.tx(() => {
-      this.db.prepare('DELETE FROM outreach_sends WHERE test = 1').run();
-      const real = this.db.prepare("SELECT phone, MAX(stage) s, MAX(COALESCE(sent_at, created_at)) t FROM outreach_sends WHERE test = 0 AND status <> 'failed' GROUP BY phone").all();
+      this.db.prepare('DELETE FROM outreach_sends WHERE campaign_id = ? AND test = 1').run(campaignId);
+      const real = this.db
+        .prepare("SELECT phone, MAX(stage) s, MAX(COALESCE(sent_at, created_at)) t FROM outreach_sends WHERE campaign_id = ? AND test = 0 AND status <> 'failed' GROUP BY phone")
+        .all(campaignId);
       const byPhone = new Map(real.map((r) => [r.phone, r]));
-      for (const c of this.contacts()) {
+      for (const c of this.contacts(campaignId)) {
         const r = byPhone.get(c.phone);
         const stage = r ? r.s : 0;
         // Progress always comes from real sends; a status the user (or the
         // contact) chose is kept.
-        const keep = ['opted_out', 'excluded', 'replied'].includes(c.state);
-        this.setContact(c.phone, { stage, lastSentAt: r ? r.t : null, ...(keep ? {} : { state: stage === 0 ? 'queued' : stage >= 3 ? 'done' : 'active' }) });
+        const keep = ['opted_out', 'excluded', 'replied', 'skipped'].includes(c.state);
+        this.setContact(campaignId, c.phone, { stage, lastSentAt: r ? r.t : null, ...(keep ? {} : { state: stage === 0 ? 'queued' : stage >= 3 ? 'done' : 'active' }) });
       }
     });
   }
 }
 
+function toCampaign(r) {
+  let config = {};
+  try {
+    config = JSON.parse(r.config);
+  } catch {}
+  return { id: r.id, name: r.name, config, status: r.status, pauseReason: r.pause_reason, nextDueAt: r.next_due_at, current: r.current_phone, failures: r.failures, createdAt: r.created_at, updatedAt: r.updated_at };
+}
+
 function toContact(r) {
-  return { phone: r.phone, leadId: r.lead_id, name: r.name, stage: r.stage, state: r.state, lastSentAt: r.last_sent_at, addedAt: r.added_at, updatedAt: r.updated_at, note: r.note };
+  return { campaignId: r.campaign_id, phone: r.phone, leadId: r.lead_id, name: r.name, stage: r.stage, state: r.state, lastSentAt: r.last_sent_at, addedAt: r.added_at, updatedAt: r.updated_at, note: r.note };
 }
 
 module.exports = { ChatStore, OutreachStore };

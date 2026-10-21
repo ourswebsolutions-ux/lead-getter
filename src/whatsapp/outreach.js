@@ -1,30 +1,49 @@
 'use strict';
 
-// Real-estate outreach: a three-message introduction to verified WhatsApp
-// leads, sent automatically by a persistent, rate-limited scheduler.
+// Real-estate outreach campaigns: a three-message introduction to verified
+// WhatsApp leads, sent automatically by a persistent, rate-limited scheduler.
 //
 // Timing: a contact's three messages go about one minute apart; the next
-// contact starts 45-60 minutes (random within the configured range) after
+// contact starts 45-60 minutes (random within the campaign's range) after
 // the previous contact's last message.
 //
 // Safety rules (all enforced here, whatever the UI sends):
-//   - one contact at a time, at most 10-15 unique recipients per day;
-//   - each stage is reserved in the database before it is sent, so a
-//     stage is never sent twice (retries, restarts, duplicate events);
-//   - nothing is sent in the recipient's quiet hours;
-//   - a reply pauses that contact for manual handling; an opt-out stops it
-//     for good; WhatsApp refusals pause the whole campaign;
+//   - one campaign runs at a time and one contact at a time; the daily limit
+//     (10-15 unique contacts) and the gap between contacts count across all
+//     campaigns, so several campaigns can't multiply the volume;
+//   - each stage is reserved in the database before it is sent, so a stage
+//     is never sent twice (retries, restarts, duplicate events, resets);
+//   - someone messaged in any campaign is never messaged by another one
+//     unless that campaign explicitly allows previously contacted people;
+//     opt-outs are never messaged, whatever the settings;
+//   - nothing is sent in the recipient's quiet hours or outside the
+//     campaign's dates;
+//   - a reply pauses that contact; an opt-out stops it for good; WhatsApp
+//     refusals pause the campaign;
 //   - live sending needs the user's explicit acknowledgement of WhatsApp's
-//     rules on automated messages. Test mode sends nothing.
+//     rules on automated messages. Test runs send nothing.
 
 const { EventEmitter } = require('node:events');
 const { DEFAULT_TEMPLATES, render, validateTemplates, isOptOut, cleanBusiness } = require('./templates');
 
 const LIMITS = { intervalMin: 45, intervalMax: 60, capMin: 10, capMax: 15 };
-const DEFAULT_CONFIG = { templates: DEFAULT_TEMPLATES, intervalMin: 45, intervalMax: 60, dailyCap: 10, quietStart: 21, quietEnd: 9, test: true };
+const DEFAULT_CONFIG = {
+  templates: DEFAULT_TEMPLATES,
+  intervalMin: 45,
+  intervalMax: 60,
+  dailyCap: 10,
+  quietStart: 21,
+  quietEnd: 9,
+  test: true,
+  startDate: null, // YYYY-MM-DD, this computer's calendar; null = no limit
+  endDate: null,
+  allowPrevious: false, // also people messaged before (never opt-outs)
+  filters: { categories: [], from: null, to: null }, // last lead selection, for convenience
+};
 const MIN = 60_000;
 const STAGE_GAP = 60_000; // between one contact's messages (55-65 s)
-const STATE_KEY = 'outreach';
+const ACK_KEY = 'outreach.ack';
+const DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 // Recipient time zone from the country calling code (one-zone countries).
 const ZONES = [
@@ -73,7 +92,7 @@ function isTimeout(err) {
 class Outreach extends EventEmitter {
   // store: OutreachStore; state: { get(key), set(key, value) } (app_state);
   // transport: { ready() -> bool, send(phone, text) -> Promise<{ id }> };
-  // details(contact) -> { business } (the lead's business name) for templates;
+  // details(contact) -> { business } (the lead's business name);
   // hasReplied(phone, sinceMs) -> bool (safety net for missed reply events);
   // canSend() -> Promise<bool> (subscription).
   constructor({ store, state, transport, details = () => ({}), hasReplied = () => false, canSend = async () => true, clock = () => Date.now(), random = Math.random, zoneOf = timeZoneOf, tickMs = 30_000 }) {
@@ -81,17 +100,79 @@ class Outreach extends EventEmitter {
     Object.assign(this, { store, state, transport, details, hasReplied, canSend, clock, random, zoneOf, tickMs });
     this.busy = false;
     this.timer = null;
-    this.waiting = null;
+    this.waiting = new Map(); // campaign id -> reason
   }
 
-  load() {
-    const saved = this.state.get(STATE_KEY) || {};
-    return { status: 'stopped', pauseReason: null, nextDueAt: null, current: null, acknowledgedAt: null, failures: 0, ...saved, config: { ...DEFAULT_CONFIG, ...(saved.config || {}) } };
+  // --- campaigns -----------------------------------------------------------------
+
+  load(id) {
+    const c = this.store.campaign(id);
+    return c ? { ...c, config: { ...DEFAULT_CONFIG, ...c.config, filters: { ...DEFAULT_CONFIG.filters, ...(c.config.filters || {}) } } } : null;
   }
 
   save(st) {
-    this.state.set(STATE_KEY, st);
-    this.emit('change', this.snapshot(st));
+    this.store.saveCampaign(st, this.clock());
+    this.emit('change', { id: st.id });
+  }
+
+  create(name) {
+    const clean = String(name || '').trim().slice(0, 60) || `Campaign ${this.store.campaigns().length + 1}`;
+    const id = this.store.createCampaign(clean, { ...DEFAULT_CONFIG }, this.clock());
+    this.emit('change', { id });
+    return { ok: true, id };
+  }
+
+  remove(ids) {
+    const list = this.idList(ids);
+    if (!list.length) return { ok: false, error: 'Select a campaign first.' };
+    for (const id of list) this.store.deleteCampaign(id);
+    for (const id of list) this.waiting.delete(id);
+    this.emit('change', {});
+    return { ok: true, deleted: list.length };
+  }
+
+  reset(ids) {
+    const list = this.idList(ids);
+    if (!list.length) return { ok: false, error: 'Select a campaign first.' };
+    for (const id of list) {
+      this.store.resetCampaign(id, this.clock());
+      this.waiting.delete(id);
+    }
+    this.emit('change', {});
+    return { ok: true, reset: list.length };
+  }
+
+  idList(ids) {
+    const known = new Set(this.store.campaigns().map((c) => c.id));
+    return [...new Set((Array.isArray(ids) ? ids : [ids]).map(Number))].filter((id) => known.has(id));
+  }
+
+  // A handle with the per-campaign operations.
+  campaign(id) {
+    const self = this;
+    const has = () => Boolean(self.store.campaign(id));
+    const call = (fn) => (...args) => (has() ? fn(...args) : { ok: false, error: 'That campaign no longer exists.' });
+    return {
+      id,
+      load: () => self.load(id),
+      configure: call((patch) => self.configure(id, patch)),
+      start: call((opts) => self.start(id, opts)),
+      pause: call((reason) => self.pause(id, reason)),
+      resume: call(() => self.resume(id)),
+      stop: call(() => self.stop(id)),
+      addLeads: call((list) => self.addLeads(id, list)),
+      setName: call((phone, name) => self.setName(id, phone, name)),
+      exclude: call((phone) => self.exclude(id, phone)),
+      include: call((phone) => self.include(id, phone)),
+      removeContact: call((phone) => self.removeContact(id, phone)),
+      optOut: (phone, reason) => self.optOut(phone, reason),
+      contact: (phone) => self.store.contact(id, phone),
+      contacts: () => self.store.contacts(id),
+      setContact: (phone, fields) => self.store.setContact(id, phone, fields, self.clock()),
+      sends: ({ test } = {}) => self.store.sends({ campaignId: id, test }),
+      preview: (contact) => self.preview(contact),
+      snapshot: () => self.snapshot(id),
+    };
   }
 
   // --- configuration ---------------------------------------------------------
@@ -100,47 +181,67 @@ class Outreach extends EventEmitter {
     const errors = validateTemplates(c.templates);
     const int = (v) => Number.isInteger(v);
     if (!int(c.intervalMin) || !int(c.intervalMax) || c.intervalMin < LIMITS.intervalMin || c.intervalMax > LIMITS.intervalMax || c.intervalMin > c.intervalMax) {
-      errors.push(`The interval must be between ${LIMITS.intervalMin} and ${LIMITS.intervalMax} minutes.`);
+      errors.push(`The gap between contacts must be between ${LIMITS.intervalMin} and ${LIMITS.intervalMax} minutes.`);
     }
     if (!int(c.dailyCap) || c.dailyCap < LIMITS.capMin || c.dailyCap > LIMITS.capMax) errors.push(`The daily limit must be between ${LIMITS.capMin} and ${LIMITS.capMax} contacts.`);
-    if (!int(c.quietStart) || !int(c.quietEnd) || c.quietStart < 0 || c.quietStart > 23 || c.quietEnd < 0 || c.quietEnd > 23) errors.push('Quiet hours must be whole hours (0-23).');
+    if (!int(c.quietStart) || !int(c.quietEnd) || c.quietStart < 0 || c.quietStart > 23 || c.quietEnd < 0 || c.quietEnd > 23) errors.push('Sending hours must be whole hours (0-23).');
     else {
       const open = Array.from({ length: 24 }, (_, h) => h).filter((h) => !inQuietHours(h, c.quietStart, c.quietEnd)).length;
-      if (open < 4) errors.push('Leave at least 4 hours a day outside quiet hours.');
+      if (open < 4) errors.push('Allow at least 4 sending hours a day.');
     }
+    if ((c.startDate && !DATE.test(c.startDate)) || (c.endDate && !DATE.test(c.endDate))) errors.push('Dates must be YYYY-MM-DD.');
+    else if (c.startDate && c.endDate && c.startDate > c.endDate) errors.push('The end date is before the start date.');
     return errors;
   }
 
-  configure(patch) {
-    const st = this.load();
+  configure(id, patch) {
+    const st = this.load(id);
     if (st.status === 'running') return { ok: false, error: 'Pause the campaign before changing its settings.' };
     const config = { ...st.config, ...patch };
     config.templates = (config.templates || []).map((t) => ({ text: String(t?.text ?? '').trim(), fallback: String(t?.fallback ?? '').trim() }));
     for (const k of ['intervalMin', 'intervalMax', 'dailyCap', 'quietStart', 'quietEnd']) config[k] = Number(config[k]);
     config.test = Boolean(config.test);
+    config.allowPrevious = Boolean(config.allowPrevious);
+    config.startDate = config.startDate || null;
+    config.endDate = config.endDate || null;
+    const f = config.filters || {};
+    config.filters = {
+      categories: Array.isArray(f.categories) ? f.categories.map(String).slice(0, 100) : [],
+      from: f.from && DATE.test(f.from) ? f.from : null,
+      to: f.to && DATE.test(f.to) ? f.to : null,
+    };
     const errors = Outreach.checkConfig(config);
     if (errors.length) return { ok: false, error: errors.join(' ') };
-    if (st.config.test && !config.test) this.store.clearTest(); // switching to live: forget simulated progress
-    st.config = config;
-    this.save(st);
-    return { ok: true, snapshot: this.snapshot(st) };
+    const name = patch.name !== undefined ? String(patch.name).trim().slice(0, 60) : st.name;
+    if (!name) return { ok: false, error: 'Give the campaign a name.' };
+    delete config.name;
+    if (st.config.test && !config.test) this.store.clearTest(id); // switching to live: forget simulated progress
+    this.save({ ...st, name, config });
+    return { ok: true, snapshot: this.snapshot(id) };
   }
 
   // --- controls ---------------------------------------------------------------
 
-  start({ acknowledge = false } = {}) {
-    const st = this.load();
+  acknowledged() {
+    return Boolean(this.state.get(ACK_KEY));
+  }
+
+  start(id, { acknowledge = false } = {}) {
+    const st = this.load(id);
     const errors = Outreach.checkConfig(st.config);
     if (errors.length) return { ok: false, error: errors.join(' ') };
-    if (!this.store.contacts().some((c) => ['queued', 'active'].includes(c.state))) return { ok: false, error: 'Add verified leads to the campaign first.' };
-    if (!st.config.test && !st.acknowledgedAt && !acknowledge) return { ok: false, error: 'Confirm that you accept WhatsApp’s rules on automated messages before sending for real.', needsAcknowledgement: true };
-    if (!st.config.test && !st.acknowledgedAt) st.acknowledgedAt = this.clock();
+    const other = this.store.campaigns().find((c) => c.id !== id && c.status === 'running');
+    if (other) return { ok: false, error: `“${other.name}” is running. Only one campaign runs at a time: pause it first.` };
+    if (!this.store.contacts(id).some((c) => ['queued', 'active'].includes(c.state))) return { ok: false, error: 'Add verified leads to the campaign first.' };
+    if (!st.config.test && !this.acknowledged() && !acknowledge) return { ok: false, error: 'Confirm that you accept WhatsApp’s rules on automated messages before sending for real.', needsAcknowledgement: true };
+    if (!st.config.test && !this.acknowledged()) this.state.set(ACK_KEY, this.clock());
     st.status = 'running';
     st.pauseReason = null;
     st.failures = 0;
     // A contact whose sequence was interrupted (pause, stop, restart) is
     // finished first, a minute after their last message; otherwise the next
-    // contact waits the full gap after the last campaign message.
+    // contact waits the full gap after the last campaign message (any
+    // campaign).
     const now = this.clock();
     const current = this.current(st);
     if (current) st.nextDueAt = Math.max(now, (current.lastSentAt || 0) + STAGE_GAP);
@@ -151,104 +252,109 @@ class Outreach extends EventEmitter {
     }
     this.save(st);
     this.kick();
-    return { ok: true, snapshot: this.snapshot(st) };
+    return { ok: true, snapshot: this.snapshot(id) };
   }
 
-  pause(reason = 'user') {
-    const st = this.load();
-    if (st.status !== 'running') return { ok: true, snapshot: this.snapshot(st) };
+  pause(id, reason = 'user') {
+    const st = this.load(id);
+    if (st.status !== 'running') return { ok: true, snapshot: this.snapshot(id) };
     st.status = 'paused';
     st.pauseReason = reason;
     this.save(st);
-    return { ok: true, snapshot: this.snapshot(st) };
+    return { ok: true, snapshot: this.snapshot(id) };
   }
 
-  resume() {
-    const st = this.load();
+  resume(id) {
+    const st = this.load(id);
     if (st.status !== 'paused') return { ok: false, error: 'The campaign is not paused.' };
-    return this.start();
+    return this.start(id);
   }
 
-  stop() {
-    const st = this.load();
+  stop(id) {
+    const st = this.load(id);
     st.status = 'stopped';
     st.pauseReason = null;
     this.save(st);
-    return { ok: true, snapshot: this.snapshot(st) };
+    return { ok: true, snapshot: this.snapshot(id) };
   }
 
-  addLeads(list) {
-    const r = this.store.addContacts(list, this.clock());
-    this.emit('change', this.snapshot());
+  addLeads(id, list) {
+    const st = this.load(id);
+    const r = this.store.addContacts(id, list, { allowPrevious: st.config.allowPrevious }, this.clock());
+    this.emit('change', { id });
     return { ok: true, ...r };
   }
 
-  setName(phone, name) {
+  setName(id, phone, name) {
     const clean = name == null ? null : String(name).trim().slice(0, 40) || null;
-    this.store.setContact(phone, { name: clean }, this.clock());
-    this.emit('change', this.snapshot());
+    this.store.setContact(id, phone, { name: clean }, this.clock());
+    this.emit('change', { id });
     return { ok: true };
   }
 
-  exclude(phone) {
-    const c = this.store.contact(phone);
-    if (!c) return { ok: false, error: 'Not in the campaign.' };
-    this.store.setContact(phone, { state: 'excluded', note: 'Excluded by you' }, this.clock());
-    this.emit('change', this.snapshot());
+  exclude(id, phone) {
+    if (!this.store.contact(id, phone)) return { ok: false, error: 'Not in the campaign.' };
+    this.store.setContact(id, phone, { state: 'excluded', note: 'Excluded by you' }, this.clock());
+    this.emit('change', { id });
     return { ok: true };
   }
 
   // Back into the queue: an excluded contact, or one whose last attempt
   // failed for certain. Uncertain sends are never retried automatically.
-  include(phone) {
-    const c = this.store.contact(phone);
-    if (!c || !['excluded', 'failed', 'uncertain', 'replied'].includes(c.state)) return { ok: false, error: 'This contact can’t be resumed.' };
+  include(id, phone) {
+    const c = this.store.contact(id, phone);
+    if (!c || !['excluded', 'failed', 'uncertain', 'replied', 'skipped'].includes(c.state)) return { ok: false, error: 'This contact can’t be resumed.' };
     if (this.store.isOptedOut(phone)) return { ok: false, error: 'This contact asked not to be messaged.' };
-    this.store.setContact(phone, { state: c.stage === 0 ? 'queued' : c.stage >= 3 ? 'done' : 'active', note: null }, this.clock());
-    this.emit('change', this.snapshot());
+    if (c.stage === 0 && !this.load(id).config.allowPrevious && this.store.wasContacted(phone, id)) return { ok: false, error: 'Already contacted in another campaign. Allow previously contacted contacts in this campaign’s settings to message them again.' };
+    this.store.setContact(id, phone, { state: c.stage === 0 ? 'queued' : c.stage >= 3 ? 'done' : 'active', note: null }, this.clock());
+    this.emit('change', { id });
     return { ok: true };
   }
 
   optOut(phone, reason = 'Marked by you') {
     this.store.optOut(phone, reason, this.clock());
-    this.emit('change', this.snapshot());
+    this.emit('change', {});
     return { ok: true };
   }
 
-  remove(phone) {
-    this.store.removeContact(phone);
-    this.emit('change', this.snapshot());
+  removeContact(id, phone) {
+    this.store.removeContact(id, phone);
+    this.emit('change', { id });
     return { ok: true };
   }
 
   // --- WhatsApp events ----------------------------------------------------------
 
-  // An incoming message: a reply hands the contact to the user; an opt-out
-  // stops it for good.
+  // An incoming message: a reply hands the contact to the user in every
+  // campaign it is in; an opt-out stops it for good.
   onIncoming({ phone, text }) {
     if (!phone) return;
-    const c = this.store.contact(phone);
+    const entries = this.store.contactsByPhone(phone);
     if (isOptOut(text)) {
       this.store.optOut(phone, 'Asked not to be contacted', this.clock());
-      if (c) this.emit('replied', { phone, optOut: true });
-    } else if (c && ['queued', 'active', 'done', 'failed', 'uncertain'].includes(c.state)) {
-      this.store.setContact(phone, { state: 'replied', note: 'Replied: continue the conversation yourself' }, this.clock());
+      if (entries.length) this.emit('replied', { phone, optOut: true });
+    } else {
+      const open = entries.filter((c) => ['queued', 'active', 'done', 'failed', 'uncertain'].includes(c.state));
+      if (!open.length) return;
+      for (const c of open) this.store.setContact(c.campaignId, phone, { state: 'replied', note: 'Replied: continue the conversation yourself' }, this.clock());
       this.emit('replied', { phone, optOut: false });
-    } else return;
-    this.emit('change', this.snapshot());
+    }
+    this.emit('change', {});
   }
 
   // The user messaged a contact themselves (from the chat view).
   onManualMessage(phone) {
-    const c = this.store.contact(phone);
-    if (c && ['queued', 'active'].includes(c.state)) {
-      this.store.setContact(phone, { state: 'replied', note: 'You are handling this conversation' }, this.clock());
-      this.emit('change', this.snapshot());
+    let changed = false;
+    for (const c of this.store.contactsByPhone(phone)) {
+      if (!['queued', 'active'].includes(c.state)) continue;
+      this.store.setContact(c.campaignId, phone, { state: 'replied', note: 'You are handling this conversation' }, this.clock());
+      changed = true;
     }
+    if (changed) this.emit('change', {});
   }
 
   onStatus(waId, status) {
-    if (this.store.updateStatus(waId, status)) this.emit('change', this.snapshot());
+    if (this.store.updateStatus(waId, status)) this.emit('change', {});
   }
 
   // --- scheduler -------------------------------------------------------------------
@@ -271,10 +377,10 @@ class Outreach extends EventEmitter {
     setTimeout(() => this.tick(), 0).unref?.();
   }
 
-  setWaiting(reason) {
-    if (this.waiting === reason) return;
-    this.waiting = reason;
-    this.emit('change', this.snapshot());
+  setWaiting(id, reason) {
+    if (this.waiting.get(id) === reason) return;
+    this.waiting.set(id, reason);
+    this.emit('change', { id });
   }
 
   // ~1 minute between one contact's messages; 45-60 minutes between contacts.
@@ -289,7 +395,7 @@ class Outreach extends EventEmitter {
   // The contact whose sequence is in progress, if it still is.
   current(st) {
     if (!st.current) return null;
-    const c = this.store.contact(st.current);
+    const c = this.store.contact(st.id, st.current);
     return c && c.state === 'active' && c.stage >= 1 && c.stage < 3 ? c : null;
   }
 
@@ -309,7 +415,7 @@ class Outreach extends EventEmitter {
       if (!allowed(cur)) return { reason: 'daily_cap' };
       return { contact: cur, stage: cur.stage + 1, day };
     }
-    const contacts = this.store.contacts();
+    const contacts = this.store.contacts(st.id);
     const resumed = contacts.filter((c) => c.state === 'active' && c.stage >= 1 && c.stage < 3).sort((a, b) => a.lastSentAt - b.lastSentAt);
     const fresh = contacts.filter((c) => c.state === 'queued' && c.stage === 0);
     let quietSeen = false;
@@ -334,23 +440,34 @@ class Outreach extends EventEmitter {
     if (this.busy) return; // one send at a time, ever
     this.busy = true;
     try {
-      const st = this.load();
-      if (st.status !== 'running') return this.setWaiting(null);
+      const running = this.store.campaigns().filter((c) => c.status === 'running');
+      for (const c of running.slice(1)) this.pause(c.id, 'user'); // never two at once (e.g. an old database)
+      if (!running.length) return;
+      const st = this.load(running[0].id);
+      const id = st.id;
       const test = st.config.test;
       const now = this.clock();
+      const today = dayOf(now);
+      if (st.config.endDate && today > st.config.endDate) {
+        st.status = 'stopped';
+        st.pauseReason = 'ended';
+        this.save(st);
+        return this.setWaiting(id, null);
+      }
+      if (st.config.startDate && today < st.config.startDate) return this.setWaiting(id, 'not_started');
       if (st.current && !this.current(st)) {
         // The contact in progress left the sequence early (reply, opt-out,
         // exclusion): the next contact waits the full gap after their last
         // message.
-        const ended = this.store.contact(st.current);
+        const ended = this.store.contact(id, st.current);
         st.current = null;
         st.nextDueAt = Math.max(st.nextDueAt || 0, (ended?.lastSentAt || now) + this.contactGap(st.config));
         this.save(st);
       }
-      if (st.nextDueAt && now < st.nextDueAt) return this.setWaiting(st.current ? 'next_message' : 'interval');
-      if (!test && !this.transport.ready()) return this.setWaiting('whatsapp');
+      if (st.nextDueAt && now < st.nextDueAt) return this.setWaiting(id, st.current ? 'next_message' : 'interval');
+      if (!test && !this.transport.ready()) return this.setWaiting(id, 'whatsapp');
       // Asked only when a message is due (it is a licence-server request).
-      if (!test && !(await this.canSend())) return this.setWaiting('subscription');
+      if (!test && !(await this.canSend())) return this.setWaiting(id, 'subscription');
       const pick = this.next(now, st);
       if (!pick.contact) {
         if (pick.reason === 'done') {
@@ -358,7 +475,7 @@ class Outreach extends EventEmitter {
           st.pauseReason = 'finished';
           this.save(st);
         }
-        return this.setWaiting(pick.reason);
+        return this.setWaiting(id, pick.reason);
       }
       await this.sendOne(pick, st);
     } catch (err) {
@@ -378,23 +495,31 @@ class Outreach extends EventEmitter {
       st.current = null;
       st.nextDueAt = at + this.contactGap(st.config);
     }
-    this.waiting = stage < 3 ? 'next_message' : 'interval'; // shown at once, not at the next tick
+    this.waiting.set(st.id, stage < 3 ? 'next_message' : 'interval'); // shown at once, not at the next tick
   }
 
   async sendOne({ contact, stage, day }, st) {
     const cfg = st.config;
     const now = this.clock();
+    const id = st.id;
     // Safety net: a reply that arrived without being matched still stops
     // the sequence for this contact.
     if (stage > 1 && this.hasReplied(contact.phone, contact.lastSentAt)) {
       this.onIncoming({ phone: contact.phone, text: '' });
       return;
     }
-    const id = this.store.reserve({ phone: contact.phone, stage, test: cfg.test, day, now });
-    if (id === null) {
-      // Already attempted in an earlier run: bring the contact up to date,
-      // never send it again.
-      this.store.setContact(contact.phone, { stage, state: stage >= 3 ? 'done' : 'active', lastSentAt: contact.lastSentAt ?? now }, now);
+    // Contacted by another campaign since being added: skipped, unless
+    // this campaign allows previously contacted people.
+    if (stage === 1 && !cfg.test && !cfg.allowPrevious && this.store.wasContacted(contact.phone, id)) {
+      this.store.setContact(id, contact.phone, { state: 'skipped', note: 'Already contacted in another campaign' }, now);
+      this.emit('change', { id });
+      return;
+    }
+    const sendId = this.store.reserve({ campaignId: id, campaignName: st.name, phone: contact.phone, stage, test: cfg.test, day, now });
+    if (sendId === null) {
+      // Already sent (or possibly sent) in an earlier run: bring the contact
+      // up to date, never send it again.
+      this.store.setContact(id, contact.phone, { stage, state: stage >= 3 ? 'done' : 'active', lastSentAt: contact.lastSentAt ?? now }, now);
       this.scheduleAfter(st, contact.phone, stage, contact.lastSentAt ?? now);
       this.save(st);
       return;
@@ -406,30 +531,30 @@ class Outreach extends EventEmitter {
     this.save(st);
     const text = render(cfg.templates[stage - 1], this.values(contact));
     try {
-      const res = cfg.test ? { id: `TEST-${id}` } : await this.transport.send(contact.phone, text);
+      const res = cfg.test ? { id: `TEST-${sendId}` } : await this.transport.send(contact.phone, text);
       const at = this.clock();
-      this.store.markSent(id, res.id, at);
-      this.store.setContact(contact.phone, { stage, state: stage >= 3 ? 'done' : 'active', lastSentAt: at, note: null }, at);
+      this.store.markSent(sendId, res.id, at);
+      this.store.setContact(id, contact.phone, { stage, state: stage >= 3 ? 'done' : 'active', lastSentAt: at, note: null }, at);
       st.failures = 0;
       this.scheduleAfter(st, contact.phone, stage, at);
       this.save(st);
-      this.emit('sent', { phone: contact.phone, stage, text, waId: res.id, test: cfg.test, at });
+      this.emit('sent', { campaignId: id, phone: contact.phone, stage, text, waId: res.id, test: cfg.test, at });
     } catch (err) {
       const msg = errorText(err);
       if (err?.code === 'not_connected') {
         // Checked before anything was handed to WhatsApp: nothing was sent.
-        this.store.release(id);
+        this.store.release(sendId);
         st.nextDueAt = now;
         if (stage > 1) st.current = contact.phone; // still this contact's turn
         this.save(st);
-        return this.setWaiting('whatsapp');
+        return this.setWaiting(id, 'whatsapp');
       }
       if (isTimeout(err)) {
-        this.store.markFailed(id, `${msg} (it may still have been delivered)`, 'unknown');
-        this.store.setContact(contact.phone, { state: 'uncertain', note: 'Sending timed out; check the chat before continuing.' }, now);
+        this.store.markFailed(sendId, `${msg} (it may still have been delivered)`, 'unknown');
+        this.store.setContact(id, contact.phone, { state: 'uncertain', note: 'Sending timed out; check the chat before continuing.' }, now);
       } else {
-        this.store.markFailed(id, msg);
-        this.store.setContact(contact.phone, { state: 'failed', note: msg }, now);
+        this.store.markFailed(sendId, msg);
+        this.store.setContact(id, contact.phone, { state: 'failed', note: msg }, now);
       }
       st.failures = (st.failures || 0) + 1;
       if (isRestriction(err)) {
@@ -440,7 +565,7 @@ class Outreach extends EventEmitter {
         st.pauseReason = 'errors';
       }
       this.save(st);
-      this.emit('failed', { phone: contact.phone, stage, error: msg, paused: st.status === 'paused' ? st.pauseReason : null });
+      this.emit('failed', { campaignId: id, phone: contact.phone, stage, error: msg, paused: st.status === 'paused' ? st.pauseReason : null });
     }
   }
 
@@ -453,25 +578,47 @@ class Outreach extends EventEmitter {
     return { name: contact.name ?? null, business: cleanBusiness(this.details(contact).business) };
   }
 
-  preview(contact) {
-    return this.load().config.templates.map((t) => render(t, this.values(contact)));
+  preview(contact, templates = null) {
+    const list = templates || (contact.campaignId ? this.load(contact.campaignId).config.templates : DEFAULT_TEMPLATES);
+    return list.map((t) => render(t, this.values(contact)));
   }
 
-  snapshot(st = this.load()) {
+  summary(c) {
+    const contacts = this.store.contacts(c.id);
+    const counts = contacts.reduce((m, x) => ((m[x.state] = (m[x.state] || 0) + 1), m), {});
+    return { id: c.id, name: c.name, status: c.status, pauseReason: c.pauseReason, test: Boolean({ ...DEFAULT_CONFIG, ...c.config }.test), contacts: contacts.length, counts, waiting: c.status === 'running' ? this.waiting.get(c.id) || null : null };
+  }
+
+  overview() {
+    const now = this.clock();
+    const day = dayOf(now);
+    return {
+      campaigns: this.store.campaigns().map((c) => this.summary(c)),
+      acknowledged: this.acknowledged(),
+      limits: LIMITS,
+      today: { day, recipients: this.store.recipientsOn(day, false), testRecipients: this.store.recipientsOn(day, true) },
+    };
+  }
+
+  snapshot(id) {
+    const st = this.load(id);
+    if (!st) return null;
     const now = this.clock();
     const test = st.config.test;
     return {
+      id: st.id,
+      name: st.name,
       status: st.status,
       pauseReason: st.pauseReason,
-      waiting: st.status === 'running' ? this.waiting : null,
+      waiting: st.status === 'running' ? this.waiting.get(id) || null : null,
       nextDueAt: st.nextDueAt,
       current: st.current || null,
-      acknowledged: Boolean(st.acknowledgedAt),
+      acknowledged: this.acknowledged(),
       config: st.config,
       limits: LIMITS,
       today: { day: dayOf(now), recipients: this.store.recipientsOn(dayOf(now), test), cap: st.config.dailyCap },
-      contacts: this.store.contacts().map((c) => ({ ...c, optedOut: this.store.isOptedOut(c.phone), zone: this.zoneOf(c.phone) })),
-      sends: this.store.sends({ test, limit: 100 }),
+      contacts: this.store.contacts(id).map((c) => ({ ...c, optedOut: this.store.isOptedOut(c.phone), zone: this.zoneOf(c.phone) })),
+      sends: this.store.sends({ campaignId: id, test, limit: 100 }),
     };
   }
 }

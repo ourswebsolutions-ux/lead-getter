@@ -192,7 +192,7 @@ test('WhatsApp client: live messages, history sync, LIDs and receipts reach the 
   assert.deepEqual(statuses, [{ jid: '923001234567@s.whatsapp.net', id: 'H1', status: 'delivered' }]);
 });
 
-test('migration to version 4 keeps existing leads and settings', () => {
+test('migration from version 3 (through 4 and 5) keeps existing leads and settings', () => {
   const dir = tmp();
   const file = path.join(dir, 'leads.db');
   const v3 = new LeadStore(file);
@@ -203,7 +203,7 @@ test('migration to version 4 keeps existing leads and settings', () => {
   v3.db.exec('DROP TABLE wa_chats; DROP TABLE wa_chat_messages; DROP TABLE outreach_contacts; DROP TABLE outreach_sends; DROP TABLE outreach_optouts; PRAGMA user_version = 3;');
   v3.close();
   const v4 = new LeadStore(file);
-  assert.equal(v4.db.prepare('PRAGMA user_version').get().user_version, 4);
+  assert.equal(v4.db.prepare('PRAGMA user_version').get().user_version, 5, 'upgraded through version 4 to the current version');
   assert.deepEqual(v4.listLeads({}).map((l) => l.name), ['Kept Estate']);
   assert.deepEqual(v4.getState('theme'), { mode: 'dark' });
   assert.equal(v4.db.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE name IN ('wa_chats','wa_chat_messages','outreach_contacts','outreach_sends','outreach_optouts')").get().n, 5);

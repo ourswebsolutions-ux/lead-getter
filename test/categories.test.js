@@ -126,7 +126,7 @@ test('migration keeps existing leads, dates them from their real discovery time,
   assert.equal(l.discoveredDate, '2026-10-18');
   assert.equal(l.categoryId, null);
   assert.equal(s.listCategories().uncategorized, 1);
-  assert.equal(s.db.prepare('PRAGMA user_version').get().user_version, 4);
+  assert.equal(s.db.prepare('PRAGMA user_version').get().user_version, 5);
   assert.equal(s.db.prepare('SELECT COUNT(*) n FROM businesses').get().n, 2);
   s.close();
   // Re-opening does not migrate again or change anything.

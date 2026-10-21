@@ -512,10 +512,10 @@ function initChatsAndOutreach(cipher) {
   chats.on('incoming', (m) => outreach.onIncoming({ phone: m.phone, text: m.text }));
   chats.on('manual', ({ phone }) => phone && outreach.onManualMessage(phone));
   chats.on('status', (st) => outreach.onStatus(st.id, st.status));
-  outreach.on('change', (snap) => send('outreach:state', snap));
+  outreach.on('change', (e) => send('outreach:state', { id: e?.id ?? null }));
   outreach.on('replied', (e) => send('outreach:event', { type: e.optOut ? 'opted_out' : 'replied', phone: e.phone }));
-  outreach.on('sent', (e) => send('outreach:event', { type: 'sent', phone: e.phone, stage: e.stage, test: e.test }));
-  outreach.on('failed', (e) => send('outreach:event', { type: 'failed', phone: e.phone, stage: e.stage, error: e.error, paused: e.paused }));
+  outreach.on('sent', (e) => send('outreach:event', { type: 'sent', campaignId: e.campaignId, phone: e.phone, stage: e.stage, test: e.test }));
+  outreach.on('failed', (e) => send('outreach:event', { type: 'failed', campaignId: e.campaignId, phone: e.phone, stage: e.stage, error: e.error, paused: e.paused }));
   outreach.init();
 }
 
@@ -523,52 +523,64 @@ const isPhone = (v) => typeof v === 'string' && /^\+\d{6,15}$/.test(v);
 const isJid = (v) => typeof v === 'string' && v.length < 100 && /^[\w.:+-]+@(s\.whatsapp\.net|lid)$/.test(v);
 const unavailable = () => ({ ok: false, error: waInitError || 'WhatsApp is not available on this computer.' });
 
-// Leads the campaign may message: a valid number confirmed on WhatsApp by
-// the automatic check (the same rule as sending from the lead table).
-function eligibleLeads() {
-  const inCampaign = new Set((outreach ? outreach.store.contacts() : []).map((c) => c.phone));
-  const seen = new Set();
-  const out = [];
-  for (const l of store.listLeads({})) {
-    if (l.phoneStatus !== 'valid' || l.whatsapp !== 'available' || l.whatsappMethod === 'manual' || seen.has(l.phone)) continue;
-    seen.add(l.phone);
-    out.push({ id: l.id, name: l.name, phone: l.phone, category: l.category || null, inCampaign: inCampaign.has(l.phone), optedOut: outreach ? outreach.store.isOptedOut(l.phone) : false });
-  }
-  return out;
+const campaignId = (v) => (Number.isInteger(Number(v)) && Number(v) > 0 ? Number(v) : null);
+
+// Leads a campaign may message (verified on WhatsApp, after the user's
+// category/date/search filters; previously contacted and opted-out numbers
+// are listed separately). See whatsapp/eligibility.js.
+function eligibleFor(id, rawFilters) {
+  const { eligibleContacts } = require('../whatsapp/eligibility');
+  const f = rawFilters && typeof rawFilters === 'object' ? rawFilters : {};
+  const filters = {
+    categories: Array.isArray(f.categories) ? f.categories.map(String).slice(0, 200) : [],
+    from: typeof f.from === 'string' ? f.from : null,
+    to: typeof f.to === 'string' ? f.to : null,
+    search: typeof f.search === 'string' ? f.search.slice(0, 100) : '',
+  };
+  return eligibleContacts({ leads: store.listLeads({}), store: outreach.store, campaign: outreach.load(id), filters });
 }
 
-async function outreachAddLeads(ids) {
+// Adds leads by id. The same rules are checked here again, whatever the
+// window sent: verified only, no opt-outs, no previously contacted numbers
+// unless the campaign allows them.
+async function outreachAddLeads(id, ids) {
   if (!outreach) return unavailable();
+  if (!outreach.load(id)) return { ok: false, error: 'That campaign no longer exists.' };
   const { pickName } = require('../whatsapp/templates');
   const { jidOfPhone } = require('../whatsapp/messages');
-  const allowed = new Map(eligibleLeads().map((l) => [l.id, l]));
+  const { eligible } = eligibleFor(id, {});
+  const allowed = new Map(eligible.map((l) => [l.id, l]));
   const list = [];
-  for (const id of Array.isArray(ids) ? ids.slice(0, 500) : []) {
-    const lead = allowed.get(Number(id));
+  for (const leadId of Array.isArray(ids) ? ids.slice(0, 2000) : []) {
+    const lead = allowed.get(Number(leadId));
     if (!lead) continue;
     const chat = chats.store.chat(jidOfPhone(lead.phone));
     list.push({ phone: lead.phone, leadId: lead.id, name: pickName({ contactName: chat?.name, businessName: lead.name }).name });
   }
-  if (!list.length) return { ok: false, error: 'None of these leads can be added: only numbers confirmed on WhatsApp can be messaged.' };
-  return outreach.addLeads(list);
+  if (!list.length) return { ok: false, error: 'None of these leads can be added: only numbers confirmed on WhatsApp that weren’t contacted before (or opted out) can be added.' };
+  return outreach.addLeads(id, list);
 }
 
-async function outreachStart(opts) {
+async function outreachStart(id, opts) {
   if (!outreach) return unavailable();
-  if (!outreach.load().config.test) {
+  const c = outreach.load(id);
+  if (!c) return { ok: false, error: 'That campaign no longer exists.' };
+  if (!c.config.test) {
     const sub = await requireSubscription();
     if (!sub.ok) return sub;
   }
-  return outreach.start({ acknowledge: Boolean(opts && opts.acknowledge === true) });
+  return outreach.start(id, { acknowledge: Boolean(opts && opts.acknowledge === true) });
 }
 
-async function outreachResume() {
+async function outreachResume(id) {
   if (!outreach) return unavailable();
-  if (!outreach.load().config.test) {
+  const c = outreach.load(id);
+  if (!c) return { ok: false, error: 'That campaign no longer exists.' };
+  if (!c.config.test) {
     const sub = await requireSubscription();
     if (!sub.ok) return sub;
   }
-  return outreach.resume();
+  return outreach.resume(id);
 }
 
 function waSnapshot() {
@@ -868,31 +880,37 @@ app.whenReady().then(() => {
     return chats.send(jid, text);
   });
   // Outreach campaign
-  handle('outreach:state', () => (outreach ? { ok: true, ...outreach.snapshot() } : unavailable()));
-  handle('outreach:eligible', () => (outreach ? { ok: true, leads: eligibleLeads() } : unavailable()));
-  handle('outreach:configure', (cfg) => (!outreach ? unavailable() : cfg && typeof cfg === 'object' ? outreach.configure(cfg) : { ok: false, error: 'Invalid settings.' }));
-  handle('outreach:addLeads', (ids) => outreachAddLeads(ids));
-  handle('outreach:start', (opts) => outreachStart(opts));
-  handle('outreach:pause', () => (outreach ? outreach.pause('user') : unavailable()));
-  handle('outreach:resume', () => outreachResume());
-  handle('outreach:stop', () => (outreach ? outreach.stop() : unavailable()));
-  for (const action of ['exclude', 'include', 'optOut', 'remove']) {
-    handle(`outreach:${action}`, (phone) => (!outreach ? unavailable() : isPhone(phone) ? outreach[action](phone) : { ok: false, error: 'Invalid number.' }));
+  const withCampaign = (fn) => (id, ...args) => {
+    if (!outreach) return unavailable();
+    const cid = campaignId(id);
+    if (!cid || !outreach.load(cid)) return { ok: false, error: 'That campaign no longer exists.' };
+    return fn(cid, ...args);
+  };
+  handle('outreach:overview', () => (outreach ? { ok: true, ...outreach.overview() } : unavailable()));
+  handle('outreach:create', (name) => (outreach ? outreach.create(typeof name === 'string' ? name : '') : unavailable()));
+  handle('outreach:delete', (ids) => (outreach ? outreach.remove(Array.isArray(ids) ? ids : []) : unavailable()));
+  handle('outreach:reset', (ids) => (outreach ? outreach.reset(Array.isArray(ids) ? ids : []) : unavailable()));
+  handle('outreach:state', withCampaign((id) => ({ ok: true, ...outreach.snapshot(id) })));
+  handle('outreach:eligible', withCampaign((id, filters) => ({ ok: true, ...eligibleFor(id, filters) })));
+  handle('outreach:history', () => (outreach ? { ok: true, history: outreach.store.history() } : unavailable()));
+  handle('outreach:configure', withCampaign((id, cfg) => (cfg && typeof cfg === 'object' ? outreach.configure(id, cfg) : { ok: false, error: 'Invalid settings.' })));
+  handle('outreach:addLeads', withCampaign((id, ids) => outreachAddLeads(id, ids)));
+  handle('outreach:start', withCampaign((id, opts) => outreachStart(id, opts)));
+  handle('outreach:pause', withCampaign((id) => outreach.pause(id, 'user')));
+  handle('outreach:resume', withCampaign((id) => outreachResume(id)));
+  handle('outreach:stop', withCampaign((id) => outreach.stop(id)));
+  for (const action of ['exclude', 'include', 'removeContact']) {
+    handle(`outreach:${action}`, withCampaign((id, phone) => (isPhone(phone) ? outreach[action](id, phone) : { ok: false, error: 'Invalid number.' })));
   }
-  handle('outreach:setName', (phone, name) => (!outreach ? unavailable() : isPhone(phone) ? outreach.setName(phone, typeof name === 'string' ? name : null) : { ok: false, error: 'Invalid number.' }));
-  // Preview of (possibly unsaved) templates for one campaign contact.
-  handle('outreach:render', (templates, phone) => {
-    if (!outreach || !Array.isArray(templates) || templates.length !== 3) return { ok: false };
-    const { render } = require('../whatsapp/templates');
-    const c = isPhone(phone) ? outreach.store.contact(phone) : null;
-    const values = c ? outreach.values(c) : { name: null, business: null };
-    return { ok: true, values, messages: templates.map((t) => render({ text: String(t?.text ?? '').slice(0, 1000), fallback: String(t?.fallback ?? '').slice(0, 1000) }, values)) };
-  });
-  handle('outreach:preview', (phone) => {
-    if (!outreach || !isPhone(phone)) return { ok: false };
-    const c = outreach.store.contact(phone);
-    return c ? { ok: true, messages: outreach.preview(c) } : { ok: false };
-  });
+  handle('outreach:optOut', (phone) => (!outreach ? unavailable() : isPhone(phone) ? outreach.optOut(phone) : { ok: false, error: 'Invalid number.' }));
+  handle('outreach:setName', withCampaign((id, phone, name) => (isPhone(phone) ? outreach.setName(id, phone, typeof name === 'string' ? name : null) : { ok: false, error: 'Invalid number.' })));
+  // Preview of (possibly unsaved) templates for one contact of the campaign.
+  handle('outreach:render', withCampaign((id, templates, phone) => {
+    if (!Array.isArray(templates) || templates.length !== 3) return { ok: false };
+    const c = isPhone(phone) ? outreach.store.contact(id, phone) : null;
+    const clean = templates.map((t) => ({ text: String(t?.text ?? '').slice(0, 1000), fallback: String(t?.fallback ?? '').slice(0, 1000) }));
+    return { ok: true, values: c ? outreach.values(c) : { name: null, business: null }, messages: outreach.preview(c || { name: null }, clean) };
+  }));
   handle('search:interrupted', () => interrupted);
   handle('search:dismissInterrupted', () => {
     interrupted = null;

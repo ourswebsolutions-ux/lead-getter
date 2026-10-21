@@ -243,6 +243,25 @@ What WhatsApp makes available, and what it doesn't:
 
 **Outreach** sends a three-message introduction to leads whose numbers the automatic check confirmed on WhatsApp.
 
+- **Campaigns:** create as many campaigns as you like. Each has its own name, messages, timing, daily limit, sending hours, optional start and end dates, and contact queue.
+  - **Bulk actions:** select campaigns with the checkboxes (or **Select all**), then **Delete selected** or **Reset selected**. Both ask for confirmation.
+  - **Delete** removes the campaign, its queue and its settings.
+  - **Reset** stops the campaign and clears its queue and progress but keeps its settings.
+  - Neither touches your leads, your app settings, other campaigns or the contact history.
+  - **One campaign runs at a time.** The daily limit and the gap between contacts count across all campaigns.
+- **Choosing contacts** (*Add verified leads*):
+  - **Filters:** one or several categories, the date the lead was collected (from/to, or a single day) and search. All filters work together.
+  - **Verified only:** only numbers the automatic WhatsApp check confirmed (green dot). Unchecked, unavailable, failed or manually marked numbers can never be selected, and a number's format is never taken as proof.
+  - **Counts and selection:** the count shows how many verified contacts are eligible. Pick contacts one by one or use **Select all**.
+- **Previously contacted:** a number messaged by any campaign is excluded from every later campaign by default, and listed under **Previously contacted** across all campaigns.
+  - The list shows the number, its lead, the campaign, how many messages it got, and the real status: *Sent*, *Delivered*, *Read*, or *Unknown* if a send was interrupted.
+  - *Delivered* and *Read* appear only when WhatsApp's receipt arrives.
+  - Numbers are matched in their normalized international form, so the same number listed twice, or written differently, counts once.
+  - Deleting or resetting a campaign never removes this history.
+  - To message someone again on purpose, turn on **Allow previously contacted contacts** in that campaign's settings. Opt-outs are never messaged, even then.
+  - A contact queued in two campaigns is messaged only by the first one. The other marks them *Contacted before* and skips them.
+- **Retries:** a send that definitely failed can be retried with **Retry**, and the retry reuses the same record, so it never produces a duplicate. A send that timed out or was interrupted is never retried automatically: check the chat first.
+
 > WhatsApp's terms don't allow automated messaging from unofficial apps, and numbers that send unexpected messages are often restricted or banned. Live sending asks you to accept this risk once. A **Test run** goes through the whole schedule without sending anything.
 
 - **Messages:** three editable messages, in Urdu or Roman Urdu. The defaults are a greeting, *Kaise hain aap?* and a question about their business that names it.
@@ -256,7 +275,7 @@ What WhatsApp makes available, and what it doesn't:
   - Example: contact A at 14:00, 14:01 and 14:02; contact B starts between 14:47 and 15:02.
   - At most **10–15 unique contacts per day** (10 by default); all of a contact's messages count once.
   - The contact in progress, the next send time and the daily count are kept in the database. After a restart or a pause, an interrupted contact is finished first, about a minute after their last message, and the gap before the next contact is never shortened.
-- **Quiet hours** apply in the recipient's local time (from the country code; for example, Pakistan uses Pakistan time).
+- **Sending hours and dates:** messages go out only within the campaign's sending hours, in the recipient's local time (from the country code; for example, Pakistan uses Pakistan time), and only between its start and end dates when they are set.
 - **Replies:** any reply stops the sequence for that contact and hands the conversation to you. Messages such as *stop*, *not interested*, *message na karein* or *میسج نہ کریں* opt the number out for good. You can also exclude or opt out any contact yourself.
 - **No duplicates:** each message to each contact is reserved in the database before it is sent, so retries, restarts, a second copy of the app or a reconnect can never send it twice.
   - If the app closes or a send times out mid-send, that contact is marked *Check chat* and never resent automatically.
@@ -264,7 +283,7 @@ What WhatsApp makes available, and what it doesn't:
 - **WhatsApp refusals:** rate limits, restrictions or a logged-out session pause the whole campaign (*possible restriction*) until you resume it. Three failures in a row also pause it.
 - **Delivery:** sent, delivered and read states come from WhatsApp's receipts.
 - **Conditions:** sending needs an active subscription and a connected WhatsApp, and the app has to be unlocked with your PIN. The campaign waits otherwise.
-- **Storage:** campaign data is in `outreach_contacts`, `outreach_sends` and `outreach_optouts`.
+- **Storage:** campaign data is in `outreach_campaigns`, `outreach_contacts`, `outreach_sends` (the permanent send history) and `outreach_optouts`. Updating from an earlier version moves the existing campaign into *Campaign 1*, with its progress and history.
 
 ### Security
 
