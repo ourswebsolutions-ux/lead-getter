@@ -4,7 +4,7 @@ A desktop app that searches Google Maps in **your own, already-open Google Chrom
 
 ## Download
 
-Installers are attached to each [GitHub Release](https://github.com/ourswebsolutions-ux/lead-getter/releases): Windows `.exe`, Linux `.deb` and `.AppImage`, macOS `.dmg`. The installed app needs nothing else: no Node.js, no server to start. It talks to the hosted licence server for subscriptions.
+Installers are attached to each [GitHub Release](https://github.com/ourswebsolutions-ux/lead-getter/releases): Windows `.exe`, Linux `.deb` and `.AppImage`, macOS `.dmg`. The installed app needs no Node.js or dev tools. Subscriptions and free searches are checked with the licence server set in `src/main/license-config.json`: `https://subscription.axorawebsolutions.com/lead-getter` in production. See [server/README.md](server/README.md#deployment).
 
 The installers are not code-signed yet. Windows SmartScreen says "Windows protected your PC": choose **More info → Run anyway**. On macOS, right-click the app and choose **Open** the first time.
 
@@ -19,7 +19,7 @@ The installers are not code-signed yet. Windows SmartScreen says "Windows protec
 npm install && (cd server && npm install)
 npm run dev          # everything: licence server → UI dev server → app
 npm start            # same, with the built UI instead of the dev server
-npm test             # unit tests (subscription/maintenance tests use a throwaway Supabase schema)
+npm test             # unit tests (subscription tests use a temporary local licence server)
 npm run test:e2e     # drives the real Electron app (temporary data)
 ```
 
@@ -37,7 +37,7 @@ npm run release      # installers for this OS in release/
 | Windows | `Lead-Finder-Setup-<version>.exe` |
 | macOS | `Lead-Finder-<version>-mac-<arch>.dmg` |
 
-Installers point the app at the hosted licence server: `LICENSE_SERVER_URL` (default `https://lead-getter-licence.onrender.com`) and optionally `LICENSE_PUBLIC_KEY` (default: the key in `src/main/license-config.json`). The licence server itself is never bundled into the app: it holds the secrets that approve subscriptions.
+The app finds the licence server through `src/main/license-config.json`. The licence server itself is never bundled into the app, because it holds the secrets that approve subscriptions. Start it with `npm run server` (or `npm run dev`).
 
 ### Publishing a release
 
@@ -48,11 +48,7 @@ Installers point the app at the hosted licence server: `LICENSE_SERVER_URL` (def
 git tag v1.0.1 && git push origin v1.0.1
 ```
 
-Set the repository variable `LICENSE_SERVER_URL` (Settings → Secrets and variables → Actions → Variables) to the deployed server's address. No credentials are needed in the repository: the workflow publishes with the built-in `GITHUB_TOKEN`.
-
-### Hosting the licence server (Render)
-
-[render.yaml](render.yaml) describes the service. In Render: **New → Blueprint**, pick this repository, then enter the values marked `sync: false` from `server/.env`. Set `PUBLIC_BASE_URL` to the service's `https://….onrender.com` address. Render's free tier blocks outgoing SMTP, so email goes through Brevo's HTTPS API there: create a free Brevo account, verify the sender address used in `SMTP_FROM`, and set `BREVO_API_KEY`. A free Render service sleeps when idle; the first check after a pause can take up to a minute, and the app waits for it.
+No credentials are needed in the repository: the workflow publishes with the built-in `GITHUB_TOKEN`.
 
 iOS: see [docs/IOS.md](docs/IOS.md).
 
@@ -105,9 +101,20 @@ A business keeps the leads it has already become. One skipped earlier only becau
 
 Plans: **Monthly PKR 3,000**, **Six Months PKR 10,000**, **Lifetime PKR 20,000** (one-time).
 
-- **Applying:** the plan button in the header (or a blocked search) opens the plans. Applying asks for the plan, a payment screenshot (chosen through the system file dialog and checked to be a real PNG, JPEG or WebP of at most 5 MB), a message and an optional email. The application goes to the licence server (`server/`), which emails info.axoraweb@gmail.com with Approve and Cancel buttons. The app shows **Pending Approval** with the application ID.
+- **Applying:** the plan button in the header (or a blocked search) opens the plans. Applying asks for the plan, a payment screenshot (chosen through the system file dialog and checked to be a real PNG, JPEG or WebP of at most 5 MB), an optional message and your email (required; it identifies your account on the subscription website). The application goes to the licence server (`server/`), which emails info.axoraweb@gmail.com with Approve and Cancel buttons. The app shows **Pending Approval** with the application ID.
 - **Enforcement:** searching, CSV export and the WhatsApp features need an active subscription. Before each of them, and every 30 minutes during a search, the app asks the server for a freshly **signed** status and enforces it in the main process. Missing, pending, cancelled and expired subscriptions each get their own message and a button to the plans. Without a connection to the server, these features stay blocked; Maps needs the internet anyway.
 - **Setup:** see [server/README.md](server/README.md). The app trusts only the server whose public key is in `src/main/license-config.json`.
+
+### Axora subscription website
+
+When the licence server has `SUBSCRIPTION_API_TOKEN`, the [Axora subscription website](https://subscription.axorawebsolutions.com) decides who has a paid subscription. Activation and suspension happen on the website.
+
+- **Account:** each installation is a website user whose ID is its **Device ID** (shown in the plans window) and whose email is the one in the customer's application. The email field is now required.
+- **Registration:** a new device is registered on the website automatically as **inactive**, and stays that way until the administrator activates it. Existing accounts are never changed. An email already used by another device is reported, not taken over.
+- **Access:** paid searches only while the website reports the subscription as `active`. Suspended, expired, not activated, "email in use" and "could not be confirmed" each have their own message. The 3 free searches per computer stay available.
+- **Credentials:** the website's admin token stays on the licence server. The desktop app never has it.
+
+Details: [docs/AXORA-INTEGRATION.md](docs/AXORA-INTEGRATION.md).
 
 ## How a search works
 
@@ -251,7 +258,7 @@ src/browser/    chrome.js (discovery + CDP attach), maps.js (Maps page ops),
 src/database/   SQLite store (node:sqlite, built into Electron)
 src/export/     CSV generation
 test/           Unit tests, Electron E2E test, real-Chrome integration script
-server/         Licence server (subscriptions, approval email, Supabase)
+server/         Licence server (subscriptions, approval email, local SQLite)
 scripts/        dev.js (npm run dev), release.js (npm run release)
 build/          App icon
 ```

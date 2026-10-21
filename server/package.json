@@ -10,12 +10,9 @@
   "scripts": {
     "setup": "node scripts/setup.js",
     "start": "node --env-file=.env src/index.js",
-    "test": "node --env-file=.env --test test/*.test.js",
-    "migrate": "node --env-file=.env -e \"const {loadConfig}=require('./src/config');const {PgStore}=require('./src/db');const c=loadConfig();const s=new PgStore({connectionString:c.supabase.dbUrl,ca:c.supabase.dbCa,schema:c.supabase.schema});s.migrate({cron:c.supabase.cron}).then(a=>{console.log(a.length?'applied: '+a.join(', '):'up to date');return s.close()})\"",
-    "maintenance": "node --env-file=.env -e \"const {loadConfig}=require('./src/config');const {PgStore}=require('./src/db');const {StorageClient}=require('./src/storage');const {createMailer}=require('./src/mailer');const {runMaintenance}=require('./src/maintenance');const c=loadConfig();const store=new PgStore({connectionString:c.supabase.dbUrl,ca:c.supabase.dbCa,schema:c.supabase.schema});runMaintenance({store,storage:new StorageClient({url:c.supabase.url,secretKey:c.supabase.secretKey,bucket:c.supabase.bucket}),mailer:createMailer(c),config:c}).then(()=>store.close())\""
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
-    "nodemailer": "^7.0.6",
-    "pg": "^8.23.1"
+    "nodemailer": "^7.0.6"
   }
 }

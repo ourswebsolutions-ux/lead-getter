@@ -105,16 +105,11 @@ let appLock = null;
 let license = null;
 let pendingShot = null; // screenshot chosen in the file dialog, kept in the main process
 
-// Installers carry release-config.json (written by `npm run release`, pointing
-// at the hosted licence server); development uses license-config.json.
 function licenseConfig() {
   let file = {};
-  for (const name of app.isPackaged ? ['./release-config.json', './license-config.json'] : ['./license-config.json']) {
-    try {
-      file = require(name);
-      break;
-    } catch {}
-  }
+  try {
+    file = require('./license-config.json');
+  } catch {}
   return {
     serverUrl: process.env.LEAD_FINDER_LICENSE_URL || file.serverUrl,
     publicKey: process.env.LEAD_FINDER_LICENSE_PUBKEY || file.publicKey,
@@ -163,12 +158,17 @@ async function pickScreenshot() {
   return { ok: true, name: pendingShot.name, size: data.length, preview: `data:${type};base64,${data.toString('base64')}` };
 }
 
+// Same rule as the licence server and the subscription website.
+const EMAIL_RE = /^[^\s@<>()",;:]{1,64}@[^\s@<>()",;:]{1,189}\.[a-z]{2,24}$/i;
+
 async function applySubscription(raw) {
   const f = raw && typeof raw === 'object' ? raw : {};
   const plan = typeof f.plan === 'string' ? f.plan : '';
   const message = typeof f.message === 'string' ? f.message.trim() : '';
-  const email = typeof f.email === 'string' ? f.email.trim() : '';
+  const email = typeof f.email === 'string' ? f.email.trim().toLowerCase() : '';
   if (!plan) return { ok: false, error: 'Choose a subscription plan.' };
+  if (!email) return { ok: false, error: 'Enter your email address.' };
+  if (!EMAIL_RE.test(email) || email.length > 254) return { ok: false, error: 'The email address is not valid.' };
   if (!pendingShot) return { ok: false, error: 'Attach the payment screenshot.' };
   if (message.length > 1000) return { ok: false, error: 'The message is too long (1000 characters maximum).' };
   try {
@@ -305,8 +305,9 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
         const st = await license.status().catch(() => null);
         sendSubscription(st);
         // A started free-trial search runs to the end; a subscription that
-        // expires mid-search stops it.
-        if (st && !access.trial && !st.allowed && st.reason !== 'offline') {
+        // expires or is suspended mid-search stops it (an unanswered check
+        // does not).
+        if (st && !access.trial && !st.allowed && st.reason !== 'offline' && st.reason !== 'unavailable') {
           sendStatus({ state: 'stopping', message: st.message });
           controller.abort();
         }

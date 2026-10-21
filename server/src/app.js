@@ -10,7 +10,11 @@
 //   GET  /admin/applications/:id/screenshot?token=…
 //   GET  /verify-email?token=…
 //
-// Data: Supabase Postgres (store) and Supabase Storage (screenshots).
+// With the Axora subscription website configured (`axora`), it decides who
+// has a paid subscription: status is read from it on every check, and the
+// email Approve button activates the device there.
+//
+// Data: local SQLite (store) and an uploads folder (screenshots).
 
 const http = require('node:http');
 const crypto = require('node:crypto');
@@ -27,7 +31,9 @@ const REISSUE_GAP_MS = 10 * 60 * 1000;
 // New applications are always allowed (even with one pending); this only
 // stops a flood of emails to the administrator.
 const MAX_APPLICATIONS_PER_DAY = 10;
-const EMAIL_RE = /^[^\s@<>()",;:]{1,64}@[^\s@<>()",;:]{1,190}\.[a-z]{2,24}$/i;
+// Same rule as the subscription website's POST /users, so an email accepted
+// here is never rejected there.
+const EMAIL_RE = /^[^\s@<>()",;:]{1,64}@[^\s@<>()",;:]{1,189}\.[a-z]{2,24}$/i;
 
 const IMAGE_TYPES = [
   { type: 'image/png', ext: 'png', test: (b) => b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) },
@@ -42,10 +48,16 @@ class HttpError extends Error {
   }
 }
 
-function createApp({ config, store, storage, mailer, now = () => new Date(), logger = console }) {
+function createApp({ config, store, storage, mailer, axora = null, now = () => new Date(), logger = console }) {
   const privateKey = crypto.createPrivateKey(config.licensePrivateKey);
   const nowIso = () => now().toISOString();
   const link = (p) => `${config.publicBaseUrl.replace(/\/$/, '')}${p}`;
+  // When served under a path (PUBLIC_BASE_URL https://host/lead-getter), the
+  // prefix is removed here, whether or not the host's proxy already did.
+  const localPath = (u) => {
+    const base = new URL(config.publicBaseUrl).pathname.replace(/\/+$/, '');
+    return base && (u === base || u.startsWith(`${base}/`) || u.startsWith(`${base}?`)) ? u.slice(base.length) || '/' : u;
+  };
 
   // --- helpers --------------------------------------------------------------
 
@@ -135,7 +147,48 @@ function createApp({ config, store, storage, mailer, now = () => new Date(), log
     return { row };
   }
 
+  // The website's effectiveStatus, as this API's subscription states.
+  const WEBSITE_STATE = { active: 'active', expired: 'expired', suspended: 'suspended', inactive: 'inactive' };
+
+  // The device's account on the subscription website, as
+  // { subscription, registration }. With register, a Device ID the website
+  // doesn't know is added there (as an inactive user) under the customer's
+  // email from their latest application. Existing users, and an email that
+  // belongs to another device, are never changed. If the website can't be
+  // reached or refuses the token, nothing happens and the next check retries.
+  const logged = new Map(); // deviceId -> last logged registration state
+  const note = (deviceId, state, text) => {
+    if (logged.get(deviceId) === state) return;
+    logged.set(deviceId, state);
+    logger.error(`[subscription website] ${text}`);
+  };
+
+  async function websiteAccount(deviceId, { register = false } = {}) {
+    const fromSite = (s) => ({ state: WEBSITE_STATE[s.effectiveStatus] || 'inactive', expiresAt: s.expiresAt });
+    try {
+      const found = await axora.subscription(deviceId);
+      if (found) return { subscription: fromSite(found), registration: { state: 'registered' } };
+      const email = await store.latestEmail(deviceId);
+      if (!register || !email) return { subscription: { state: 'none' }, registration: { state: email ? 'not_registered' : 'no_email' } };
+      const r = await axora.register(deviceId, email);
+      if (r.state === 'registered') {
+        note(deviceId, 'registered', `registered Device ID ${deviceId} (${email}) as an inactive user`);
+        return { subscription: fromSite(r.user.subscription), registration: { state: 'registered' } };
+      }
+      if (r.state === 'exists') {
+        const again = await axora.subscription(deviceId);
+        return { subscription: again ? fromSite(again) : { state: 'none' }, registration: { state: 'registered' } };
+      }
+      note(deviceId, r.state, `could not register Device ID ${deviceId}: ${r.state === 'email_in_use' ? `${email} already belongs to another Device ID (left unchanged)` : r.message}`);
+      return { subscription: { state: 'none' }, registration: { state: r.state } };
+    } catch (err) {
+      note(deviceId, 'unavailable', err.message);
+      return { subscription: { state: 'unavailable' }, registration: { state: 'unavailable' } };
+    }
+  }
+
   async function subscriptionFor(deviceId) {
+    if (axora) return (await websiteAccount(deviceId)).subscription;
     const lic = await store.license(deviceId);
     if (!lic) return { state: 'none' };
     const active = !lic.expiresAt || lic.expiresAt > nowIso();
@@ -169,8 +222,10 @@ function createApp({ config, store, storage, mailer, now = () => new Date(), log
     if (!plan) throw new HttpError(400, 'Choose a subscription plan.');
     const message = typeof data.message === 'string' ? data.message.trim() : '';
     if (message.length > 1000) throw new HttpError(400, 'The message is too long (1000 characters maximum).');
-    const email = typeof data.email === 'string' && data.email.trim() ? data.email.trim() : null;
-    if (email && !EMAIL_RE.test(email)) throw new HttpError(400, 'The email address is not valid.');
+    // The email identifies the customer on the subscription website.
+    const email = typeof data.email === 'string' ? data.email.trim().toLowerCase() : '';
+    if (!email) throw new HttpError(400, 'Enter your email address.');
+    if (!EMAIL_RE.test(email) || email.length > 254) throw new HttpError(400, 'The email address is not valid.');
     const shot = Buffer.from(typeof data.screenshot?.data === 'string' ? data.screenshot.data : '', 'base64');
     if (!shot.length) throw new HttpError(400, 'Attach the payment screenshot.');
     if (shot.length > MAX_SCREENSHOT) throw new HttpError(400, 'The screenshot is larger than 5 MB.');
@@ -184,18 +239,24 @@ function createApp({ config, store, storage, mailer, now = () => new Date(), log
 
     const id = `LF-${crypto.randomBytes(5).toString('hex').toUpperCase()}`;
     const objectPath = `applications/${id}/${crypto.randomBytes(8).toString('hex')}.${kind.ext}`;
-    // The screenshot goes to private Supabase Storage first; a failed
-    // database insert leaves an orphan that maintenance removes after a day.
     await storage.upload(objectPath, shot, kind.type);
     const approve = makeToken('approve', ACTION_TTL_MS);
     const cancel = makeToken('cancel', ACTION_TTL_MS);
     const verify = email ? makeToken('verify_email', EMAIL_TTL_MS) : null;
-    await store.createApplication(
-      { id, deviceId, plan: plan.id, message, email, screenshotPath: objectPath, screenshotType: kind.type, screenshotSize: shot.length, screenshotSha256: c.sha256(shot).toString('hex'), createdAt: nowIso() },
-      [approve, cancel, ...(verify ? [verify] : [])],
-    );
+    try {
+      await store.createApplication(
+        { id, deviceId, plan: plan.id, message, email, screenshotPath: objectPath, screenshotType: kind.type, screenshotSize: shot.length, screenshotSha256: c.sha256(shot).toString('hex'), createdAt: nowIso() },
+        [approve, cancel, ...(verify ? [verify] : [])],
+      );
+    } catch (err) {
+      await storage.remove([objectPath]).catch(() => {});
+      throw err;
+    }
 
-    const app = { id, plan, message, email, deviceId, createdAt: nowIso(), current: await subscriptionFor(deviceId) };
+    // Registers a new device on the subscription website (inactive) now, so
+    // the administrator can find it there; retried on later checks if needed.
+    const account = axora ? await websiteAccount(deviceId, { register: true }) : null;
+    const app = { id, plan, message, email, deviceId, createdAt: nowIso(), current: account ? account.subscription : await subscriptionFor(deviceId), website: account?.registration.state };
     try {
       await sendAdminEmail(app, approve.token, cancel.token, { filename: `payment-${id}.${kind.ext}`, content: shot, contentType: kind.type });
     } catch (err) {
@@ -220,13 +281,13 @@ function createApp({ config, store, storage, mailer, now = () => new Date(), log
     const deviceId = await authenticate(req, url, body);
     const nonce = url.searchParams.get('nonce') || '';
     if (!/^[A-Za-z0-9_-]{16,64}$/.test(nonce)) throw new HttpError(400, 'Missing nonce');
-    const [subscription, application, pendingApplications, trial] = await Promise.all([
-      subscriptionFor(deviceId),
+    const [account, application, pendingApplications, trial] = await Promise.all([
+      axora ? websiteAccount(deviceId, { register: true }) : subscriptionFor(deviceId).then((subscription) => ({ subscription })),
       store.latestApplication(deviceId),
       store.pendingCount(deviceId),
       trialFor(req.machineId),
     ]);
-    const payload = { v: 1, deviceId, nonce, serverTime: nowIso(), subscription, application, pendingApplications, trial };
+    const payload = { v: 1, deviceId, nonce, serverTime: nowIso(), subscription: account.subscription, registration: account.registration, application, pendingApplications, trial };
     json(res, 200, { token: c.signToken(payload, privateKey) });
   }
 
@@ -282,7 +343,23 @@ function createApp({ config, store, storage, mailer, now = () => new Date(), log
       const keepLifetime = cur && !cur.expiresAt;
       return { plan: keepLifetime ? cur.plan : plan.id, expiresAt: keepLifetime || plan.months === null ? null : addMonths(start, plan.months).toISOString() };
     };
-    const r = await store.decide({ id, tokenHash: c.hashToken(token), action, now: decidedAt.toISOString(), licenceFor });
+    // With the subscription website, approval is recorded there first; if
+    // that fails, nothing changes here and the link stays usable.
+    let website = null;
+    if (axora && action === 'approve' && app.status === 'pending' && !(await checkToken(token, id, action)).error) {
+      const fail = (status, title, text) => html(res, status, pages.result(title, text));
+      if (!app.email) return fail(409, 'Email address needed', `Application ${id} has no email address, which the subscription website requires. Add Device ID ${app.device_id} on the subscription website and activate it there, then cancel this application.`);
+      try {
+        const cur = await axora.subscription(app.device_id);
+        website = licenceFor(app, cur?.effectiveStatus === 'active' ? { plan: app.plan, expiresAt: cur.expiresAt } : null);
+        const out = await axora.activate(app.device_id, app.email, website.expiresAt);
+        if (out?.error) return fail(409, 'Not activated', `The subscription website refused it (${out.error.code}: ${out.error.message}). Nothing was changed; fix it on the website, then use this link again.`);
+      } catch (err) {
+        logger.error(`[subscription website] ${err.message}`);
+        return fail(503, 'Subscription website unavailable', 'The subscription website could not be reached, so nothing was changed. Use this link again later.');
+      }
+    }
+    const r = await store.decide({ id, tokenHash: c.hashToken(token), action, now: decidedAt.toISOString(), licenceFor: website ? () => website : licenceFor });
     if (r.error) {
       const text = { invalid: 'This link is invalid.', used: 'This link has already been used.', expired: 'This link has expired.', processed: `Application ${id} was already ${r.status}.` }[r.error];
       return html(res, r.error === 'used' || r.error === 'processed' ? 409 : 400, pages.result(r.error === 'processed' ? 'Already processed' : 'Link not usable', text));
@@ -309,7 +386,7 @@ function createApp({ config, store, storage, mailer, now = () => new Date(), log
     let ok = false;
     if (app) for (const a of ['approve', 'cancel']) if (!(await checkToken(token, id, a)).error) ok = true;
     if (!ok) return html(res, 403, pages.result('Not available', 'This link is invalid or has been used.'));
-    if (!app.screenshot_path || app.screenshot_deleted_at) return html(res, 410, pages.result('Screenshot removed', 'The screenshot was removed after its retention period.'));
+    if (!app.screenshot_path) return html(res, 410, pages.result('Screenshot removed', 'The screenshot is no longer available.'));
     const data = await storage.download(app.screenshot_path);
     res.writeHead(200, { 'content-type': app.screenshot_type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
     res.end(data);
@@ -325,7 +402,7 @@ function createApp({ config, store, storage, mailer, now = () => new Date(), log
   // --- router -------------------------------------------------------------------------
 
   async function route(req, res) {
-    const url = new URL(req.url, 'http://local');
+    const url = new URL(localPath(req.url), 'http://local');
     const m = url.pathname.match(/^\/admin\/applications\/([^/]+)\/(approve|cancel|screenshot)$/);
     if (req.method === 'GET' && url.pathname === '/api/plans') {
       return json(res, 200, { plans: Object.values(PLANS), paymentMethods: PAYMENT_METHODS, paymentInstructions: config.paymentInstructions || '', trialSearches: TRIAL_SEARCHES });
@@ -346,7 +423,7 @@ function createApp({ config, store, storage, mailer, now = () => new Date(), log
       const status = err instanceof HttpError ? err.status : 500;
       if (status === 500) logger.error(`[error] ${req.method} ${req.url.split('?')[0]}: ${String(err.message).split('\n')[0]}`);
       if (res.headersSent) return res.end();
-      if (req.url.startsWith('/api/')) json(res, status, { error: status === 500 ? 'Server error' : err.message });
+      if (localPath(req.url).startsWith('/api/')) json(res, status, { error: status === 500 ? 'Server error' : err.message });
       else html(res, status, pages.result('Error', status === 500 ? 'Something went wrong.' : err.message));
     });
   });

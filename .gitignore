@@ -7,4 +7,3 @@ release/
 server/.env
 server/data/
 server/node_modules/
-src/main/release-config.json

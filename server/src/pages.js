@@ -8,9 +8,13 @@ const esc = (v) =>
 const fmt = (iso) => (iso ? new Date(iso).toUTCString().replace(' GMT', ' UTC') : 'Never');
 
 function currentText(cur) {
+  const plan = cur?.plan ? ` (${cur.plan})` : '';
   if (!cur || cur.state === 'none') return 'No subscription';
-  if (cur.state === 'expired') return `Expired ${fmt(cur.expiresAt)} (${cur.plan})`;
-  return cur.expiresAt ? `Active until ${fmt(cur.expiresAt)} (${cur.plan})` : `Active, lifetime`;
+  if (cur.state === 'expired') return `Expired ${fmt(cur.expiresAt)}${plan}`;
+  if (cur.state === 'suspended') return 'Suspended on the subscription website';
+  if (cur.state === 'inactive') return 'Registered on the subscription website, not activated';
+  if (cur.state === 'unavailable') return 'Unknown (subscription website unreachable)';
+  return cur.expiresAt ? `Active until ${fmt(cur.expiresAt)}${plan}` : `Active, lifetime`;
 }
 
 function rows(app) {
@@ -20,9 +24,17 @@ function rows(app) {
     ['Device ID', app.deviceId],
     ['Applicant email', app.email ? `${app.email} (not yet confirmed)` : 'Not provided'],
     ['Current subscription', currentText(app.current)],
+    ...(app.website ? [['Subscription website', WEBSITE_TEXT[app.website] || app.website]] : []),
     ['Submitted', fmt(app.createdAt)],
   ];
 }
+
+const WEBSITE_TEXT = {
+  registered: 'Device ID registered (new users stay inactive until you activate them)',
+  email_in_use: 'Not registered: this email already belongs to another Device ID there (nothing was changed)',
+  invalid: 'Not registered: the website rejected the Device ID or email',
+  unavailable: 'Not reachable right now; registration is retried automatically',
+};
 
 function button(href, label, color) {
   return `<a href="${esc(href)}" style="display:inline-block;padding:12px 22px;border-radius:8px;background:${color};color:#fff;text-decoration:none;font-weight:600;font-family:Arial,sans-serif;font-size:15px">${esc(label)}</a>`;
@@ -60,6 +72,8 @@ button{font:600 15px system-ui,Arial,sans-serif;color:#fff;border:0;border-radiu
 function confirm(app, action, token) {
   const plan = app.planInfo;
   const verb = action === 'approve' ? 'Approve Subscription' : 'Cancel Subscription';
+  // Relative URLs (from …/admin/applications/<id>/<action>) keep working when
+  // the server is served under a path such as /lead-getter.
   const q = `?token=${encodeURIComponent(token)}`;
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(verb)} · ${esc(app.id)}</title><style>${PAGE_CSS}</style></head><body><main>
   <h1>${esc(verb)}?</h1><p>Application <b>${esc(app.id)}</b>. Nothing has changed yet. Confirm below.</p>
@@ -72,8 +86,8 @@ function confirm(app, action, token) {
     .map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`)
     .join('')}</table>
   <p class="msg">${esc(app.message || '(no message)')}</p>
-  <img src="/admin/applications/${esc(app.id)}/screenshot${esc(q)}" alt="Payment screenshot">
-  <form method="post" action="/admin/applications/${esc(app.id)}/${action}" style="margin-top:20px">
+  <img src="screenshot${esc(q)}" alt="Payment screenshot">
+  <form method="post" action="${action}" style="margin-top:20px">
     <input type="hidden" name="token" value="${esc(token)}">
     <button type="submit" class="${action}">${esc(verb)}</button>
   </form></main></body></html>`;

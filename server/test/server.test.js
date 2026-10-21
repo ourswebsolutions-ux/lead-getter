@@ -5,20 +5,17 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { createApp } = require('../src/app');
-const { PgStore } = require('../src/db');
-const { StorageClient } = require('../src/storage');
+const { Store } = require('../src/store');
+const { Uploads } = require('../src/uploads');
 const c = require('../src/crypto');
 
 test('plans, signed requests, application email, single-use approval, signed licence', async (t) => {
-  // A throwaway schema and bucket in the configured Supabase project.
-  if (!process.env.SUPABASE_DB_URL) return t.skip('Supabase not configured (.env)');
-  const id = crypto.randomBytes(4).toString('hex');
-  const store = new PgStore({ connectionString: process.env.SUPABASE_DB_URL, ca: fs.readFileSync(path.join(__dirname, '..', process.env.SUPABASE_DB_CA || 'certs/supabase-root-2021-ca.crt'), 'utf8'), schema: `lf_test_${id}`, max: 2 });
-  const storage = new StorageClient({ url: process.env.SUPABASE_URL, secretKey: process.env.SUPABASE_SECRET_KEY, bucket: `lf-test-${id}` });
-  await store.migrate();
-  await storage.ensureBucket();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lf-server-'));
+  const store = new Store(path.join(dir, 'subscriptions.db'));
+  const storage = new Uploads(path.join(dir, 'uploads'));
   const server = createApp({
     config: { publicBaseUrl: 'http://x', adminEmail: 'admin@example.com', licensePrivateKey: crypto.generateKeyPairSync('ed25519').privateKey.export({ format: 'pem', type: 'pkcs8' }) },
     store,
@@ -28,12 +25,10 @@ test('plans, signed requests, application email, single-use approval, signed lic
   });
   const mails = [];
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
-  t.after(async () => {
+  t.after(() => {
     server.close();
-    const names = (await store.pool.query('select name from storage.objects where bucket_id = $1', [storage.bucket])).rows.map((r) => r.name);
-    await storage.dropTestBucket(names);
-    await store.pool.query(`drop schema if exists "lf_test_${id}" cascade`);
-    await store.close();
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
   });
   const base = `http://127.0.0.1:${server.address().port}`;
 
@@ -50,7 +45,8 @@ test('plans, signed requests, application email, single-use approval, signed lic
     return fetch(`${base}${pq}`, { method, body, headers: { 'x-lf-key': pk, 'x-lf-ts': ts, 'x-lf-nonce': nonce, 'x-lf-sig': sig, 'content-type': 'application/json' } });
   };
   const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), crypto.randomBytes(64)]);
-  const res = await signed('POST', '/api/applications', JSON.stringify({ plan: 'lifetime', message: 'Paid', screenshot: { data: png.toString('base64') } }));
+  const res = await signed('POST', '/api/applications', JSON.stringify({ plan: 'lifetime', message: 'Paid', email: 'customer@example.com', screenshot: { data: png.toString('base64') } }));
+  assert.equal((await signed('POST', '/api/applications', JSON.stringify({ plan: 'lifetime', screenshot: { data: png.toString('base64') } }))).status, 400, 'email required');
   assert.equal(res.status, 201);
   assert.equal(mails[0].to, 'admin@example.com');
   const approve = mails[0].html.match(/href="http:\/\/x(\/admin\/applications\/[^"?]+\/approve)\?token=([^"]+)"/);
@@ -62,4 +58,6 @@ test('plans, signed requests, application email, single-use approval, signed lic
   assert.equal(payload.subscription.state, 'active');
   assert.equal(payload.subscription.expiresAt, null);
   assert.equal(payload.deviceId, c.deviceIdFromKey(pk));
+  const files = fs.readdirSync(path.join(dir, 'uploads', 'applications'), { recursive: true }).filter((f) => f.endsWith('.png'));
+  assert.equal(files.length, 1, 'screenshot kept in the uploads folder');
 });

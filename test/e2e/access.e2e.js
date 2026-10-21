@@ -128,7 +128,7 @@ test('app lock, subscription flow and gating, website filter, WhatsApp-only expo
   assert.equal((await win.evaluate(() => window.leadFinder.subscriptionStatus())).trial.remaining, 3, 'a search that never reached Chrome uses no free search');
   // All free searches used (counted on the server for this computer).
   const machine = crypto.createHash('sha256').update(`lead-finder:${readMachineId()}`).digest('hex');
-  await lic.sql('insert into $S.trials (machine_id, used, updated_at) values ($1, 3, $2) on conflict (machine_id) do update set used = 3', [machine, new Date().toISOString()]);
+  lic.sql('INSERT INTO trials (machine_id, used, updated_at) VALUES (?, 3, ?) ON CONFLICT (machine_id) DO UPDATE SET used = 3', [machine, new Date().toISOString()]);
   await startSearch();
   await plans.waitFor();
   assert.match(await plans.innerText(), /Your 3 free searches have been used/);
@@ -163,6 +163,13 @@ test('app lock, subscription flow and gating, website filter, WhatsApp-only expo
   await plans.getByRole('img', { name: 'Payment screenshot preview' }).waitFor();
   assert.ok(await submit.isEnabled(), 'the screenshot is enough; the message is optional');
   await plans.getByLabel(/Message or transaction ID/).fill('Paid PKR 10,000 by JazzCash, TID 778899');
+  // The email is required (it identifies the customer on the subscription website).
+  await submit.click();
+  await plans.getByRole('alert').filter({ hasText: 'Enter your email address.' }).waitFor();
+  await plans.getByLabel(/^Email/).fill('not-an-email');
+  await submit.click();
+  await plans.getByRole('alert').filter({ hasText: 'The email address is not valid.' }).waitFor();
+  await plans.getByLabel(/^Email/).fill('customer@example.com');
   if (shots) await win.screenshot({ path: path.join(shots, 'access-apply.png') });
   await submit.click();
   await plans.getByRole('heading', { name: 'Application submitted' }).waitFor();
@@ -188,6 +195,7 @@ test('app lock, subscription flow and gating, website filter, WhatsApp-only expo
   assert.equal(await plans.getByRole('button', { name: 'Apply for Subscription' }).first().isEnabled(), true);
   await plans.getByRole('button', { name: 'Apply for Subscription' }).first().click();
   await plans.getByRole('button', { name: 'Choose image…' }).click();
+  await plans.getByLabel(/^Email/).fill('customer@example.com');
   await plans.getByRole('button', { name: 'Submit application' }).click(); // no message
   await plans.getByRole('heading', { name: 'Application submitted' }).waitFor();
   await plans.getByRole('button', { name: 'Done' }).click();
@@ -223,7 +231,7 @@ test('app lock, subscription flow and gating, website filter, WhatsApp-only expo
 
   // Expiry (server clock decides): blocked again with the expired message.
   const deviceId = await deviceIdOf(win);
-  await lic.sql('update $S.licenses set expires_at = $1 where device_id = $2', [new Date(Date.now() - 60_000).toISOString(), deviceId]);
+  lic.sql('UPDATE licenses SET expires_at = ? WHERE device_id = ?', [new Date(Date.now() - 60_000).toISOString(), deviceId]);
   await startSearch();
   await plans.waitFor();
   assert.match(await plans.innerText(), /Your subscription has expired/);
@@ -237,6 +245,7 @@ test('app lock, subscription flow and gating, website filter, WhatsApp-only expo
   await plans.getByRole('button', { name: 'Apply for Subscription' }).first().click();
   await plans.getByRole('button', { name: 'Choose image…' }).click();
   await plans.getByLabel(/Message or transaction ID/).fill('Monthly renewal, TID 1122');
+  await plans.getByLabel(/^Email/).fill('customer@example.com');
   await plans.getByRole('button', { name: 'Submit application' }).click();
   await plans.getByRole('heading', { name: 'Application submitted' }).waitFor();
   await plans.getByRole('button', { name: 'Done' }).click();

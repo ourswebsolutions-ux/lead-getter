@@ -55,10 +55,32 @@ function fmtDate(iso) {
 export function statusLine(st) {
   if (!st) return 'Checking subscription…';
   const sub = st.subscription || {};
-  if (st.reason === 'active') return sub.expiresAt ? `${planName(sub.plan)} · active until ${fmtDate(sub.expiresAt)}` : `${planName(sub.plan)} · lifetime access`;
+  const name = sub.plan ? `${planName(sub.plan)} · ` : 'Subscription ';
+  if (st.reason === 'active') return sub.expiresAt ? `${name}active until ${fmtDate(sub.expiresAt)}` : `${name}lifetime access`;
   if (st.reason === 'trial') return `Free trial: ${st.trial.remaining} of ${st.trial.limit} free searches left.`;
   return st.message;
 }
+
+// The ID the subscription website knows this installation by.
+function DeviceId({ id, notify }) {
+  if (!id) return null;
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(id);
+      notify({ type: 'ok', text: 'Device ID copied.' });
+    } catch {}
+  };
+  return (
+    <p className="device-id">
+      Device ID <code className="mono">{id}</code>
+      <button type="button" className="icon-btn" aria-label="Copy Device ID" title="Copy Device ID" onClick={copy}>
+        <Icon name="copy" size={13} />
+      </button>
+    </p>
+  );
+}
+
+const EMAIL_RE = /^[^\s@<>()",;:]{1,64}@[^\s@<>()",;:]{1,189}\.[a-z]{2,24}$/i;
 
 const planName = (id) => ({ monthly: 'Monthly', six_months: 'Six Months', lifetime: 'Lifetime' })[id] || id || '';
 
@@ -95,6 +117,9 @@ export default function Plans({ status, notice, onClose, notify }) {
 
   async function submit(e) {
     e.preventDefault();
+    const address = email.trim();
+    if (!address) return setError('Enter your email address.');
+    if (!EMAIL_RE.test(address) || address.length > 254) return setError('The email address is not valid.');
     setBusy(true);
     setError('');
     try {
@@ -113,6 +138,7 @@ export default function Plans({ status, notice, onClose, notify }) {
           <div>
             <h2>{done ? 'Application submitted' : plan ? `Apply for ${plan.name}` : 'Subscription plans'}</h2>
             <p className={`plans-status reason-${status?.reason || 'none'}`}>{statusLine(status)}</p>
+            <DeviceId id={status?.deviceId} notify={notify} />
           </div>
           <button type="button" className="icon-btn" aria-label="Close" disabled={busy} onClick={onClose}>
             <Icon name="x" size={14} />
@@ -166,7 +192,7 @@ export default function Plans({ status, notice, onClose, notify }) {
             )}
           </>
         ) : (
-          <form className="apply-form" onSubmit={submit}>
+          <form className="apply-form" noValidate onSubmit={submit}>
             <fieldset className="plan-choice">
               <legend>Plan</legend>
               {data.plans.map((p) => (
@@ -194,8 +220,9 @@ export default function Plans({ status, notice, onClose, notify }) {
               <textarea rows={2} maxLength={1000} value={message} placeholder={`e.g. Paid ${plan.priceLabel} by JazzCash`} onChange={(e) => setMessage(e.target.value)} />
             </label>
             <label className="apply-field">
-              <span className="field-label">Email (optional, for approval notifications)</span>
-              <input type="email" value={email} placeholder="you@example.com" onChange={(e) => setEmail(e.target.value)} />
+              <span className="field-label">Email</span>
+              <input type="email" required maxLength={254} autoComplete="email" value={email} placeholder="you@example.com" onChange={(e) => setEmail(e.target.value)} />
+              <span className="muted field-hint">Your Lead Getter account on the subscription website uses this email.</span>
             </label>
             {error && (
               <p className="composer-error" role="alert">

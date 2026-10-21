@@ -46,12 +46,16 @@ const REASON_TEXT = {
   offline: 'Your subscription could not be verified. Check the internet connection and try again.',
   unconfigured: 'Subscriptions are not configured in this copy of Lead Finder.',
   invalid: 'The subscription server gave an invalid answer, so access could not be confirmed.',
+  suspended: 'Your subscription has been suspended, so paid lead searches are blocked. Contact Axora Web Solutions to have it restored.',
+  inactive: 'Your account is registered but its subscription has not been activated yet. Paid lead searches start as soon as it is activated.',
+  email_in_use: 'The email in your application is already linked to another Lead Getter device on the subscription website, so this device could not be registered. Nothing was changed. Contact Axora Web Solutions to have it moved, or apply again with your own email.',
+  unavailable: 'Your subscription could not be confirmed right now (the subscription service did not answer), so paid searches are paused. Try again in a few minutes.',
 };
 
 class LicenseClient {
   // store: LeadStore (app_state), cipher: { encrypt, decrypt } or null,
   // config: { serverUrl, publicKey (SPKI DER base64) }
-  constructor({ store, cipher, config, fetchImpl = globalThis.fetch, timeoutMs = 70_000, clock = () => Date.now(), machineId = readMachineId }) {
+  constructor({ store, cipher, config, fetchImpl = globalThis.fetch, timeoutMs = 15_000, clock = () => Date.now(), machineId = readMachineId }) {
     const raw = typeof machineId === 'function' ? machineId() : machineId;
     this.machine = raw ? crypto.createHash('sha256').update(`lead-finder:${raw}`).digest('hex') : '';
     this.clock = clock;
@@ -59,7 +63,7 @@ class LicenseClient {
     this.cipher = cipher;
     this.config = config || {};
     this.fetch = fetchImpl;
-    this.timeoutMs = timeoutMs; // generous: a free-tier host can take a minute to wake up
+    this.timeoutMs = timeoutMs;
     this.last = null;
     try {
       this.serverKey = this.config.publicKey ? crypto.createPublicKey({ key: Buffer.from(this.config.publicKey, 'base64'), format: 'der', type: 'spki' }) : null;
@@ -112,7 +116,7 @@ class LicenseClient {
     if (body) headers['content-type'] = 'application/json';
     let res;
     try {
-      res = await this.fetch(new URL(pathQuery, this.config.serverUrl), { method, headers, body: body ? payload : undefined, signal: AbortSignal.timeout(timeoutMs) });
+      res = await this.fetch(this.url(pathQuery), { method, headers, body: body ? payload : undefined, signal: AbortSignal.timeout(timeoutMs) });
     } catch (err) {
       throw new LicenseError('offline', err?.name === 'TimeoutError' ? 'The subscription server did not answer in time. Please try again.' : this.unreachableText());
     }
@@ -126,6 +130,12 @@ class LicenseClient {
 
   // A local server address means the server simply isn't running; anything
   // else is most likely a connection problem.
+  // The server may live under a path (https://host/lead-getter), which
+  // new URL('/api/…', base) would drop. Signatures cover only '/api/…'.
+  url(pathQuery) {
+    return `${String(this.config.serverUrl).replace(/\/+$/, '')}${pathQuery}`;
+  }
+
   unreachableText() {
     const url = this.config.serverUrl || '';
     return /^https?:\/\/(127\.0\.0\.1|localhost)(:|\/|$)/.test(url)
@@ -136,7 +146,7 @@ class LicenseClient {
   async plans() {
     if (!this.configured) throw new LicenseError('unconfigured', REASON_TEXT.unconfigured);
     try {
-      const res = await this.fetch(new URL('/api/plans', this.config.serverUrl), { signal: AbortSignal.timeout(this.timeoutMs) });
+      const res = await this.fetch(this.url('/api/plans'), { signal: AbortSignal.timeout(this.timeoutMs) });
       if (!res.ok) throw new Error(String(res.status));
       return await res.json();
     } catch {
@@ -163,9 +173,14 @@ class LicenseClient {
     const trial = p.trial || { limit: 0, used: 0, remaining: 0 };
     let reason = 'active';
     if (sub.state !== 'active') {
-      if (trial.remaining > 0) reason = 'trial';
+      // A suspension, an expiry or an unconfirmed status is always explained,
+      // even while free searches remain (they stay usable).
+      if (sub.state === 'suspended' || sub.state === 'unavailable') reason = sub.state;
+      else if (p.registration?.state === 'email_in_use') reason = 'email_in_use';
+      else if (sub.state === 'expired') reason = app?.status === 'pending' ? 'pending' : 'expired';
+      else if (trial.remaining > 0) reason = 'trial';
       else if (app?.status === 'pending') reason = 'pending';
-      else if (sub.state === 'expired') reason = 'expired';
+      else if (sub.state === 'inactive') reason = 'inactive';
       else if (app?.status === 'cancelled') reason = 'cancelled';
       else reason = 'trial_used';
     }
@@ -173,14 +188,16 @@ class LicenseClient {
     const daysLeft = sub.state === 'active' && sub.expiresAt ? Math.max(0, Math.ceil((Date.parse(sub.expiresAt) - Date.parse(p.serverTime)) / 86_400_000)) : null;
     let message = reason === 'active' ? '' : reason === 'trial' ? `Free trial: ${trial.remaining} of ${trial.limit} free searches left.` : REASON_TEXT[reason];
     if (reason === 'pending' && sub.state === 'expired') message = 'Your subscription has expired. Your new application is awaiting approval; you can search again as soon as it is approved.';
+    if (reason !== 'active' && reason !== 'trial' && trial.remaining > 0) message += ` You can still use ${trial.remaining} free search${trial.remaining === 1 ? '' : 'es'}.`;
     return (this.last = {
       ...out,
       allowed: reason === 'active',
-      canSearch: reason === 'active' || reason === 'trial',
+      canSearch: reason === 'active' || trial.remaining > 0,
       reason,
       message,
       subscription: { ...sub, daysLeft },
       application: app,
+      registration: p.registration || null,
       pendingApplications: p.pendingApplications || 0,
       trial,
       serverTime: p.serverTime,

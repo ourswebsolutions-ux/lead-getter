@@ -828,7 +828,8 @@ html.theme-anim *, html.theme-anim *::before, html.theme-anim *::after {
 .plan-pill:hover { border-color: var(--line-strong); color: var(--text); }
 .plan-pill.reason-active { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); }
 .plan-pill.reason-pending { color: var(--warn); }
-.plan-pill.reason-expired, .plan-pill.reason-none, .plan-pill.reason-cancelled, .plan-pill.reason-trial_used { color: var(--danger); }
+.plan-pill.reason-expired, .plan-pill.reason-none, .plan-pill.reason-cancelled, .plan-pill.reason-trial_used, .plan-pill.reason-suspended, .plan-pill.reason-email_in_use { color: var(--danger); }
+.plan-pill.reason-inactive, .plan-pill.reason-unavailable { color: var(--warn); }
 
 .plans { width: min(760px, 100%); max-height: calc(100vh - 40px); overflow: auto; display: flex; flex-direction: column; gap: 14px; padding: 20px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); box-shadow: var(--shadow-md); animation: card-in 280ms var(--ease) both; }
 .plans-head { display: flex; align-items: flex-start; gap: 12px; }
@@ -837,7 +838,10 @@ html.theme-anim *, html.theme-anim *::before, html.theme-anim *::after {
 .plans-status { margin: 3px 0 0; font-size: 13px; color: var(--text-2); }
 .plans-status.reason-active { color: var(--accent); }
 .plans-status.reason-pending { color: var(--warn); }
-.plans-status.reason-expired, .plans-status.reason-cancelled, .plans-status.reason-none { color: var(--danger); }
+.plans-status.reason-expired, .plans-status.reason-cancelled, .plans-status.reason-none, .plans-status.reason-suspended, .plans-status.reason-email_in_use { color: var(--danger); }
+.plans-status.reason-inactive, .plans-status.reason-unavailable { color: var(--warn); }
+.device-id { display: flex; align-items: center; gap: 6px; margin: 4px 0 0; font-size: 12px; color: var(--muted); }
+.device-id code { user-select: all; color: var(--text); }
 .plans-notice { margin: 0; padding: 10px 12px; border-radius: var(--r); background: var(--warn-soft); color: var(--text); font-size: 13.5px; }
 .plans-notice.pre { white-space: pre-wrap; background: var(--sunken); }
 .plans-loading { margin: 0; }
@@ -883,3 +887,5 @@ html.theme-anim *, html.theme-anim *::before, html.theme-anim *::after {
 .pay-amount { color: var(--text-2); font-size: 12.5px; }
 .plan-pill.reason-trial { color: var(--accent); }
 .plans-status.reason-trial { color: var(--accent); }
+
+.field-hint { font-size: 12px; margin-top: 2px; }

@@ -9,7 +9,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { createApp } = require('../server/src/app');
-const { testSupabase } = require('./supabase-harness');
+const { testLicenseStore } = require('./license-harness');
 const { LicenseClient } = require('../src/main/license');
 const { LeadStore } = require('../src/database/db');
 
@@ -21,10 +21,12 @@ async function harness({ failMail = false } = {}) {
   const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
   let t = Date.parse('2026-10-21T10:00:00.000Z');
   const clock = { now: () => new Date(t), advance: (ms) => (t += ms), ms: () => t };
+  // mails: to the administrator; allMails: everything (applicants too).
   const mails = [];
-  const mailer = { send: async (m) => (failMail ? Promise.reject(Object.assign(new Error('auth failed'), { code: 'EAUTH' })) : mails.push(m)) };
+  const allMails = [];
+  const mailer = { send: async (m) => (failMail ? Promise.reject(Object.assign(new Error('auth failed'), { code: 'EAUTH' })) : (allMails.push(m), m.to === config.adminEmail && mails.push(m))) };
   const config = { publicBaseUrl: 'http://placeholder', adminEmail: 'info.axoraweb@gmail.com', paymentInstructions: 'JazzCash 0300-0000000', licensePrivateKey: privateKey.export({ format: 'pem', type: 'pkcs8' }) };
-  const sb = await testSupabase();
+  const sb = testLicenseStore();
   const server = createApp({ config, store: sb.store, storage: sb.storage, mailer, now: clock.now, logger: { error() {} } });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -41,10 +43,10 @@ async function harness({ failMail = false } = {}) {
     const token = u.searchParams.get('token');
     return fetch(`${u.origin}${u.pathname}`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: `token=${encodeURIComponent(token)}` });
   };
-  return { base, clock, mails, newClient, linksOf, confirm, appConfig, sb, close: async () => (server.close(), await sb.drop(), fs.rmSync(dir, { recursive: true, force: true })) };
+  return { base, clock, mails, allMails, newClient, linksOf, confirm, appConfig, sb, close: async () => (server.close(), sb.drop(), fs.rmSync(dir, { recursive: true, force: true })) };
 }
 
-const apply = (client, extra = {}) => client.apply({ plan: 'monthly', message: 'Paid via JazzCash, TID 123456', screenshot: { type: 'image/png', data: PNG }, ...extra });
+const apply = (client, extra = {}) => client.apply({ plan: 'monthly', message: 'Paid via JazzCash, TID 123456', email: 'customer@example.com', screenshot: { type: 'image/png', data: PNG }, ...extra });
 
 test('plans and the full approve flow, with expiry from the activation date', async (t) => {
   const h = await harness();
@@ -84,7 +86,7 @@ test('plans and the full approve flow, with expiry from the activation date', as
   assert.match(pageHtml, /Approve Subscription\?/);
   assert.match(page.headers.get('content-security-policy'), /default-src 'none'/);
   assert.equal((await client.status()).allowed, false, 'GET changes nothing (safe against link scanners)');
-  const shot = await fetch(`${h.base}${pageHtml.match(/src="([^"]+screenshot[^"]+)"/)[1].replace(/&amp;/g, '&')}`);
+  const shot = await fetch(new URL(pageHtml.match(/src="([^"]*screenshot[^"]+)"/)[1].replace(/&amp;/g, '&'), links.approve));
   assert.ok(Buffer.from(await shot.arrayBuffer()).equals(PNG));
 
   h.clock.advance(60_000);
@@ -161,7 +163,9 @@ test('application validation', async (t) => {
   await assert.rejects(apply(c, { screenshot: { type: 'image/png', data: Buffer.alloc(0) } }), /Attach the payment screenshot/);
   await assert.rejects(apply(c, { screenshot: { type: 'image/png', data: Buffer.concat([PNG, Buffer.alloc(5 * 1024 * 1024)]) } }), /larger than 5 MB/);
   await assert.rejects(apply(c, { email: 'not-an-email' }), /email address is not valid/);
-  assert.equal(h.mails.length, 0, 'nothing emailed for invalid applications');
+  await assert.rejects(apply(c, { email: '' }), /Enter your email address/);
+  await assert.rejects(apply(c, { email: undefined }), /Enter your email address/);
+  assert.equal(h.allMails.length, 0, 'nothing emailed for invalid applications');
 });
 
 test('links: tampered, wrong application, expired, and replays are refused', async (t) => {
@@ -232,23 +236,23 @@ test('user notifications only go to a verified email', async (t) => {
   t.after(h.close);
   const c1 = h.newClient();
   await apply(c1, { email: 'buyer@example.com' });
-  const verifyMail = h.mails.find((m) => m.to === 'buyer@example.com');
+  const verifyMail = h.allMails.find((m) => m.to === 'buyer@example.com');
   assert.match(verifyMail.subject, /Confirm your email/);
   // Not yet verified: approval sends nothing to the user.
-  const before = h.mails.length;
+  const before = h.allMails.length;
   await h.confirm(h.linksOf(h.mails[0]).approve);
   await new Promise((r) => setTimeout(r, 20));
-  assert.equal(h.mails.length, before);
+  assert.equal(h.allMails.length, before);
 
   const c2 = h.newClient();
   await apply(c2, { email: 'second@example.com' });
   const admin2 = h.mails.filter((m) => m.to === 'info.axoraweb@gmail.com').at(-1);
-  const v = h.mails.find((m) => m.to === 'second@example.com').html.match(/href="([^"]+verify-email[^"]+)"/)[1].replace(/&amp;/g, '&');
+  const v = h.allMails.find((m) => m.to === 'second@example.com').html.match(/href="([^"]+verify-email[^"]+)"/)[1].replace(/&amp;/g, '&');
   assert.match(await (await fetch(v)).text(), /Email confirmed/);
   assert.equal((await fetch(v)).status, 400, 'verification link is single-use');
   await h.confirm(h.linksOf(admin2).cancel);
   await new Promise((r) => setTimeout(r, 20));
-  const notice = h.mails.filter((m) => m.to === 'second@example.com').at(-1);
+  const notice = h.allMails.filter((m) => m.to === 'second@example.com').at(-1);
   assert.match(notice.subject, /was not approved/);
 });
 
