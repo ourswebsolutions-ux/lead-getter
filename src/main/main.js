@@ -7,7 +7,9 @@ const { LeadStore, DATE_RE, formatCategory } = require('../database/db');
 const { E164 } = require('../database/phone');
 const { leadsToCsv } = require('../export/csv');
 const { ChromeConnection, ChromeError, ConnectCancelled } = require('../browser/chrome');
-const { SearchSession } = require('../browser/search-session');
+const { SearchSession, WEBSITE_FILTERS } = require('../browser/search-session');
+const { AppLock } = require('./applock');
+const { LicenseClient, readScreenshot } = require('./license');
 
 const DEV_URL = process.env.VITE_DEV_SERVER_URL || '';
 const RENDERER_FILE = path.join(__dirname, '..', '..', 'dist', 'renderer', 'index.html');
@@ -84,11 +86,99 @@ function trustedSender(event) {
   return url.startsWith('file://') && decodeURIComponent(new URL(url).pathname).endsWith('/dist/renderer/index.html');
 }
 
+// Until the PIN is entered, only the lock screen's own calls are answered;
+// everything else is refused here in the main process, so reloading or
+// manipulating the window cannot reach leads or features.
+const LOCK_FREE = new Set(['lock:state', 'lock:setup', 'lock:unlock']);
+
 function handle(channel, fn) {
   ipcMain.handle(channel, async (event, ...args) => {
     if (!trustedSender(event)) throw new Error('Untrusted sender');
+    if (!LOCK_FREE.has(channel) && !appLock?.unlocked) throw new Error('Locked');
     return fn(...args);
   });
+}
+
+// --- subscription ------------------------------------------------------------
+
+let appLock = null;
+let license = null;
+let pendingShot = null; // screenshot chosen in the file dialog, kept in the main process
+
+// Installers carry release-config.json (written by `npm run release`, pointing
+// at the hosted licence server); development uses license-config.json.
+function licenseConfig() {
+  let file = {};
+  for (const name of app.isPackaged ? ['./release-config.json', './license-config.json'] : ['./license-config.json']) {
+    try {
+      file = require(name);
+      break;
+    } catch {}
+  }
+  return {
+    serverUrl: process.env.LEAD_FINDER_LICENSE_URL || file.serverUrl,
+    publicKey: process.env.LEAD_FINDER_LICENSE_PUBKEY || file.publicKey,
+  };
+}
+
+// Asks the licence server (signed, fresh) whether paid features may be used.
+async function requireSubscription() {
+  const st = await license.status();
+  sendSubscription(st);
+  return st.allowed ? { ok: true } : { ok: false, subscription: st.reason, error: st.message };
+}
+
+// Searching: an active subscription, or free trial searches left.
+async function requireSearchAccess() {
+  const st = await license.status();
+  sendSubscription(st);
+  if (st.allowed) return { ok: true, trial: false };
+  if (st.canSearch) return { ok: true, trial: true };
+  return { ok: false, subscription: st.reason, error: st.message };
+}
+
+function sendSubscription(st) {
+  send('subscription:status', publicStatus(st));
+}
+
+function publicStatus(st) {
+  return st && { allowed: st.allowed, canSearch: st.canSearch, reason: st.reason, message: st.message, subscription: st.subscription, application: st.application, pendingApplications: st.pendingApplications, trial: st.trial, deviceId: st.deviceId, serverTime: st.serverTime };
+}
+
+async function pickScreenshot() {
+  const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+    title: 'Choose the payment screenshot',
+    properties: ['openFile'],
+    filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
+  });
+  if (canceled || !filePaths[0]) return { ok: false, canceled: true };
+  const data = await fs.readFile(filePaths[0]);
+  let type;
+  try {
+    type = readScreenshot(data);
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+  pendingShot = { type, data, name: path.basename(filePaths[0]) };
+  return { ok: true, name: pendingShot.name, size: data.length, preview: `data:${type};base64,${data.toString('base64')}` };
+}
+
+async function applySubscription(raw) {
+  const f = raw && typeof raw === 'object' ? raw : {};
+  const plan = typeof f.plan === 'string' ? f.plan : '';
+  const message = typeof f.message === 'string' ? f.message.trim() : '';
+  const email = typeof f.email === 'string' ? f.email.trim() : '';
+  if (!plan) return { ok: false, error: 'Choose a subscription plan.' };
+  if (!pendingShot) return { ok: false, error: 'Attach the payment screenshot.' };
+  if (message.length > 1000) return { ok: false, error: 'The message is too long (1000 characters maximum).' };
+  try {
+    const res = await license.apply({ plan, message, email, screenshot: pendingShot });
+    pendingShot = null;
+    sendSubscription(await license.status());
+    return { ok: true, applicationId: res.applicationId, status: res.status, emailVerificationSent: res.emailVerificationSent };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
 }
 
 function validateKeyword(value) {
@@ -116,6 +206,8 @@ function validateFilter(raw) {
   if (f.category === 'none' || f.category === 'all') out.category = f.category;
   else if (Number.isInteger(f.category) && f.category > 0) out.category = f.category;
   else out.category = 'all';
+  if (f.website === 'with' || f.website === 'without') out.website = f.website;
+  if (f.whatsapp === 'available') out.whatsapp = 'available';
   for (const k of ['date', 'from', 'to', 'before']) {
     if (typeof f[k] === 'string' && DATE_RE.test(f[k])) out[k] = f[k];
   }
@@ -161,11 +253,15 @@ function profileLabel(profile) {
 
 // --- search ----------------------------------------------------------------
 
-async function startSearch(rawKeyword, rawCategory) {
+async function startSearch(rawKeyword, rawCategory, rawWebsite) {
   const { keyword, error } = validateKeyword(rawKeyword);
   if (error) return { ok: false, error };
   const cat = validateCategory(rawCategory);
   if (cat.error) return { ok: false, error: cat.error };
+  const websiteFilter = WEBSITE_FILTERS.has(rawWebsite) ? rawWebsite : 'without';
+  if (search) return { ok: false, error: 'A search is already running.' };
+  const access = await requireSearchAccess();
+  if (!access.ok) return access;
   if (search) return { ok: false, error: 'A search is already running.' };
   // Saved (or matched to an existing spelling) before the search starts.
   let category;
@@ -188,13 +284,38 @@ async function startSearch(rawKeyword, rawCategory) {
   search.promise = (async () => {
     try {
       expectedProfilePath = (await connectChrome(controller.signal)).path;
+      // A free search is counted only once Chrome is ready, so a failed
+      // connection does not use one up. The server refuses when none are left.
+      if (access.trial) {
+        try {
+          const r = await license.consumeTrial();
+          if (r.consumed) sendStatus({ message: `Free trial: ${r.trial.remaining} free search${r.trial.remaining === 1 ? '' : 'es'} left after this one` });
+        } catch (err) {
+          sendSubscription(await license.status());
+          sendStatus({ state: 'error', phase: 'search', message: err.message });
+          return;
+        }
+      }
       if (controller.signal.aborted) {
         sendStatus({ state: 'stopped', message: 'Search stopped' });
         return;
       }
+      // Re-checked during long searches so an expiry takes effect.
+      const recheck = setInterval(async () => {
+        const st = await license.status().catch(() => null);
+        sendSubscription(st);
+        // A started free-trial search runs to the end; a subscription that
+        // expires mid-search stops it.
+        if (st && !access.trial && !st.allowed && st.reason !== 'offline') {
+          sendStatus({ state: 'stopping', message: st.message });
+          controller.abort();
+        }
+      }, 30 * 60 * 1000);
+      controller.signal.addEventListener('abort', () => clearInterval(recheck), { once: true });
       const session = new SearchSession({
         keyword,
         categoryId: category.id,
+        websiteFilter,
         store,
         signal: controller.signal,
         pages: {
@@ -237,6 +358,7 @@ async function startSearch(rawKeyword, rawCategory) {
         },
       });
       stats = await session.run();
+      clearInterval(recheck);
     } catch (err) {
       if (err instanceof ConnectCancelled) {
         sendStatus({ state: 'stopped', message: 'Search stopped' });
@@ -306,6 +428,8 @@ function safeFilePart(text) {
 
 // scope 'all' exports every lead; otherwise only leads matching the filter.
 async function exportCsv(scope, rawFilter) {
+  const sub = await requireSubscription();
+  if (!sub.ok) return sub;
   const filter = scope === 'all' ? {} : validateFilter(rawFilter);
   const leads = store.listLeads(filter);
   if (!leads.length) return { ok: false, error: 'There are no leads matching this selection to export.' };
@@ -341,6 +465,12 @@ function sessionCipher() {
   if (!safeStorage.isEncryptionAvailable()) return null;
   if (process.platform === 'linux' && safeStorage.getSelectedStorageBackend?.() === 'basic_text') return null;
   return { encrypt: (text) => safeStorage.encryptString(text), decrypt: (buf) => safeStorage.decryptString(buf) };
+}
+
+// OS-keychain encryption for the PIN record and the device key. Falls back to
+// none (the PIN is still scrypt-hashed) when no keychain exists.
+function keychainCipher() {
+  return sessionCipher();
 }
 
 function waSnapshot() {
@@ -387,11 +517,13 @@ function initWhatsApp() {
   });
   // A device linked earlier reconnects automatically.
   wa.hasSession()
-    .then((has) => has && wa.connect())
+    .then(async (has) => has && (await license.status()).allowed && wa.connect())
     .catch(() => {});
 }
 
 async function waConnect() {
+  const sub = await requireSubscription();
+  if (!sub.ok) return sub;
   if (!wa) return { ok: false, error: waInitError || 'WhatsApp is not available.' };
   await wa.connect();
   return { ok: true };
@@ -414,6 +546,8 @@ async function waLogout() {
 }
 
 async function waRecheck(phone) {
+  const sub = await requireSubscription();
+  if (!sub.ok) return sub;
   if (!wa || typeof phone !== 'string' || !E164.test(phone)) return { ok: false, error: 'Invalid number.' };
   try {
     const status = await wa.check(phone);
@@ -428,6 +562,8 @@ async function waRecheck(phone) {
 
 // One message to one lead, only after the user pressed Send.
 async function waSend(leadId, rawText) {
+  const sub = await requireSubscription();
+  if (!sub.ok) return sub;
   if (!Number.isInteger(leadId) || leadId <= 0) return { ok: false, error: 'Invalid lead.' };
   const text = typeof rawText === 'string' ? rawText.trim() : '';
   if (!text) return { ok: false, error: 'Write a message first.' };
@@ -552,6 +688,8 @@ function openListing(url) {
 app.whenReady().then(() => {
   try {
     store = new LeadStore(path.join(app.getPath('userData'), 'leads.db'));
+    appLock = new AppLock({ store, cipher: keychainCipher() });
+    license = new LicenseClient({ store, cipher: keychainCipher(), config: licenseConfig() });
     const last = store.getState('lastSearch');
     if (last && ['running', 'connecting', 'paused', 'stopping'].includes(last.state)) interrupted = last;
   } catch (err) {
@@ -560,6 +698,40 @@ app.whenReady().then(() => {
     return;
   }
 
+  handle('lock:state', () => appLock.state());
+  handle('lock:setup', (pin, confirm) => {
+    try {
+      const st = appLock.setup(String(pin ?? ''), String(confirm ?? ''));
+      afterUnlock();
+      return { ok: true, ...st };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  handle('lock:unlock', (pin) => {
+    const r = appLock.unlock(String(pin ?? ''));
+    if (r.ok) afterUnlock();
+    return r;
+  });
+  handle('lock:change', (current, next, confirm) => {
+    try {
+      return appLock.change(String(current ?? ''), String(next ?? ''), String(confirm ?? ''));
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  handle('lock:lock', () => {
+    appLock.lock();
+    return { ok: true };
+  });
+  handle('subscription:status', async () => {
+    const st = await license.status();
+    sendSubscription(st); // keep the header in step with every check
+    return publicStatus(st);
+  });
+  handle('subscription:plans', () => license.plans().catch((err) => ({ error: err.message })));
+  handle('subscription:pickScreenshot', () => pickScreenshot());
+  handle('subscription:apply', (form) => applySubscription(form));
   handle('leads:list', (filter) => store.listLeads(validateFilter(filter)));
   handle('leads:dates', (filter) => store.listDates(validateFilter(filter)));
   handle('leads:delete', (ids) => deleteLeads(ids));
@@ -580,15 +752,50 @@ app.whenReady().then(() => {
     store.setState('lastSearch', { state: 'dismissed' });
     return { ok: true };
   });
-  handle('search:start', (keyword, category) => startSearch(keyword, category));
+  handle('search:start', (keyword, category, website) => startSearch(keyword, category, website));
   handle('search:stop', () => stopSearch());
   handle('search:status', () => lastStatus);
   handle('export:csv', (scope, filter) => exportCsv(scope === 'all' ? 'all' : 'filtered', filter));
   handle('lead:open', (url) => openListing(url));
 
   createWindow();
-  initWhatsApp();
+  if (process.env.LEAD_FINDER_SMOKE_TEST) smokeTest(process.env.LEAD_FINDER_SMOKE_TEST);
 });
+
+// Release check (CI): the installed app must start on its own, show its UI
+// and have its bundled modules. Writes a JSON report and quits.
+function smokeTest(reportFile) {
+  const report = { version: app.getVersion(), packaged: app.isPackaged };
+  const finish = async (ok, error) => {
+    await fs.writeFile(reportFile, JSON.stringify({ ok, error, ...report }, null, 2)).catch(() => {});
+    app.exit(ok ? 0 : 1);
+  };
+  setTimeout(() => finish(false, 'timed out'), 60_000).unref();
+  win.webContents.once('did-finish-load', async () => {
+    try {
+      await new Promise((r) => setTimeout(r, 1500));
+      report.lockScreen = await win.webContents.executeJavaScript("!!document.querySelector('#root')?.textContent.includes('Lead Finder')");
+      report.modules = {
+        playwright: typeof require('playwright-core').chromium.connectOverCDP === 'function',
+        baileys: typeof (await import('baileys')).default === 'function',
+        sqlite: store.db != null,
+      };
+      report.licenseServer = licenseConfig().serverUrl;
+      const ok = report.lockScreen && Object.values(report.modules).every(Boolean);
+      finish(ok, ok ? undefined : 'checks failed');
+    } catch (err) {
+      finish(false, err.message);
+    }
+  });
+}
+
+// Work that should only happen once the user has unlocked the app.
+let unlockedOnce = false;
+function afterUnlock() {
+  if (unlockedOnce) return;
+  unlockedOnce = true;
+  initWhatsApp();
+}
 
 app.on('window-all-closed', () => app.quit());
 

@@ -1,7 +1,7 @@
 {
   "name": "lead-finder",
   "version": "1.0.0",
-  "description": "Finds Google Maps businesses without websites using your own Chrome.",
+  "description": "Finds Google Maps businesses with or without websites using your own Chrome.",
   "main": "src/main/main.js",
   "scripts": {
     "dev": "node scripts/dev.js",
@@ -9,12 +9,14 @@
     "start": "vite build && node scripts/dev.js --prod",
     "test": "node --test test/*.test.js",
     "test:integration": "node test/integration/real-chrome.js",
-    "dist:linux": "vite build && electron-builder --linux AppImage",
-    "dist:win": "vite build && electron-builder --win nsis",
-    "dist:mac": "vite build && electron-builder --mac dmg",
-    "test:e2e": "vite build && node --test --test-timeout=200000 test/e2e/app.e2e.js test/e2e/design.e2e.js test/e2e/premium.e2e.js test/e2e/whatsapp.e2e.js"
+    "test:e2e": "vite build && node --test --test-timeout=200000 test/e2e/app.e2e.js test/e2e/design.e2e.js test/e2e/premium.e2e.js test/e2e/whatsapp.e2e.js",
+    "server": "cd server && npm start",
+    "release": "node scripts/release.js"
   },
-  "author": "Lead Finder",
+  "author": {
+    "name": "Axora Web",
+    "email": "info.axoraweb@gmail.com"
+  },
   "license": "UNLICENSED",
   "devDependencies": {
     "@vitejs/plugin-react": "^6.1.2",
@@ -38,7 +40,8 @@
     "appId": "com.leadfinder.app",
     "productName": "Lead Finder",
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "build"
     },
     "files": [
       "src/main/**",
@@ -52,24 +55,46 @@
     ],
     "linux": {
       "target": [
+        "deb",
         "AppImage"
       ],
-      "category": "Office"
+      "category": "Office",
+      "icon": "build/icon.png",
+      "maintainer": "Axora Web <info.axoraweb@gmail.com>",
+      "synopsis": "Find Google Maps business leads with your own Chrome",
+      "executableName": "lead-finder",
+      "syncDesktopName": true
     },
     "win": {
       "target": [
         "nsis"
-      ]
+      ],
+      "icon": "build/icon.png"
     },
     "mac": {
       "target": [
         "dmg"
       ],
-      "category": "public.app-category.business"
+      "category": "public.app-category.business",
+      "icon": "build/icon.png"
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "artifactName": "Lead-Finder-Setup-${version}.${ext}"
+    },
+    "copyright": "Copyright © 2026 Axora Web",
+    "icon": "build/icon.png",
+    "artifactName": "Lead-Finder-${version}-${os}-${arch}.${ext}",
+    "deb": {
+      "artifactName": "lead-finder_${version}_${arch}.${ext}"
     }
-  }
+  },
+  "homepage": "https://github.com/ourswebsolutions-ux/lead-getter",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ourswebsolutions-ux/lead-getter.git"
+  },
+  "desktopName": "lead-finder.desktop"
 }

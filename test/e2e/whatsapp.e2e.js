@@ -11,6 +11,7 @@ const net = require('node:net');
 const { spawn } = require('node:child_process');
 const { _electron, chromium } = require('playwright-core');
 const { LeadStore } = require('../../src/database/db');
+const { unlock, startLicenseServer, deviceIdOf } = require('./helpers');
 
 const root = path.join(__dirname, '..', '..');
 const shots = process.env.LEAD_FINDER_SCREENSHOTS;
@@ -37,7 +38,9 @@ test('WhatsApp: real QR linking, statuses, composer and send guards', async (t) 
   const userData = path.join(tmp, 'app');
   fs.mkdirSync(userData);
   seed(path.join(userData, 'leads.db'));
-  const env = { ...process.env, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome') };
+  const lic = await startLicenseServer();
+  t.after(() => lic.close());
+  const env = { ...process.env, ...lic.env, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome') };
   delete env.ELECTRON_RUN_AS_NODE;
   const app = await _electron.launch(process.env.LEAD_FINDER_EXE ? { executablePath: process.env.LEAD_FINDER_EXE, args: [], env } : { args: [root], cwd: root, env });
   t.after(async () => {
@@ -45,6 +48,8 @@ test('WhatsApp: real QR linking, statuses, composer and send guards', async (t) 
     fs.rmSync(tmp, { recursive: true, force: true });
   });
   const win = await app.firstWindow();
+  await unlock(win);
+  await lic.activate(await deviceIdOf(win));
   const errors = [];
   win.on('pageerror', (e) => errors.push(e.message));
   await win.getByRole('heading', { name: /Today's leads/ }).waitFor();
@@ -54,9 +59,13 @@ test('WhatsApp: real QR linking, statuses, composer and send guards', async (t) 
   // --- Statuses: only a positive automatic result is green.
   assert.equal(await cell('Green Estate').locator('.phone.wa-available').count(), 1);
   assert.equal(await cell('Green Estate').getByRole('button', { name: 'Send WhatsApp message to Green Estate' }).count(), 1);
-  assert.match(await cell('Grey Estate').innerText(), /No WhatsApp/);
-  assert.match(await cell('Failed Estate').innerText(), /Check failed/);
-  assert.equal(await cell('Failed Estate').locator('.chip').getAttribute('title'), 'WhatsApp did not answer in time');
+  // Only colour signals WhatsApp: other numbers show just the number, no labels or icons.
+  for (const [n, num] of [['Grey Estate', '+923007654321'], ['Failed Estate', '+923009999999'], ['Manual Estate', '+923211234567'], ['Pending Estate', '+923331234567']]) {
+    assert.equal((await cell(n).innerText()).trim(), num, `${n}: number only`);
+    assert.equal(await cell(n).locator('svg, button, .chip').count(), 0, `${n}: no icon or label`);
+  }
+  assert.equal((await cell('Green Estate').innerText()).trim(), '+923001234567', 'green number has no extra text');
+  assert.equal(await cell('Green Estate').locator('svg, .chip').count(), 0, 'green number has no icon');
   for (const n of ['Grey Estate', 'Failed Estate', 'Manual Estate', 'Pending Estate']) {
     assert.equal(await cell(n).locator('.wa-available, .wa-send').count(), 0, `${n} not green`);
   }
@@ -126,7 +135,9 @@ test('WhatsApp linking with the real keychain reaches a real QR code', async (t)
   fs.mkdirSync(userData);
   seed(path.join(userData, 'leads.db'));
   const port = await freePort();
-  const env = { ...process.env, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome') };
+  const lic = await startLicenseServer();
+  t.after(() => lic.close());
+  const env = { ...process.env, ...lic.env, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome') };
   delete env.ELECTRON_RUN_AS_NODE;
   const exe = process.env.LEAD_FINDER_EXE;
   const proc = exe
@@ -148,6 +159,8 @@ test('WhatsApp linking with the real keychain reaches a real QR code', async (t)
     win = browser.contexts().flatMap((c) => c.pages()).find((p) => !p.url().startsWith('devtools'));
     if (!win) await new Promise((r) => setTimeout(r, 250));
   }
+  await unlock(win);
+  await lic.activate(await deviceIdOf(win));
   await win.getByRole('heading', { name: /Today's leads/ }).waitFor();
   const snap = await win.evaluate(() => window.leadFinder.whatsappState());
   assert.equal(snap.secure, true, 'real OS keychain in a normal launch');

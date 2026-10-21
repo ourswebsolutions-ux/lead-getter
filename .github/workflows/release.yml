@@ -1,0 +1,141 @@
+# Builds the installers on each OS and publishes them to GitHub Releases.
+# Trigger: push a version tag, e.g.  git tag v1.0.1 && git push origin v1.0.1
+# (the tag must match "version" in package.json).
+#
+# Repository settings → Secrets and variables → Actions:
+#   variable LICENSE_SERVER_URL  hosted licence server (https://…onrender.com)
+#   variable LICENSE_PUBLIC_KEY  optional; defaults to src/main/license-config.json
+# No other secrets are needed: GITHUB_TOKEN publishes the release.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  LICENSE_SERVER_URL: ${{ vars.LICENSE_SERVER_URL }}
+  LICENSE_PUBLIC_KEY: ${{ vars.LICENSE_PUBLIC_KEY }}
+  CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            args: ''
+          - os: windows-latest
+            args: ''
+          - os: macos-latest
+            args: '--x64 --arm64'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Check tag matches package.json version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          v=$(node -p "require('./package.json').version")
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "Tag $GITHUB_REF_NAME does not match version $v"; exit 1; }
+
+      - run: npm ci
+
+      - name: Unit tests (no network)
+        shell: bash
+        run: node --test test/applock.test.js test/categories.test.js test/csv.test.js test/db.test.js test/phone.test.js test/session.test.js test/website.test.js test/whatsapp.test.js test/chrome.test.js test/maps-dom.test.js
+
+      - name: Build installers
+        run: npm run release -- ${{ matrix.args }}
+
+      # Start each installed app once with no Node or dev tools around: it must
+      # render its UI and load its bundled modules (see smokeTest in main.js).
+      - name: Smoke test (Linux AppImage and .deb)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq xvfb
+          sudo apt-get install -y -qq ./release/lead-finder_*_amd64.deb
+          for bin in "/opt/Lead Finder/lead-finder" "$(ls release/*.AppImage)"; do
+            extra=""; case "$bin" in *.AppImage) extra="--appimage-extract-and-run";; esac
+            LEAD_FINDER_USER_DATA="$RUNNER_TEMP/ud-$RANDOM" LEAD_FINDER_SMOKE_TEST="$RUNNER_TEMP/smoke.json" \
+              xvfb-run -a "$bin" $extra --no-sandbox || true
+            cat "$RUNNER_TEMP/smoke.json"; grep -q '"ok": true' "$RUNNER_TEMP/smoke.json"; rm "$RUNNER_TEMP/smoke.json"
+          done
+
+      - name: Smoke test (Windows installer)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem release -Filter 'Lead-Finder-Setup-*.exe' | Select-Object -First 1
+          Start-Process $setup.FullName -ArgumentList '/S' -Wait
+          $exe = Get-ChildItem "$env:LOCALAPPDATA\Programs" -Recurse -Filter 'Lead Finder.exe' | Select-Object -First 1
+          if (-not $exe) { throw 'Installed app not found' }
+          $env:LEAD_FINDER_USER_DATA = "$env:RUNNER_TEMP\ud"
+          $env:LEAD_FINDER_SMOKE_TEST = "$env:RUNNER_TEMP\smoke.json"
+          Start-Process $exe.FullName -Wait
+          Get-Content $env:LEAD_FINDER_SMOKE_TEST
+          if (-not (Select-String -Path $env:LEAD_FINDER_SMOKE_TEST -Pattern '"ok": true' -Quiet)) { throw 'smoke test failed' }
+
+      - name: Smoke test (macOS app)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          dmg=$(ls release/*-arm64.dmg)
+          hdiutil attach "$dmg" -nobrowse -mountpoint /tmp/lf
+          LEAD_FINDER_USER_DATA="$RUNNER_TEMP/ud" LEAD_FINDER_SMOKE_TEST="$RUNNER_TEMP/smoke.json" \
+            "/tmp/lf/Lead Finder.app/Contents/MacOS/Lead Finder" || true
+          hdiutil detach /tmp/lf
+          cat "$RUNNER_TEMP/smoke.json"; grep -q '"ok": true' "$RUNNER_TEMP/smoke.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ runner.os }}
+          if-no-files-found: error
+          path: |
+            release/*.deb
+            release/*.AppImage
+            release/*.exe
+            release/*.dmg
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist-installers
+          merge-multiple: true
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la dist-installers
+          cat > notes.md <<NOTES
+          ## Lead Finder ${GITHUB_REF_NAME}
+
+          | System | Download |
+          |---|---|
+          | Windows 10/11 (64-bit) | \`Lead-Finder-Setup-*.exe\` |
+          | Ubuntu / Debian | \`lead-finder_*_amd64.deb\` (\`sudo apt install ./lead-finder_*_amd64.deb\`) |
+          | Other Linux | \`Lead-Finder-*-linux-x86_64.AppImage\` (make it executable, then run) |
+          | macOS (Apple silicon / Intel) | \`Lead-Finder-*-mac-arm64.dmg\` / \`Lead-Finder-*-mac-x64.dmg\` |
+
+          Requires Google Chrome. The installers are not code-signed yet:
+          Windows shows a SmartScreen notice (More info → Run anyway); on macOS
+          right-click the app → Open the first time.
+          NOTES
+          gh release create "$GITHUB_REF_NAME" dist-installers/* --title "Lead Finder ${GITHUB_REF_NAME}" --notes-file notes.md --generate-notes --verify-tag

@@ -38,7 +38,7 @@ function adminEmail(app, approveUrl, cancelUrl) {
       ${rows(app).map(([k, v]) => `<tr><td style="padding:6px 0;color:#85868a;width:42%">${esc(k)}</td><td style="padding:6px 0">${esc(v)}</td></tr>`).join('')}
     </table>
     <h2 style="font-size:15px;margin:18px 0 6px">Message from the applicant</h2>
-    <p style="white-space:pre-wrap;background:#f9f9f7;border:1px solid #e4e3de;border-radius:8px;padding:12px;margin:0">${esc(app.message)}</p>
+    <p style="white-space:pre-wrap;background:#f9f9f7;border:1px solid #e4e3de;border-radius:8px;padding:12px;margin:0">${esc(app.message || '(no message)')}</p>
     <p style="color:#4b4d52;font-size:13px">The payment screenshot is attached.</p>
     <p style="margin:22px 0 8px">${button(approveUrl, 'Approve Subscription', '#165f4a')}&nbsp;&nbsp;${button(cancelUrl, 'Cancel Subscription', '#b4261b')}</p>
     <p style="color:#85868a;font-size:12px;margin:12px 0 0">Each button opens a confirmation page; nothing changes until you confirm there. The links work once and expire in 7 days.</p>
@@ -46,7 +46,7 @@ function adminEmail(app, approveUrl, cancelUrl) {
 }
 
 function adminEmailText(app, approveUrl, cancelUrl) {
-  return `New Lead Finder subscription request\n\n${rows(app).map(([k, v]) => `${k}: ${v}`).join('\n')}\n\nMessage:\n${app.message}\n\nApprove Subscription: ${approveUrl}\nCancel Subscription: ${cancelUrl}\n\nThe payment screenshot is attached. Links work once and expire in 7 days.`;
+  return `New Lead Finder subscription request\n\n${rows(app).map(([k, v]) => `${k}: ${v}`).join('\n')}\n\nMessage:\n${app.message || '(no message)'}\n\nApprove Subscription: ${approveUrl}\nCancel Subscription: ${cancelUrl}\n\nThe payment screenshot is attached. Links work once and expire in 7 days.`;
 }
 
 const PAGE_CSS = `body{margin:0;background:#f4f4f1;font:15px/1.5 system-ui,-apple-system,Segoe UI,Arial,sans-serif;color:#17181a}
@@ -71,7 +71,7 @@ function confirm(app, action, token) {
   ]
     .map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`)
     .join('')}</table>
-  <p class="msg">${esc(app.message)}</p>
+  <p class="msg">${esc(app.message || '(no message)')}</p>
   <img src="/admin/applications/${esc(app.id)}/screenshot${esc(q)}" alt="Payment screenshot">
   <form method="post" action="/admin/applications/${esc(app.id)}/${action}" style="margin-top:20px">
     <input type="hidden" name="token" value="${esc(token)}">

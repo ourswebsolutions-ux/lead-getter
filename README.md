@@ -2,23 +2,59 @@
 
 A desktop app that searches Google Maps in **your own, already-open Google Chrome** and lists businesses that have no website of their own. You watch every step in the visible Chrome window; qualified leads appear in the app as they're found and are saved locally in SQLite.
 
+## Download
+
+Installers are attached to each [GitHub Release](https://github.com/ourswebsolutions-ux/lead-getter/releases): Windows `.exe`, Linux `.deb` and `.AppImage`, macOS `.dmg`. The installed app needs nothing else: no Node.js, no server to start. It talks to the hosted licence server for subscriptions.
+
+The installers are not code-signed yet. Windows SmartScreen says "Windows protected your PC": choose **More info → Run anyway**. On macOS, right-click the app and choose **Open** the first time.
+
 ## Requirements
 
 - Google Chrome **144 or newer**, installed normally (Linux, Windows, or macOS)
-- Node.js 22+ and npm (only for building from source)
+- Node.js 22.13+ and npm (only for building from source)
 
-## Install and run
+## Development
 
 ```bash
-npm install
-npm run dev          # development: Vite dev server + Electron
-npm start            # build the UI, then run the app
-npm test             # unit tests (mocked pages; uses a throwaway headless Chrome)
-npm run test:e2e     # drives the real Electron app (temporary data): flows, design, themes/agent/background
-npm run dist:linux   # release/Lead Finder-<version>.AppImage
-npm run dist:win     # Windows NSIS installer (build on Windows)
-npm run dist:mac     # macOS dmg (build on macOS)
+npm install && (cd server && npm install)
+npm run dev          # everything: licence server → UI dev server → app
+npm start            # same, with the built UI instead of the dev server
+npm test             # unit tests (subscription/maintenance tests use a throwaway Supabase schema)
+npm run test:e2e     # drives the real Electron app (temporary data)
 ```
+
+`npm run dev` starts the licence server from `server/` (it needs `server/.env`, see [server/README.md](server/README.md)), waits until it answers `/health`, then starts the UI and the app pointed at it. It reuses a licence server that is already running, refuses to start twice, says which port is taken if another program holds 8787 or 5199, restarts the server if it crashes, and stops everything on Ctrl+C or when you close the app. Without `server/.env` the app still starts, but subscriptions and free searches are unavailable.
+
+## Building installers
+
+```bash
+npm run release      # installers for this OS in release/
+```
+
+| Built on | Produces |
+|---|---|
+| Linux | `lead-finder_<version>_amd64.deb`, `Lead-Finder-<version>-linux-x86_64.AppImage` |
+| Windows | `Lead-Finder-Setup-<version>.exe` |
+| macOS | `Lead-Finder-<version>-mac-<arch>.dmg` |
+
+Installers point the app at the hosted licence server: `LICENSE_SERVER_URL` (default `https://lead-getter-licence.onrender.com`) and optionally `LICENSE_PUBLIC_KEY` (default: the key in `src/main/license-config.json`). The licence server itself is never bundled into the app: it holds the secrets that approve subscriptions.
+
+### Publishing a release
+
+[.github/workflows/release.yml](.github/workflows/release.yml) builds on Linux, Windows and macOS, installs and smoke-tests each build (the installed app must start, show its UI and load its modules), and publishes a GitHub Release with the installers:
+
+```bash
+# bump "version" in package.json first, commit, then:
+git tag v1.0.1 && git push origin v1.0.1
+```
+
+Set the repository variable `LICENSE_SERVER_URL` (Settings → Secrets and variables → Actions → Variables) to the deployed server's address. No credentials are needed in the repository: the workflow publishes with the built-in `GITHUB_TOKEN`.
+
+### Hosting the licence server (Render)
+
+[render.yaml](render.yaml) describes the service. In Render: **New → Blueprint**, pick this repository, then enter the values marked `sync: false` from `server/.env`. Set `PUBLIC_BASE_URL` to the service's `https://….onrender.com` address. Render's free tier blocks outgoing SMTP, so email goes through Brevo's HTTPS API there: create a free Brevo account, verify the sender address used in `SMTP_FROM`, and set `BREVO_API_KEY`. A free Render service sleeps when idle; the first check after a pause can take up to a minute, and the app waits for it.
+
+iOS: see [docs/IOS.md](docs/IOS.md).
 
 ## Connecting to your Chrome
 
@@ -45,6 +81,33 @@ Lead Finder waits up to 5 minutes and continues by itself; you don't need to cli
 4. **Search:** opens Google Maps, types your keyword exactly as entered, and submits it. If Enter doesn't submit, it presses Maps' Search button. It checks that Maps really searched for *that* keyword; if nothing happened, it retries once through the equivalent search address. A search that never ran is reported as a search error, never as "no results".
 
 If something can't be done, the status shows a **Chrome connection** or **Search** label with the specific reason: Chrome missing or too old, the switch off (with exactly which files and ports were checked), the restart declined, Chrome not closing, Maps not returning results, and so on.
+
+## Website filter
+
+Before starting a search, choose **Website**:
+
+- **Without website** (default): businesses with no website, or with only a social page. This is the original behaviour, including the extra web check.
+- **With website:** only businesses whose Google Maps listing links to their own website. The domain is saved and shown. Listings without a website are skipped without any Google web check.
+- **All businesses:** both kinds.
+
+A business keeps the leads it has already become. One skipped earlier only because of a different filter is reopened when a later search wants it, so its phone and address get saved too. In the table, **Website** (All / Without / With) filters what's shown, and **WhatsApp only** shows just numbers WhatsApp confirmed. **Export CSV** exports exactly what's shown, so with WhatsApp only ticked, the file contains only those numbers.
+
+## App lock (4-digit PIN)
+
+- On first launch you create a four-digit PIN and confirm it. After that, every launch shows the unlock screen.
+- **Storage:** the PIN is stored as a salted scrypt hash, encrypted with the OS keychain when one is available. It's never stored in plain text.
+- **Wrong PINs:** after 5 wrong PINs the app pauses before the next try, starting at 30 seconds and growing to 15 minutes. The pause survives restarts.
+- **Enforced in the main process:** until the PIN is accepted, the main process refuses every request except the unlock itself. Restarting, reloading or navigating inside the window doesn't reach any lead data.
+- **Security menu:** the lock button in the header offers **Change PIN** (needs the current PIN) and **Lock now**.
+- **Limits:** the lock protects the app. Someone with access to your computer account could still open `leads.db` directly with other tools.
+
+## Subscriptions
+
+Plans: **Monthly PKR 3,000**, **Six Months PKR 10,000**, **Lifetime PKR 20,000** (one-time).
+
+- **Applying:** the plan button in the header (or a blocked search) opens the plans. Applying asks for the plan, a payment screenshot (chosen through the system file dialog and checked to be a real PNG, JPEG or WebP of at most 5 MB), a message and an optional email. The application goes to the licence server (`server/`), which emails info.axoraweb@gmail.com with Approve and Cancel buttons. The app shows **Pending Approval** with the application ID.
+- **Enforcement:** searching, CSV export and the WhatsApp features need an active subscription. Before each of them, and every 30 minutes during a search, the app asks the server for a freshly **signed** status and enforces it in the main process. Missing, pending, cancelled and expired subscriptions each get their own message and a button to the plans. Without a connection to the server, these features stay blocked; Maps needs the internet anyway.
+- **Setup:** see [server/README.md](server/README.md). The app trusts only the server whose public key is in `src/main/license-config.json`.
 
 ## How a search works
 
@@ -118,18 +181,13 @@ Lead Finder can link **your own WhatsApp account** to check whether lead numbers
 
 While WhatsApp is connected, every saved lead with a **validated international number** is checked in the background, one number every 4 seconds. The checks never slow down a Maps search, and new leads are queued as they're found.
 
-| Status | Shown as | Meaning |
-|---|---|---|
-| Available | **green number** + **Message** button | WhatsApp positively confirmed the number has an account |
-| Unavailable | normal colour, "No WhatsApp" | WhatsApp answered and the number isn't on WhatsApp |
-| Check failed | normal colour, "Check failed" tag (hover for the reason) | No reliable answer (timeout, connection problem). Retried automatically after an hour, or click **Check again** |
-| Not checked | normal colour | Not checked yet, or WhatsApp isn't connected |
+A number WhatsApp **confirmed** is shown in **green**; click it to write a message. Every other number (not on WhatsApp, check failed, not yet checked) looks normal, with no extra icon or label. Failed checks are retried automatically after an hour.
 
 Each number is checked **separately**. Baileys' lookup silently drops numbers that aren't on WhatsApp, so a batched check couldn't tell "not on WhatsApp" from "no answer". A missing answer is only counted as *Unavailable* when the query itself succeeded; anything else is *Check failed*, never green. Results are saved in SQLite (`whatsapp_checks`) and not repeated. Marks made with the earlier manual flow aren't treated as confirmed: they show as *Not checked* and are re-checked automatically. The CSV *WhatsApp* column uses the same four statuses.
 
 ### Sending a message
 
-Click a **green** number or its **Message** button. The composer shows the lead, the number, and when you last messaged it. Write your message and click **Send**.
+Click a **green** number. The composer shows the lead, the number, and when you last messaged it. Write your message and click **Send**.
 
 - Nothing is ever sent automatically, and there's no bulk sending: one message, one lead, one click.
 - The main process checks again before sending that the lead exists, the number is confirmed on WhatsApp, WhatsApp is connected, and the text is 1–4000 characters. It also enforces at least 8 seconds between messages.
@@ -193,6 +251,9 @@ src/browser/    chrome.js (discovery + CDP attach), maps.js (Maps page ops),
 src/database/   SQLite store (node:sqlite, built into Electron)
 src/export/     CSV generation
 test/           Unit tests, Electron E2E test, real-Chrome integration script
+server/         Licence server (subscriptions, approval email, Supabase)
+scripts/        dev.js (npm run dev), release.js (npm run release)
+build/          App icon
 ```
 
 Security: context isolation on, Node integration off, sandboxed renderer, strict CSP in builds, IPC accepted only from the app's own page, navigation and new windows blocked, and only Google Maps URLs can be opened externally.

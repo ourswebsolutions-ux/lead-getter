@@ -9,6 +9,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { _electron } = require('playwright-core');
 const { LeadStore, localDate } = require('../../src/database/db');
+const { startLicenseServer, unlock, deviceIdOf } = require('./helpers');
 
 const root = path.join(__dirname, '..', '..');
 const shots = process.env.LEAD_FINDER_SCREENSHOTS;
@@ -42,6 +43,7 @@ function seed(file) {
 async function launch(env) {
   const app = await _electron.launch(process.env.LEAD_FINDER_EXE ? { executablePath: process.env.LEAD_FINDER_EXE, args: [], env } : { args: [root], cwd: root, env });
   const win = await app.firstWindow();
+  await unlock(win);
   await win.getByRole('heading', { name: 'Lead Finder' }).waitFor();
   return { app, win };
 }
@@ -53,11 +55,14 @@ test('categories, today/past views, filters, exports and deletion through the re
   const userData = path.join(tmp, 'app');
   fs.mkdirSync(userData);
   seed(path.join(userData, 'leads.db'));
-  const env = { ...process.env, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome') };
+  const lic = await startLicenseServer();
+  const env = { ...process.env, ...lic.env, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome') };
   delete env.ELECTRON_RUN_AS_NODE;
 
   let { app, win } = await launch(env);
+  await lic.activate(await deviceIdOf(win));
   t.after(async () => {
+    await lic.close();
     await app.close().catch(() => {});
     fs.rmSync(tmp, { recursive: true, force: true });
   });
@@ -118,7 +123,7 @@ test('categories, today/past views, filters, exports and deletion through the re
   await win.waitForFunction(() => document.querySelectorAll('tbody tr').length === 4);
   const dateSel = win.getByLabel('Show date');
   // All past dates + 2 dates with leads + Date range.
-  await win.waitForFunction(() => document.querySelectorAll('.toolbar select')[1]?.options.length === 4);
+  await win.waitForFunction(() => document.querySelector('select[aria-label="Show date"]')?.options.length === 4);
   const dateOpts = await dateSel.locator('option').allTextContents();
   assert.equal(dateOpts[0], 'All past dates');
   assert.match(dateOpts[1], /\(2\)$/);

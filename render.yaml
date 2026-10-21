@@ -1,0 +1,44 @@
+# Render Blueprint for the Lead Finder licence server (subscriptions).
+# Render dashboard → New → Blueprint → this repository. Values marked
+# sync: false are entered in the dashboard (copy them from server/.env);
+# they are never stored in the repository.
+services:
+  - type: web
+    name: lead-getter-licence
+    runtime: node
+    plan: free
+    region: singapore
+    rootDir: server
+    buildCommand: npm ci --omit=dev
+    startCommand: node src/index.js
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22.13.1"
+      - key: HOST
+        value: 0.0.0.0
+      # https://<service>.onrender.com, used in the Approve/Cancel email links
+      - key: PUBLIC_BASE_URL
+        sync: false
+      # Render's free tier blocks SMTP; mail goes through Brevo's HTTPS API.
+      - key: BREVO_API_KEY
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+      - key: SUBSCRIPTION_ADMIN_EMAIL
+        sync: false
+      - key: LICENSE_PRIVATE_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+      - key: SUPABASE_DB_URL
+        sync: false
+      - key: SUPABASE_SCHEMA
+        value: leadfinder
+      - key: SUPABASE_BUCKET
+        value: payment-screenshots
+      - key: PAYMENT_INSTRUCTIONS
+        sync: false

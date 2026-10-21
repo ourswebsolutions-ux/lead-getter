@@ -572,6 +572,7 @@ function toLead(row) {
     mapsUrl: row.maps_url,
     websiteStatus: statusText(row),
     websiteDetail: row.website_detail || '',
+    websiteKind: ['has_website', 'possible_website'].includes(row.website_status) ? 'with' : 'without',
     keyword: row.keyword || '',
     categoryId: row.category_id ?? null,
     category: row.category_name || '',

@@ -10,6 +10,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { _electron } = require('playwright-core');
 const { LeadStore } = require('../../src/database/db');
+const { unlock } = require('./helpers');
 
 const root = path.join(__dirname, '..', '..');
 const shots = process.env.LEAD_FINDER_SCREENSHOTS;
@@ -28,7 +29,7 @@ function seed(file) {
 async function launch(env) {
   const app = await _electron.launch(process.env.LEAD_FINDER_EXE ? { executablePath: process.env.LEAD_FINDER_EXE, args: [], env } : { args: [root], cwd: root, env });
   const win = await app.firstWindow();
-  await win.getByRole('heading', { name: 'Lead Finder' }).waitFor();
+  await unlock(win);
   return { app, win };
 }
 

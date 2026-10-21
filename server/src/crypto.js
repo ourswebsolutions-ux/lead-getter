@@ -18,9 +18,10 @@ function publicKeyFromB64(b64) {
   return key;
 }
 
-// What a device signs for each request.
-function requestDigest(method, pathWithQuery, ts, body) {
-  return Buffer.from(`${method.toUpperCase()}\n${pathWithQuery}\n${ts}\n${sha256(body || '').toString('hex')}`);
+// What a device signs for each request (the nonce makes every request,
+// and so every signature, unique).
+function requestDigest(method, pathWithQuery, ts, nonce, body, machine = '') {
+  return Buffer.from(`${method.toUpperCase()}\n${pathWithQuery}\n${ts}\n${nonce}\n${machine}\n${sha256(body || '').toString('hex')}`);
 }
 
 // Licence status token: base64url(JSON) "." base64url(Ed25519 signature).

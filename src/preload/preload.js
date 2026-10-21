@@ -18,7 +18,19 @@ contextBridge.exposeInMainWorld('leadFinder', {
   listCategories: () => ipcRenderer.invoke('categories:list'),
   renameCategory: (id, name) => ipcRenderer.invoke('categories:rename', Number(id), String(name ?? '')),
   deleteCategory: (id) => ipcRenderer.invoke('categories:delete', Number(id)),
-  startSearch: (keyword, category) => ipcRenderer.invoke('search:start', String(keyword ?? ''), String(category ?? '')),
+  startSearch: (keyword, category, website) => ipcRenderer.invoke('search:start', String(keyword ?? ''), String(category ?? ''), String(website ?? 'without')),
+  // App lock (4-digit PIN)
+  lockState: () => ipcRenderer.invoke('lock:state'),
+  lockSetup: (pin, confirm) => ipcRenderer.invoke('lock:setup', String(pin ?? ''), String(confirm ?? '')),
+  lockUnlock: (pin) => ipcRenderer.invoke('lock:unlock', String(pin ?? '')),
+  lockChange: (current, next, confirm) => ipcRenderer.invoke('lock:change', String(current ?? ''), String(next ?? ''), String(confirm ?? '')),
+  lockNow: () => ipcRenderer.invoke('lock:lock'),
+  // Subscription
+  subscriptionStatus: () => ipcRenderer.invoke('subscription:status'),
+  subscriptionPlans: () => ipcRenderer.invoke('subscription:plans'),
+  pickScreenshot: () => ipcRenderer.invoke('subscription:pickScreenshot'),
+  applySubscription: (form) => ipcRenderer.invoke('subscription:apply', form && typeof form === 'object' ? { plan: String(form.plan ?? ''), message: String(form.message ?? ''), email: String(form.email ?? '') } : {}),
+  onSubscription: (cb) => subscribe('subscription:status', cb),
   stopSearch: () => ipcRenderer.invoke('search:stop'),
   getStatus: () => ipcRenderer.invoke('search:status'),
   // scope: 'filtered' (leads matching filter) or 'all'

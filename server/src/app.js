@@ -9,12 +9,12 @@
 //   POST /admin/applications/:id/:action           performs it (single use)
 //   GET  /admin/applications/:id/screenshot?token=…
 //   GET  /verify-email?token=…
+//
+// Data: Supabase Postgres (store) and Supabase Storage (screenshots).
 
 const http = require('node:http');
-const fs = require('node:fs');
-const path = require('node:path');
 const crypto = require('node:crypto');
-const { PLANS, addMonths } = require('./plans');
+const { PLANS, PAYMENT_METHODS, TRIAL_SEARCHES, addMonths } = require('./plans');
 const c = require('./crypto');
 const pages = require('./pages');
 
@@ -23,7 +23,10 @@ const MAX_SCREENSHOT = 5 * 1024 * 1024;
 const CLOCK_SKEW_MS = 5 * 60 * 1000;
 const ACTION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const EMAIL_TTL_MS = 3 * 24 * 60 * 60 * 1000;
-const MAX_APPLICATIONS_PER_DAY = 3;
+const REISSUE_GAP_MS = 10 * 60 * 1000;
+// New applications are always allowed (even with one pending); this only
+// stops a flood of emails to the administrator.
+const MAX_APPLICATIONS_PER_DAY = 10;
 const EMAIL_RE = /^[^\s@<>()",;:]{1,64}@[^\s@<>()",;:]{1,190}\.[a-z]{2,24}$/i;
 
 const IMAGE_TYPES = [
@@ -39,10 +42,8 @@ class HttpError extends Error {
   }
 }
 
-function createApp({ config, store, mailer, now = () => new Date(), logger = console }) {
+function createApp({ config, store, storage, mailer, now = () => new Date(), logger = console }) {
   const privateKey = crypto.createPrivateKey(config.licensePrivateKey);
-  const uploads = path.join(config.dataDir, 'uploads');
-  fs.mkdirSync(uploads, { recursive: true, mode: 0o700 });
   const nowIso = () => now().toISOString();
   const link = (p) => `${config.publicBaseUrl.replace(/\/$/, '')}${p}`;
 
@@ -65,11 +66,14 @@ function createApp({ config, store, mailer, now = () => new Date(), logger = con
   }
 
   // Verifies a device-signed request; returns the device id.
-  function authenticate(req, url, body) {
+  async function authenticate(req, url, body) {
     const key = req.headers['x-lf-key'];
     const ts = Number(req.headers['x-lf-ts']);
     const sig = req.headers['x-lf-sig'];
-    if (!key || !ts || !sig) throw new HttpError(401, 'Unsigned request');
+    const nonce = req.headers['x-lf-nonce'];
+    const machine = String(req.headers['x-lf-machine'] || '');
+    if (machine && !/^[0-9a-f]{64}$/.test(machine)) throw new HttpError(401, 'Invalid machine id');
+    if (!key || !ts || !sig || !/^[A-Za-z0-9_-]{16,64}$/.test(String(nonce || ''))) throw new HttpError(401, 'Unsigned request');
     if (Math.abs(now().getTime() - ts) > CLOCK_SKEW_MS) throw new HttpError(401, 'Request time is out of range. Check the computer clock.');
     let publicKey;
     try {
@@ -77,16 +81,24 @@ function createApp({ config, store, mailer, now = () => new Date(), logger = con
     } catch {
       throw new HttpError(401, 'Invalid device key');
     }
-    const ok = crypto.verify(null, c.requestDigest(req.method, url.pathname + url.search, ts, body), publicKey, Buffer.from(String(sig), 'base64'));
+    const ok = crypto.verify(null, c.requestDigest(req.method, url.pathname + url.search, ts, nonce, body, machine), publicKey, Buffer.from(String(sig), 'base64'));
     if (!ok) throw new HttpError(401, 'Bad signature');
-    if (!store.rememberRequest(c.hashToken(sig), now().getTime(), CLOCK_SKEW_MS * 2)) throw new HttpError(401, 'Replayed request');
+    if (!(await store.rememberRequest(c.hashToken(sig), now().getTime(), CLOCK_SKEW_MS * 2))) throw new HttpError(401, 'Replayed request');
     const deviceId = c.deviceIdFromKey(key);
     try {
-      store.upsertDevice(deviceId, key, nowIso());
+      await store.upsertDevice(deviceId, key, nowIso());
     } catch {
       throw new HttpError(401, 'Device key mismatch');
     }
+    req.machineId = machine || `device:${deviceId}`;
     return deviceId;
+  }
+
+  // Free searches are counted per computer (machine id), so reinstalling or
+  // clearing the app's data does not start a new trial.
+  async function trialFor(machineId) {
+    const used = await store.trialUsed(machineId);
+    return { limit: TRIAL_SEARCHES, used: Math.min(used, TRIAL_SEARCHES), remaining: Math.max(0, TRIAL_SEARCHES - used) };
   }
 
   function json(res, status, data) {
@@ -107,44 +119,46 @@ function createApp({ config, store, mailer, now = () => new Date(), logger = con
     res.end(body);
   }
 
-  function newToken(applicationId, action, ttl) {
+  // A new random token; only its hash is stored.
+  function makeToken(action, ttl) {
     const token = c.randomToken();
-    store.q('INSERT INTO action_tokens (hash, application_id, action, expires_at) VALUES (?, ?, ?, ?)').run(
-      c.hashToken(token),
-      applicationId,
-      action,
-      new Date(now().getTime() + ttl).toISOString(),
-    );
-    return token;
+    return { token, hash: c.hashToken(token), action, expiresAt: new Date(now().getTime() + ttl).toISOString() };
   }
 
   // A valid, unused, unexpired token for this application and action.
-  function checkToken(token, applicationId, action) {
+  async function checkToken(token, applicationId, action) {
     if (!token || typeof token !== 'string' || token.length > 100) return { error: 'This link is invalid.' };
-    const row = store.q('SELECT * FROM action_tokens WHERE hash = ?').get(c.hashToken(token));
+    const row = await store.token(c.hashToken(token));
     if (!row || row.application_id !== applicationId || row.action !== action) return { error: 'This link is invalid.' };
     if (row.used_at) return { error: 'This link has already been used.', used: true };
-    if (row.expires_at < nowIso()) return { error: 'This link has expired.' };
+    if (row.expires_at < nowIso()) return { error: 'This link has expired.', expired: true };
     return { row };
   }
 
-  function subscriptionFor(deviceId) {
-    const lic = store.q('SELECT * FROM licenses WHERE device_id = ?').get(deviceId);
+  async function subscriptionFor(deviceId) {
+    const lic = await store.license(deviceId);
     if (!lic) return { state: 'none' };
-    const active = !lic.expires_at || lic.expires_at > nowIso();
-    return { state: active ? 'active' : 'expired', plan: lic.plan, activatedAt: lic.activated_at, expiresAt: lic.expires_at || null };
+    const active = !lic.expiresAt || lic.expiresAt > nowIso();
+    return { state: active ? 'active' : 'expired', plan: lic.plan, activatedAt: lic.activatedAt, expiresAt: lic.expiresAt || null };
   }
 
-  function latestApplication(deviceId) {
-    const a = store.q('SELECT id, plan, status, created_at, decided_at FROM applications WHERE device_id = ? ORDER BY created_at DESC LIMIT 1').get(deviceId);
-    return a ? { id: a.id, plan: a.plan, status: a.status, createdAt: a.created_at, decidedAt: a.decided_at } : null;
+  async function sendAdminEmail(app, approve, cancel, attachment) {
+    const approveUrl = link(`/admin/applications/${app.id}/approve?token=${approve}`);
+    const cancelUrl = link(`/admin/applications/${app.id}/cancel?token=${cancel}`);
+    await mailer.send({
+      to: config.adminEmail,
+      subject: `Subscription request ${app.id}: ${app.plan.name} (${app.plan.priceLabel})`,
+      html: pages.adminEmail(app, approveUrl, cancelUrl),
+      text: pages.adminEmailText(app, approveUrl, cancelUrl),
+      attachments: attachment ? [attachment] : [],
+    });
   }
 
   // --- API ---------------------------------------------------------------------
 
   async function apply(req, res, url) {
     const body = await readBody(req);
-    const deviceId = authenticate(req, url, body);
+    const deviceId = await authenticate(req, url, body);
     let data;
     try {
       data = JSON.parse(body.toString('utf8'));
@@ -154,7 +168,7 @@ function createApp({ config, store, mailer, now = () => new Date(), logger = con
     const plan = PLANS[data.plan];
     if (!plan) throw new HttpError(400, 'Choose a subscription plan.');
     const message = typeof data.message === 'string' ? data.message.trim() : '';
-    if (message.length < 3 || message.length > 1000) throw new HttpError(400, 'Write a short message with the payment details (3–1000 characters).');
+    if (message.length > 1000) throw new HttpError(400, 'The message is too long (1000 characters maximum).');
     const email = typeof data.email === 'string' && data.email.trim() ? data.email.trim() : null;
     if (email && !EMAIL_RE.test(email)) throw new HttpError(400, 'The email address is not valid.');
     const shot = Buffer.from(typeof data.screenshot?.data === 'string' ? data.screenshot.data : '', 'base64');
@@ -164,46 +178,38 @@ function createApp({ config, store, mailer, now = () => new Date(), logger = con
     if (!kind) throw new HttpError(400, 'The screenshot must be a PNG, JPEG or WebP image.');
 
     const since = new Date(now().getTime() - 24 * 60 * 60 * 1000).toISOString();
-    if (store.q("SELECT 1 FROM applications WHERE device_id = ? AND status = 'pending'").get(deviceId)) {
-      throw new HttpError(409, 'You already have an application awaiting approval.');
-    }
-    if (store.q('SELECT COUNT(*) n FROM applications WHERE device_id = ? AND created_at >= ?').get(deviceId, since).n >= MAX_APPLICATIONS_PER_DAY) {
+    if ((await store.countApplicationsSince(deviceId, since)) >= MAX_APPLICATIONS_PER_DAY) {
       throw new HttpError(429, 'Too many applications today. Please try again tomorrow.');
     }
 
     const id = `LF-${crypto.randomBytes(5).toString('hex').toUpperCase()}`;
-    const file = `${id}-${crypto.randomBytes(8).toString('hex')}.${kind.ext}`;
-    fs.writeFileSync(path.join(uploads, file), shot, { mode: 0o600 });
-    let approve;
-    let cancel;
-    let verify = null;
-    store.tx(() => {
-      store.q(
-        "INSERT INTO applications (id, device_id, plan, message, email, screenshot_file, screenshot_type, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
-      ).run(id, deviceId, plan.id, message, email, file, kind.type, nowIso());
-      approve = newToken(id, 'approve', ACTION_TTL_MS);
-      cancel = newToken(id, 'cancel', ACTION_TTL_MS);
-      if (email) verify = newToken(id, 'verify_email', EMAIL_TTL_MS);
-    });
+    const objectPath = `applications/${id}/${crypto.randomBytes(8).toString('hex')}.${kind.ext}`;
+    // The screenshot goes to private Supabase Storage first; a failed
+    // database insert leaves an orphan that maintenance removes after a day.
+    await storage.upload(objectPath, shot, kind.type);
+    const approve = makeToken('approve', ACTION_TTL_MS);
+    const cancel = makeToken('cancel', ACTION_TTL_MS);
+    const verify = email ? makeToken('verify_email', EMAIL_TTL_MS) : null;
+    await store.createApplication(
+      { id, deviceId, plan: plan.id, message, email, screenshotPath: objectPath, screenshotType: kind.type, screenshotSize: shot.length, screenshotSha256: c.sha256(shot).toString('hex'), createdAt: nowIso() },
+      [approve, cancel, ...(verify ? [verify] : [])],
+    );
 
-    const app = { id, plan, message, email, deviceId, createdAt: nowIso(), current: subscriptionFor(deviceId) };
+    const app = { id, plan, message, email, deviceId, createdAt: nowIso(), current: await subscriptionFor(deviceId) };
     try {
-      await mailer.send({
-        to: config.adminEmail,
-        subject: `Subscription request ${id}: ${plan.name} (${plan.priceLabel})`,
-        html: pages.adminEmail(app, link(`/admin/applications/${id}/approve?token=${approve}`), link(`/admin/applications/${id}/cancel?token=${cancel}`)),
-        text: pages.adminEmailText(app, link(`/admin/applications/${id}/approve?token=${approve}`), link(`/admin/applications/${id}/cancel?token=${cancel}`)),
-        attachments: [{ filename: `payment-${id}.${kind.ext}`, content: shot, contentType: kind.type }],
-      });
+      await sendAdminEmail(app, approve.token, cancel.token, { filename: `payment-${id}.${kind.ext}`, content: shot, contentType: kind.type });
     } catch (err) {
-      // The application exists; without the email nobody can approve it.
-      store.q("UPDATE applications SET status = 'cancelled', decided_at = ? WHERE id = ?").run(nowIso(), id);
+      // Without the email nobody can approve it: remove the application
+      // (it was never seen by anyone) and its upload, so the user retries.
+      await store.discardUnsentApplication(id);
+      await storage.remove([objectPath]).catch(() => {});
       logger.error(`[mail] admin email for ${id} failed: ${err.code || ''} ${String(err.message).split('\n')[0]}`);
       throw new HttpError(502, 'The application could not be sent for approval (email failed). Please try again later.');
     }
     if (verify) {
+      const v = link(`/verify-email?token=${verify.token}`);
       mailer
-        .send({ to: email, subject: 'Confirm your email for Lead Finder', html: pages.verifyEmail(link(`/verify-email?token=${verify}`)), text: `Confirm your email for Lead Finder: ${link(`/verify-email?token=${verify}`)}` })
+        .send({ to: email, subject: 'Confirm your email for Lead Finder', html: pages.verifyEmail(v), text: `Confirm your email for Lead Finder: ${v}` })
         .catch((err) => logger.error(`[mail] verification email for ${id} failed: ${err.code || ''}`));
     }
     json(res, 201, { applicationId: id, status: 'pending', plan: plan.id, emailVerificationSent: Boolean(verify) });
@@ -211,99 +217,108 @@ function createApp({ config, store, mailer, now = () => new Date(), logger = con
 
   async function license(req, res, url) {
     const body = await readBody(req);
-    const deviceId = authenticate(req, url, body);
+    const deviceId = await authenticate(req, url, body);
     const nonce = url.searchParams.get('nonce') || '';
     if (!/^[A-Za-z0-9_-]{16,64}$/.test(nonce)) throw new HttpError(400, 'Missing nonce');
-    const payload = { v: 1, deviceId, nonce, serverTime: nowIso(), subscription: subscriptionFor(deviceId), application: latestApplication(deviceId) };
+    const [subscription, application, pendingApplications, trial] = await Promise.all([
+      subscriptionFor(deviceId),
+      store.latestApplication(deviceId),
+      store.pendingCount(deviceId),
+      trialFor(req.machineId),
+    ]);
+    const payload = { v: 1, deviceId, nonce, serverTime: nowIso(), subscription, application, pendingApplications, trial };
     json(res, 200, { token: c.signToken(payload, privateKey) });
+  }
+
+  // Uses one free search, atomically; refused once all are used.
+  async function consumeTrial(req, res, url) {
+    const body = await readBody(req);
+    const deviceId = await authenticate(req, url, body);
+    if ((await subscriptionFor(deviceId)).state === 'active') return json(res, 200, { consumed: false, subscribed: true, trial: await trialFor(req.machineId) });
+    if (!(await store.consumeTrial(req.machineId, TRIAL_SEARCHES, nowIso()))) {
+      throw new HttpError(402, `Your ${TRIAL_SEARCHES} free searches have been used. Choose a plan to keep searching.`);
+    }
+    json(res, 200, { consumed: true, trial: await trialFor(req.machineId) });
   }
 
   // --- admin actions ------------------------------------------------------------
 
-  function appRow(id) {
-    return /^LF-[0-9A-F]{10}$/.test(id) ? store.q('SELECT * FROM applications WHERE id = ?').get(id) : null;
+  async function appRow(id) {
+    return /^LF-[0-9A-F]{10}$/.test(id) ? store.application(id) : null;
   }
 
   async function adminPage(req, res, url, id, action) {
-    const app = appRow(id);
-    const t = app ? checkToken(url.searchParams.get('token'), id, action) : { error: 'This link is invalid.' };
+    const app = await appRow(id);
+    const t = app ? await checkToken(url.searchParams.get('token'), id, action) : { error: 'This link is invalid.' };
+    // An expired link of a still-pending application: email fresh links
+    // (to the administrator only, at most every 10 minutes).
+    if (t.expired && app.status === 'pending') {
+      const last = await store.lastTokenIssued(id);
+      if (!last || now().getTime() - Date.parse(last) > REISSUE_GAP_MS) {
+        const approve = makeToken('approve', ACTION_TTL_MS);
+        const cancel = makeToken('cancel', ACTION_TTL_MS);
+        await store.addTokens(id, [approve, cancel], nowIso());
+        const plan = PLANS[app.plan];
+        await sendAdminEmail({ id, plan, message: app.message, email: app.email, deviceId: app.device_id, createdAt: app.created_at, current: await subscriptionFor(app.device_id) }, approve.token, cancel.token);
+      }
+      return html(res, 410, pages.result('Link expired', `This link has expired, but application ${id} is still pending. Fresh Approve and Cancel links have been emailed to you.`));
+    }
     if (t.error) return html(res, t.used ? 409 : 400, pages.result('Link not usable', `${t.error}${app && app.status !== 'pending' ? ` The application is ${app.status}.` : ''}`));
     if (app.status !== 'pending') return html(res, 409, pages.result('Already processed', `Application ${id} is already ${app.status}.`));
-    html(res, 200, pages.confirm({ ...app, planInfo: PLANS[app.plan], current: subscriptionFor(app.device_id) }, action, url.searchParams.get('token')));
+    html(res, 200, pages.confirm({ ...app, planInfo: PLANS[app.plan], current: await subscriptionFor(app.device_id) }, action, url.searchParams.get('token')));
   }
 
   async function adminAction(req, res, id, action) {
     const body = (await readBody(req)).toString('utf8');
     const token = new URLSearchParams(body).get('token');
-    const app = appRow(id);
+    const app = await appRow(id);
     if (!app) return html(res, 404, pages.result('Not found', 'This application does not exist.'));
+    if (!token || token.length > 100) return html(res, 400, pages.result('Link not usable', 'This link is invalid.'));
     const decidedAt = now();
-    let outcome;
-    store.tx(() => {
-      const t = checkToken(token, id, action);
-      if (t.error) {
-        outcome = { status: t.used ? 409 : 400, title: 'Link not usable', text: t.error };
-        return;
-      }
-      // Single transition from pending; a second click changes nothing.
-      const changed = store
-        .q("UPDATE applications SET status = ?, decided_at = ? WHERE id = ? AND status = 'pending'")
-        .run(action === 'approve' ? 'approved' : 'cancelled', decidedAt.toISOString(), id).changes;
-      // Both action links for this application are spent either way.
-      store.q("UPDATE action_tokens SET used_at = ? WHERE application_id = ? AND action IN ('approve', 'cancel') AND used_at IS NULL").run(decidedAt.toISOString(), id);
-      if (!changed) {
-        outcome = { status: 409, title: 'Already processed', text: `Application ${id} was already ${appRow(id).status}.` };
-        return;
-      }
-      if (action === 'approve') {
-        const plan = PLANS[app.plan];
-        // A renewal before expiry continues from the current end date.
-        const lic = store.q('SELECT * FROM licenses WHERE device_id = ?').get(app.device_id);
-        const start = lic && lic.expires_at && lic.expires_at > decidedAt.toISOString() ? new Date(lic.expires_at) : decidedAt;
-        const keepLifetime = lic && !lic.expires_at;
-        const expiresAt = keepLifetime || plan.months === null ? null : addMonths(start, plan.months).toISOString();
-        store
-          .q(
-            `INSERT INTO licenses (device_id, plan, application_id, activated_at, expires_at) VALUES (?, ?, ?, ?, ?)
-             ON CONFLICT(device_id) DO UPDATE SET plan = excluded.plan, application_id = excluded.application_id, activated_at = excluded.activated_at, expires_at = excluded.expires_at`,
-          )
-          .run(app.device_id, keepLifetime ? lic.plan : plan.id, id, decidedAt.toISOString(), expiresAt);
-        outcome = { status: 200, title: 'Subscription approved', text: `${plan.name} activated for application ${id}. ${expiresAt ? `It expires on ${new Date(expiresAt).toUTCString()}.` : 'It never expires.'}`, expiresAt, plan };
-      } else {
-        outcome = { status: 200, title: 'Application cancelled', text: `Application ${id} was cancelled. The subscription was not activated.` };
-      }
-    });
-    if (outcome.status === 200) {
-      const fresh = appRow(id);
-      if (fresh.email && fresh.email_verified) {
-        const subject = action === 'approve' ? 'Your Lead Finder subscription is active' : 'Your Lead Finder subscription application was not approved';
-        const text =
-          action === 'approve'
-            ? `Your ${outcome.plan.name} subscription (application ${id}) is now active.${outcome.expiresAt ? ` It is valid until ${new Date(outcome.expiresAt).toUTCString()}.` : ' It never expires.'}`
-            : `Your application ${id} was cancelled and no subscription was activated. You can submit a new application in Lead Finder.`;
-        mailer.send({ to: fresh.email, subject, text, html: pages.userNotice(subject, text) }).catch((err) => logger.error(`[mail] user notice for ${id} failed: ${err.code || ''}`));
-      }
+    // A renewal before expiry continues from the current end date.
+    const licenceFor = (row, cur) => {
+      const plan = PLANS[row.plan];
+      const start = cur && cur.expiresAt && cur.expiresAt > decidedAt.toISOString() ? new Date(cur.expiresAt) : decidedAt;
+      const keepLifetime = cur && !cur.expiresAt;
+      return { plan: keepLifetime ? cur.plan : plan.id, expiresAt: keepLifetime || plan.months === null ? null : addMonths(start, plan.months).toISOString() };
+    };
+    const r = await store.decide({ id, tokenHash: c.hashToken(token), action, now: decidedAt.toISOString(), licenceFor });
+    if (r.error) {
+      const text = { invalid: 'This link is invalid.', used: 'This link has already been used.', expired: 'This link has expired.', processed: `Application ${id} was already ${r.status}.` }[r.error];
+      return html(res, r.error === 'used' || r.error === 'processed' ? 409 : 400, pages.result(r.error === 'processed' ? 'Already processed' : 'Link not usable', text));
     }
-    html(res, outcome.status, pages.result(outcome.title, outcome.text));
+    const plan = PLANS[app.plan];
+    const outcome =
+      action === 'approve'
+        ? { title: 'Subscription approved', text: `${plan.name} activated for application ${id}. ${r.licence.expiresAt ? `It expires on ${new Date(r.licence.expiresAt).toUTCString()}.` : 'It never expires.'}` }
+        : { title: 'Application cancelled', text: `Application ${id} was cancelled. The subscription was not activated.` };
+    if (app.email && app.email_verified) {
+      const subject = action === 'approve' ? 'Your Lead Finder subscription is active' : 'Your Lead Finder subscription application was not approved';
+      const text =
+        action === 'approve'
+          ? `Your ${plan.name} subscription (application ${id}) is now active.${r.licence.expiresAt ? ` It is valid until ${new Date(r.licence.expiresAt).toUTCString()}.` : ' It never expires.'}`
+          : `Your application ${id} was cancelled and no subscription was activated. You can submit a new application in Lead Finder.`;
+      mailer.send({ to: app.email, subject, text, html: pages.userNotice(subject, text) }).catch((err) => logger.error(`[mail] user notice for ${id} failed: ${err.code || ''}`));
+    }
+    html(res, 200, pages.result(outcome.title, outcome.text));
   }
 
-  function screenshot(req, res, url, id) {
-    const app = appRow(id);
+  async function screenshot(req, res, url, id) {
+    const app = await appRow(id);
     const token = url.searchParams.get('token');
-    const ok = app && ['approve', 'cancel'].some((a) => !checkToken(token, id, a).error);
+    let ok = false;
+    if (app) for (const a of ['approve', 'cancel']) if (!(await checkToken(token, id, a)).error) ok = true;
     if (!ok) return html(res, 403, pages.result('Not available', 'This link is invalid or has been used.'));
+    if (!app.screenshot_path || app.screenshot_deleted_at) return html(res, 410, pages.result('Screenshot removed', 'The screenshot was removed after its retention period.'));
+    const data = await storage.download(app.screenshot_path);
     res.writeHead(200, { 'content-type': app.screenshot_type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
-    res.end(fs.readFileSync(path.join(uploads, app.screenshot_file)));
+    res.end(data);
   }
 
-  function verifyEmail(req, res, url) {
+  async function verifyEmail(req, res, url) {
     const token = url.searchParams.get('token');
-    const row = token ? store.q("SELECT * FROM action_tokens WHERE hash = ? AND action = 'verify_email'").get(c.hashToken(token)) : null;
-    if (!row || row.used_at || row.expires_at < nowIso()) return html(res, 400, pages.result('Link not usable', 'This confirmation link is invalid, expired or already used.'));
-    store.tx(() => {
-      store.q('UPDATE action_tokens SET used_at = ? WHERE hash = ?').run(nowIso(), row.hash);
-      store.q('UPDATE applications SET email_verified = 1 WHERE id = ?').run(row.application_id);
-    });
+    const ok = token && token.length <= 100 ? await store.verifyEmail(c.hashToken(token), nowIso()) : false;
+    if (!ok) return html(res, 400, pages.result('Link not usable', 'This confirmation link is invalid, expired or already used.'));
     html(res, 200, pages.result('Email confirmed', 'Thank you. You will be notified by email when your subscription is approved or cancelled.'));
   }
 
@@ -313,10 +328,11 @@ function createApp({ config, store, mailer, now = () => new Date(), logger = con
     const url = new URL(req.url, 'http://local');
     const m = url.pathname.match(/^\/admin\/applications\/([^/]+)\/(approve|cancel|screenshot)$/);
     if (req.method === 'GET' && url.pathname === '/api/plans') {
-      return json(res, 200, { plans: Object.values(PLANS), paymentInstructions: config.paymentInstructions || '' });
+      return json(res, 200, { plans: Object.values(PLANS), paymentMethods: PAYMENT_METHODS, paymentInstructions: config.paymentInstructions || '', trialSearches: TRIAL_SEARCHES });
     }
     if (req.method === 'POST' && url.pathname === '/api/applications') return apply(req, res, url);
     if (req.method === 'GET' && url.pathname === '/api/license') return license(req, res, url);
+    if (req.method === 'POST' && url.pathname === '/api/trial/consume') return consumeTrial(req, res, url);
     if (m && m[2] === 'screenshot' && req.method === 'GET') return screenshot(req, res, url, m[1]);
     if (m && req.method === 'GET') return adminPage(req, res, url, m[1], m[2]);
     if (m && req.method === 'POST') return adminAction(req, res, m[1], m[2]);

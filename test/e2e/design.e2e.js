@@ -8,6 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { _electron } = require('playwright-core');
 const { LeadStore } = require('../../src/database/db');
+const { unlock, startLicenseServer, deviceIdOf } = require('./helpers');
 
 const root = path.join(__dirname, '..', '..');
 const shots = process.env.LEAD_FINDER_SCREENSHOTS;
@@ -34,7 +35,9 @@ test('phones, WhatsApp indicator, themes, motion and window sizes', async (t) =>
   const userData = path.join(tmp, 'app');
   fs.mkdirSync(userData);
   seed(path.join(userData, 'leads.db'));
-  const env = { ...process.env, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome') };
+  const lic = await startLicenseServer();
+  t.after(() => lic.close());
+  const env = { ...process.env, ...lic.env, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome') };
   delete env.ELECTRON_RUN_AS_NODE;
   const app = await _electron.launch(process.env.LEAD_FINDER_EXE ? { executablePath: process.env.LEAD_FINDER_EXE, args: [], env } : { args: [root], cwd: root, env });
   t.after(async () => {
@@ -42,6 +45,8 @@ test('phones, WhatsApp indicator, themes, motion and window sizes', async (t) =>
     fs.rmSync(tmp, { recursive: true, force: true });
   });
   const win = await app.firstWindow();
+  await unlock(win);
+  await lic.activate(await deviceIdOf(win));
   const errors = [];
   win.on('pageerror', (e) => errors.push(e.message));
   await win.getByRole('heading', { name: /Today's leads/ }).waitFor();

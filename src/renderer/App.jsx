@@ -7,6 +7,8 @@ import CategoryManager from './CategoryManager.jsx';
 import WhatsAppPanel from './WhatsAppPanel.jsx';
 import Composer from './Composer.jsx';
 import { currentTheme, setTheme } from './theme.js';
+import Plans, { statusLine } from './Plans.jsx';
+import { ChangePin } from './LockScreen.jsx';
 
 const api = window.leadFinder;
 
@@ -151,8 +153,9 @@ export function waStatus(lead) {
   return lead.whatsapp || 'not_checked';
 }
 
-function PhoneCell({ lead, waOpen, onCompose, onChanged, notify }) {
-  const [checking, setChecking] = useState(false);
+// WhatsApp is shown only by colour: a number WhatsApp confirmed is green
+// (click it to write a message); every other number looks normal.
+function PhoneCell({ lead, onCompose }) {
   if (!lead.phone && lead.phoneStatus !== 'invalid') return <span className="muted">Not listed</span>;
   if (lead.phoneStatus === 'invalid') {
     return (
@@ -170,45 +173,14 @@ function PhoneCell({ lead, waOpen, onCompose, onChanged, notify }) {
       </span>
     );
   }
-  const wa = waStatus(lead);
-  async function recheck() {
-    setChecking(true);
-    const res = await window.leadFinder.whatsappRecheck(lead.phone);
-    setChecking(false);
-    if (res.ok) onChanged(lead.phone, res.leads);
-    else notify({ type: 'error', text: res.error });
-  }
-  if (wa === 'available') {
+  if (waStatus(lead) === 'available') {
     return (
-      <span className="phone-wrap">
-        <button type="button" className="mono phone wa-available phone-link" title="On WhatsApp: click to write a message" onClick={() => onCompose(lead)}>
-          {lead.phone}
-        </button>
-        <button type="button" className="wa-send" aria-label={`Send WhatsApp message to ${lead.name}`} onClick={() => onCompose(lead)}>
-          <Icon name="chat" size={14} />
-          <span>Message</span>
-        </button>
-      </span>
+      <button type="button" className="mono phone wa-available phone-link" aria-label={`Send WhatsApp message to ${lead.name}`} title="On WhatsApp: click to write a message" onClick={() => onCompose(lead)}>
+        {lead.phone}
+      </button>
     );
   }
-  return (
-    <span className="phone-wrap" data-wa={wa}>
-      <span className="mono phone" title={wa === 'not_checked' ? 'Not checked on WhatsApp yet' : undefined}>
-        {lead.phone}
-      </span>
-      {wa === 'unavailable' && <span className="wa-off" title={`Not on WhatsApp (checked ${new Date(lead.whatsappCheckedAt).toLocaleDateString()})`}>No WhatsApp</span>}
-      {wa === 'failed' && (
-        <span className="chip chip-warn" title={lead.whatsappDetail || 'The WhatsApp check did not complete'}>
-          Check failed
-        </span>
-      )}
-      {(wa === 'failed' || wa === 'unavailable') && waOpen && (
-        <button type="button" className="icon-btn wa-recheck" aria-label={`Check ${lead.name} on WhatsApp again`} title="Check again" disabled={checking} onClick={recheck}>
-          <Icon name="refresh" size={14} className={checking ? 'spin' : ''} />
-        </button>
-      )}
-    </span>
-  );
+  return <span className="mono phone">{lead.phone}</span>;
 }
 
 // One table row; memoised so live updates only render rows that changed.
@@ -269,6 +241,15 @@ function ThemeToggle() {
 }
 
 function websiteChip(l) {
+  if (l.websiteKind === 'with') {
+    const site = l.websiteDetail ? l.websiteDetail.split('/')[0] : '';
+    return (
+      <span className={`chip ${l.websiteStatus.startsWith('Possible') ? 'chip-soft' : 'chip-site'}`} title={l.websiteStatus}>
+        {l.websiteStatus.startsWith('Possible') ? 'Possible website' : 'Website'}
+        {site ? <span className="chip-detail">{site}</span> : null}
+      </span>
+    );
+  }
   if (l.websiteStatus.startsWith('No website (social page only')) {
     const host = l.websiteDetail || '';
     return (
@@ -282,7 +263,37 @@ function websiteChip(l) {
 
 // --- App -------------------------------------------------------------------------
 
-export default function App() {
+const WEBSITE_LABELS = { without: 'Without website', with: 'With website', all: 'All businesses' };
+
+function LockMenu({ onLock, onChangePin }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const away = (e) => !ref.current?.contains(e.target) && setOpen(false);
+    document.addEventListener('mousedown', away);
+    return () => document.removeEventListener('mousedown', away);
+  }, [open]);
+  return (
+    <div className="wa-panel" ref={ref}>
+      <button type="button" className="theme-toggle" aria-label="Security" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+        <Icon name="lock" />
+      </button>
+      {open && (
+        <div className="menu lock-menu" role="menu" aria-label="Security">
+          <button type="button" role="menuitem" onClick={() => (setOpen(false), onChangePin())}>
+            <Icon name="edit" /> Change PIN
+          </button>
+          <button type="button" role="menuitem" onClick={() => (setOpen(false), onLock())}>
+            <Icon name="lock" /> Lock now
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function App({ onLock }) {
   const [keyword, setKeyword] = useState('');
   const [category, setCategory] = useState('');
   const [catData, setCatData] = useState({ categories: [], uncategorized: 0 });
@@ -292,6 +303,12 @@ export default function App() {
   const [summary, setSummary] = useState(null);
   const [wa, setWa] = useState(null);
   const [composeLead, setComposeLead] = useState(null);
+  const [websiteFilter, setWebsiteFilter] = useState('without'); // for the next search
+  const [siteView, setSiteView] = useState('all'); // table: all | without | with
+  const [waOnly, setWaOnly] = useState(false);
+  const [sub, setSub] = useState(null);
+  const [plansOpen, setPlansOpen] = useState(null); // null | { notice }
+  const [changePin, setChangePin] = useState(false);
 
   const [today, setToday] = useState(localDate());
   const [view, setView] = useState('today');
@@ -314,6 +331,8 @@ export default function App() {
 
   const filter = useMemo(() => {
     const f = { category: catFilter };
+    if (siteView !== 'all') f.website = siteView;
+    if (waOnly) f.whatsapp = 'available';
     if (view === 'today') f.date = today;
     else if (pastMode === 'date' && pastDate) f.date = pastDate;
     else if (pastMode === 'range') {
@@ -321,7 +340,7 @@ export default function App() {
       if (range.to) f.to = range.to;
     } else f.before = today;
     return f;
-  }, [view, today, pastMode, pastDate, range, catFilter]);
+  }, [view, today, pastMode, pastDate, range, catFilter, siteView, waOnly]);
   const filterRef = useRef(filter);
   filterRef.current = filter;
   const viewKey = JSON.stringify(filter);
@@ -361,6 +380,8 @@ export default function App() {
     const offStatus = api.onStatus(setStatus);
     const offSummary = api.onSummary(setSummary);
     api.whatsappState().then(setWa).catch(() => {});
+    api.subscriptionStatus().then(setSub).catch(() => {});
+    const offSub = api.onSubscription(setSub);
     const offWa = api.onWhatsAppState(setWa);
     // Background check results update the matching rows in place.
     const offWaLeads = api.onWhatsAppLeads(({ phone, leads: updated }) =>
@@ -381,7 +402,9 @@ export default function App() {
       freshIds.current.add(lead.placeKey);
       const f = filterRef.current;
       const catOk = f.category === 'all' || (f.category === 'none' ? lead.categoryId == null : lead.categoryId === f.category);
-      if (catOk && f.date === lead.discoveredDate) {
+      const siteOk = !f.website || f.website === lead.websiteKind;
+      // New numbers are not checked on WhatsApp yet, so they wait for the check.
+      if (catOk && siteOk && !f.whatsapp && f.date === lead.discoveredDate) {
         queue.push(lead);
         if (!frame) frame = requestAnimationFrame(flush);
       }
@@ -393,6 +416,7 @@ export default function App() {
       offStatus();
       offSummary();
       offWa();
+      offSub();
       offWaLeads();
       offLead();
       clearInterval(timer);
@@ -409,9 +433,11 @@ export default function App() {
   const canStart = !active && keyword.trim().length >= 2 && formatCategory(category).length >= 2;
 
   async function runSearch(kw, cat) {
-    const res = await api.startSearch(kw, cat);
+    const res = await api.startSearch(kw, cat, websiteFilter);
     if (!res.ok) {
-      notify({ type: 'error', text: res.error });
+      // No active subscription: show the plans with the exact reason.
+      if (res.subscription) setPlansOpen({ notice: res.error });
+      else notify({ type: 'error', text: res.error });
       return;
     }
     setCategory(res.category.name); // the saved spelling
@@ -437,7 +463,8 @@ export default function App() {
   async function exportCsv(scope) {
     try {
       const res = await api.exportCsv(scope, filter);
-      if (res.ok) notify({ type: 'ok', text: `Exported ${res.count} leads to ${res.filePath}` });
+      if (res.subscription) setPlansOpen({ notice: res.error });
+      else if (res.ok) notify({ type: 'ok', text: `Exported ${res.count} leads to ${res.filePath}` });
       else if (!res.canceled) notify({ type: 'error', text: res.error });
     } catch (err) {
       notify({ type: 'error', text: `Export failed: ${err.message}` });
@@ -491,8 +518,18 @@ export default function App() {
           <span className="conn-dot" />
           {status.profile ? <span>Chrome · {status.profile}</span> : <span>Chrome not connected</span>}
         </div>
+        <button
+          type="button"
+          className={`plan-pill reason-${sub?.reason || 'loading'}`}
+          title={statusLine(sub)}
+          onClick={() => setPlansOpen({ notice: null })}
+        >
+          <Icon name="crown" size={14} />
+          <span>{!sub ? 'Plan…' : sub.reason === 'active' ? (sub.subscription?.expiresAt ? `${sub.subscription.daysLeft} days left` : 'Lifetime') : { trial: `Free: ${sub.trial?.remaining} search${sub.trial?.remaining === 1 ? '' : 'es'} left`, trial_used: 'Get a plan', pending: 'Pending approval', expired: 'Expired', cancelled: 'Apply again', none: 'Get a plan', offline: 'Plans', unconfigured: 'Plans', invalid: 'Plan: error' }[sub.reason]}</span>
+        </button>
         <WhatsAppPanel wa={wa} />
         <ThemeToggle />
+        <LockMenu onLock={onLock} onChangePin={() => setChangePin(true)} />
       </header>
 
       <main className="content">
@@ -518,6 +555,16 @@ export default function App() {
             <div className="field cat">
               <label htmlFor="cat">Category</label>
               <CategoryInput value={category} onChange={setCategory} categories={catData.categories} disabled={active} />
+            </div>
+            <div className="field site">
+              <label htmlFor="site">Website</label>
+              <select id="site" className="site-select" value={websiteFilter} disabled={active} onChange={(e) => setWebsiteFilter(e.target.value)}>
+                {Object.entries(WEBSITE_LABELS).map(([v, t]) => (
+                  <option key={v} value={v}>
+                    {t}
+                  </option>
+                ))}
+              </select>
             </div>
             <div className="buttons">
               <button type="submit" className="btn btn-primary" disabled={!canStart}>
@@ -632,6 +679,18 @@ export default function App() {
                 ))}
                 {catData.uncategorized > 0 && <option value="none">Uncategorized ({catData.uncategorized})</option>}
               </select>
+            </label>
+            <label className="select-wrap">
+              <span>Website</span>
+              <select aria-label="Show websites" value={siteView} onChange={(e) => setSiteView(e.target.value)}>
+                <option value="all">All businesses</option>
+                <option value="without">Without website</option>
+                <option value="with">With website</option>
+              </select>
+            </label>
+            <label className="check-wrap" title="Show and export only numbers that WhatsApp confirmed">
+              <input type="checkbox" checked={waOnly} onChange={(e) => setWaOnly(e.target.checked)} aria-label="WhatsApp numbers only" />
+              <span>WhatsApp only</span>
             </label>
             <CategoryManager
               categories={catData.categories}
@@ -763,6 +822,8 @@ export default function App() {
 
       {active && <AgentCard status={status} />}
       {summary && !active && <Celebration summary={summary} onClose={() => setSummary(null)} />}
+      {plansOpen && <Plans status={sub} notice={plansOpen.notice} notify={notify} onClose={() => (setPlansOpen(null), api.subscriptionStatus().then(setSub).catch(() => {}))} />}
+      {changePin && <ChangePin notify={notify} onClose={() => setChangePin(false)} />}
       {composeLead && <Composer lead={composeLead} connected={wa?.state === 'open'} notify={notify} onClose={() => setComposeLead(null)} />}
 
       <div className="toasts" aria-live="polite">

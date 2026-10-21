@@ -18,6 +18,9 @@ const paths = {
   edit: <><path d="M9.8 3.7 12.3 6.2" /><path d="M3 13l.6-2.8 7.6-7.6c.4-.4 1-.4 1.4 0l1.1 1.1c.4.4.4 1 0 1.4l-7.6 7.6Z" /></>,
   sun: <><circle cx="8" cy="8" r="2.8" /><path d="M8 1.8v1.4M8 12.8v1.4M1.8 8h1.4M12.8 8h1.4M3.6 3.6l1 1M11.4 11.4l1 1M3.6 12.4l1-1M11.4 4.6l1-1" /></>,
   moon: <path d="M13 9.6A5.5 5.5 0 0 1 6.4 3a5.5 5.5 0 1 0 6.6 6.6Z" />,
+  lock: <><rect x="3.5" y="7" width="9" height="6.5" rx="1.5" /><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" /></>,
+  copy: <><rect x="5.5" y="5.5" width="8" height="8" rx="1.5" /><path d="M10.5 5.5V3.5c0-.6-.4-1-1-1h-6c-.6 0-1 .4-1 1v6c0 .6.4 1 1 1h2" /></>,
+  crown: <><path d="M2.5 5.5 5 9l3-5 3 5 2.5-3.5-1 7h-9Z" /></>,
 };
 
 export default function Icon({ name, size = 16, className = '' }) {

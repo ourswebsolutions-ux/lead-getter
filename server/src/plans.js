@@ -7,6 +7,15 @@ const PLANS = {
   lifetime: { id: 'lifetime', name: 'Lifetime', priceLabel: 'PKR 20,000', price: 20000, currency: 'PKR', months: null, duration: 'One-time payment, never expires' },
 };
 
+// Where customers send payment (shown with every plan).
+const PAYMENT_METHODS = [
+  { id: 'nayapay', name: 'NayaPay', account: '03245237429' },
+  { id: 'jazzcash', name: 'JazzCash', account: '03245237429' },
+  { id: 'easypaisa', name: 'Easypaisa', account: '03245237429' },
+];
+
+const TRIAL_SEARCHES = 3;
+
 // Calendar-month addition; the 31st becomes the month's last day if needed.
 function addMonths(date, months) {
   const d = new Date(date.getTime());
@@ -18,4 +27,4 @@ function addMonths(date, months) {
   return d;
 }
 
-module.exports = { PLANS, addMonths };
+module.exports = { PLANS, PAYMENT_METHODS, TRIAL_SEARCHES, addMonths };
