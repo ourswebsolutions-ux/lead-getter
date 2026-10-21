@@ -41,14 +41,34 @@ The app finds the licence server through `src/main/license-config.json`. The lic
 
 ### Publishing a release
 
-[.github/workflows/release.yml](.github/workflows/release.yml) builds on Linux, Windows and macOS, installs and smoke-tests each build (the installed app must start, show its UI and load its modules), and publishes a GitHub Release with the installers:
+[.github/workflows/release.yml](.github/workflows/release.yml) builds on Linux, Windows and macOS, installs and smoke-tests each build (the installed app must start, show its UI and load its modules), and publishes a GitHub Release with the installers and the update files:
 
 ```bash
-# bump "version" in package.json first, commit, then:
-git tag v1.0.1 && git push origin v1.0.1
+npm version patch --no-git-tag-version      # or minor / major; sets "version" in package.json
+git commit -am "Lead Finder $(node -p "require('./package.json').version")"
+git push origin main
+git tag "v$(node -p "require('./package.json').version")" && git push origin --tags
 ```
 
-No credentials are needed in the repository: the workflow publishes with the built-in `GITHUB_TOKEN`.
+The tag must match `version`. No credentials are needed in the repository: the workflow publishes with the built-in `GITHUB_TOKEN`.
+
+Optionally, check that installed copies pick up the new release (installs the previous release, waits for it to update itself):
+
+```bash
+gh workflow run update-test.yml -f from=<previous version> -f to=<new version>
+```
+
+### Automatic updates
+
+Installed copies update themselves from this repository's GitHub Releases (the repository is public, so the app needs no token).
+
+- **When:** the app checks 10 seconds after it starts, then every 4 hours.
+- **Windows (.exe) and Linux AppImage:** the update downloads (only the changed parts when possible), installs silently and the app restarts as the new version. No clicks.
+- **Linux .deb:** the update downloads by itself, then the system asks for the administrator password to install it, because installing a package needs root.
+- **macOS:** the builds aren't signed, and macOS only installs updates into signed apps. The app shows "Lead Finder X is available" with a **Download** button. Signing with an Apple Developer ID would make macOS fully automatic too.
+- **Never during a search:** a running search is never interrupted. The update waits and installs as soon as the search finishes.
+- **Failures:** offline, a failed download or a failed install leave the current version running, and it tries again later. The app's data folder (leads, settings, PIN, subscription, WhatsApp link) is never touched by an update.
+- **Log:** each install keeps `update.log` in its data folder.
 
 iOS: see [docs/IOS.md](docs/IOS.md).
 
