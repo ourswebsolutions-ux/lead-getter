@@ -48,17 +48,28 @@ jobs:
           $deadline = (Get-Date).AddMinutes(4)
           while (-not (Test-Path "$data\leads.db") -and (Get-Date) -lt $deadline) { Start-Sleep 2 }
           $created = (Get-Item "$data\leads.db").CreationTimeUtc
-          $want = '"event":"started","version":"' + $env:TO + '"'
+          # The installer relaunches the app through the Windows shell (not as
+          # a child of the old app), so the result is checked directly: the
+          # installed version changes and a new process runs from it.
           $deadline = (Get-Date).AddMinutes(12)
+          $now = ''
           while ((Get-Date) -lt $deadline) {
-            if ((Test-Path $log) -and (Select-String -Path $log -SimpleMatch $want -Quiet)) { break }
+            $now = (Get-Item $env:EXE -ErrorAction SilentlyContinue).VersionInfo.ProductVersion
+            if ($now -and $now.StartsWith($env:TO)) { break }
             Start-Sleep 5
           }
-          Get-Content $log
-          if (-not (Select-String -Path $log -SimpleMatch $want -Quiet)) { throw "the app did not restart as $env:TO" }
-          $now = (Get-Item $env:EXE).VersionInfo.ProductVersion
+          if (Test-Path $log) { Get-Content $log | Select-String -NotMatch '"event":"(log|downloading)"' }
           "Installed now: $now"
-          if (-not $now.StartsWith($env:TO)) { throw "installed version is $now" }
+          if (-not ($now -and $now.StartsWith($env:TO))) { throw "installed version is still $now" }
+          $running = $null
+          $deadline = (Get-Date).AddMinutes(3)
+          while ((Get-Date) -lt $deadline) {
+            $running = Get-Process 'Lead Finder' -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $env:EXE }
+            if ($running) { break }
+            Start-Sleep 3
+          }
+          if (-not $running) { throw 'the updated app was not relaunched' }
+          "Relaunched: $(@($running).Count) process(es) from $env:EXE, started $(@($running)[0].StartTime)"
           if ((Get-Item "$data\leads.db").CreationTimeUtc -ne $created) { throw 'the lead database was recreated' }
           'User data kept: leads.db unchanged since before the update'
           Get-Process 'Lead Finder' -ErrorAction SilentlyContinue | Stop-Process -Force
@@ -107,7 +118,7 @@ jobs:
           inode=$(stat -c %i "$data/leads.db")
           want="\"event\":\"started\",\"version\":\"$TO\""
           for i in $(seq 150); do grep -qF "$want" "$LEAD_FINDER_UPDATE_LOG" 2>/dev/null && break; sleep 5; done
-          cat "$LEAD_FINDER_UPDATE_LOG"
+          grep -v '"event":"\(log\|downloading\)"' "$LEAD_FINDER_UPDATE_LOG"
           grep -qF "$want" "$LEAD_FINDER_UPDATE_LOG" || { tail -50 "$RUNNER_TEMP/app.out"; echo "the app did not restart as $TO"; exit 1; }
           if [ "${{ matrix.format }}" = appimage ]; then
             ls -la ~/Applications
@@ -127,14 +138,20 @@ jobs:
         run: |
           gh release download "v$FROM" -R $GITHUB_REPOSITORY -p "Lead-Finder-$FROM-mac-arm64.dmg" -D old
           hdiutil attach old/*.dmg -nobrowse -mountpoint /tmp/lf
-          cp -R "/tmp/lf/Lead Finder.app" ~/Applications/ 2>/dev/null || { mkdir -p ~/Applications && cp -R "/tmp/lf/Lead Finder.app" ~/Applications/; }
+          mkdir -p ~/Applications
+          cp -R "/tmp/lf/Lead Finder.app" ~/Applications/
           hdiutil detach /tmp/lf
+          ls -la ~/Applications
 
       - name: Start it and wait for the update notice
         run: |
           export LEAD_FINDER_UPDATE_LOG="$RUNNER_TEMP/update.log"
           ~/Applications/"Lead Finder.app"/Contents/MacOS/"Lead Finder" >"$RUNNER_TEMP/app.out" 2>&1 &
           for i in $(seq 60); do grep -qF "\"available\":\"$TO\"" "$LEAD_FINDER_UPDATE_LOG" 2>/dev/null && break; sleep 5; done
-          cat "$LEAD_FINDER_UPDATE_LOG"
-          grep -q "\"event\":\"available\".*\"available\":\"$TO\"" "$LEAD_FINDER_UPDATE_LOG" || { echo "no update notice for $TO"; exit 1; }
+          cat "$LEAD_FINDER_UPDATE_LOG" 2>/dev/null || echo "(no update log)"
+          if ! grep -q "\"event\":\"available\".*\"available\":\"$TO\"" "$LEAD_FINDER_UPDATE_LOG" 2>/dev/null; then
+            echo "no update notice for $TO; app output:"
+            tail -80 "$RUNNER_TEMP/app.out"
+            exit 1
+          fi
           pkill -f "Lead Finder" || true

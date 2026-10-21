@@ -146,11 +146,13 @@ class Updater {
   }
 }
 
-// Test/diagnostic log: LEAD_FINDER_UPDATE_LOG=<file> appends JSON lines.
+// Update log as JSON lines: <userData>/update.log (kept under ~256 KB), or
+// LEAD_FINDER_UPDATE_LOG=<file> for tests. For support and diagnostics.
 function fileLog(file) {
   if (!file) return () => {};
   return (entry) => {
     try {
+      if (fs.statSync(file, { throwIfNoEntry: false })?.size > 256 * 1024) fs.renameSync(file, `${file}.1`);
       fs.appendFileSync(file, `${JSON.stringify({ t: new Date().toISOString(), pid: process.pid, ...entry })}\n`);
     } catch {}
   };

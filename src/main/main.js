@@ -765,7 +765,7 @@ app.whenReady().then(() => {
   createWindow();
   if (process.env.LEAD_FINDER_SMOKE_TEST) return smokeTest(process.env.LEAD_FINDER_SMOKE_TEST);
 
-  updater = new Updater({ app, shell, isBusy: () => Boolean(search), send: (st) => send('update:status', st), log: fileLog(process.env.LEAD_FINDER_UPDATE_LOG) });
+  updater = new Updater({ app, shell, isBusy: () => Boolean(search), send: (st) => send('update:status', st), log: fileLog(process.env.LEAD_FINDER_UPDATE_LOG || path.join(app.getPath('userData'), 'update.log')) });
   handle('update:status', () => updater.status);
   handle('update:openDownload', () => updater.openDownload());
   if (process.env.LEAD_FINDER_NO_UPDATES !== '1') updater.start();
