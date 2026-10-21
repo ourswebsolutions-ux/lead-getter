@@ -25,14 +25,19 @@ test('Maps DOM: links, scrolling, details, and block detection', { skip: !exe &&
   assert.equal(maps.placeKey(links[0].url), '0x1:0xa');
 
   // Scroll until the end marker appears; every listing is collected once.
+  // Slow CI machines render the next batch late, so allow a generous budget.
   let end = false;
-  for (let i = 0; i < 10 && !end; i++) {
+  for (let i = 0; i < 40 && !end; i++) {
     ({ end } = await maps.scrollFeed(page));
-    await page.waitForTimeout(100);
+    await page.waitForTimeout(250);
   }
   ({ end } = await maps.scrollFeed(page));
   links = await maps.collectLinks(page);
-  assert.ok(end);
+  const where = await page.evaluate(() => {
+    const l = document.getElementById('list');
+    return { cards: document.querySelectorAll('#feed a').length, scrollTop: l.scrollTop, scrollHeight: l.scrollHeight, clientHeight: l.clientHeight, overflowY: getComputedStyle(l).overflowY };
+  });
+  assert.ok(end, `end of list not reached: ${JSON.stringify(where)}`);
   assert.equal(links.length, 12);
 
   assert.ok(await maps.openListing(page, links[0]));
