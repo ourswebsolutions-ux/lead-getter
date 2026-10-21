@@ -101,29 +101,52 @@ test('opt-out detection in English, Roman Urdu and Urdu', () => {
   for (const t of ['Walaikum assalam', 'Ji haan, real estate', 'Which block in DHA?', 'Theek hoon, aap sunaein', '']) assert.ok(!isOptOut(t), t);
 });
 
-test('three stages, one message per 45-60 minutes, never back to back', async () => {
-  const h = setup({ contacts: 1 });
+test('one contact at a time: three messages about a minute apart, then 45-60 minutes to the next contact', async () => {
+  const h = setup({ contacts: 2 });
+  h.clock.t = Date.parse('2026-10-21T09:00:00Z'); // 14:00 in Pakistan
   assert.equal(h.o.start().ok, false, 'live sending needs the acknowledgement');
   assert.equal(h.o.start({ acknowledge: true }).ok, true);
-  await h.o.tick();
-  assert.equal(h.sent.length, 1);
-  assert.equal(h.sent[0].text, 'Assalam-o-Alaikum Name0 bhai.');
-  const due = h.o.load().nextDueAt;
-  assert.equal(due - h.sent[0].at, 52.5 * MIN, 'random gap within 45-60 minutes');
-  await run(h, 52 * MIN);
-  assert.equal(h.sent.length, 1, 'nothing before the interval');
-  await run(h, 2 * MIN);
-  assert.equal(h.sent.length, 2);
-  assert.equal(h.sent[1].text, 'Kaise hain aap? Umeed hai aap khairiyat se honge.');
-  await run(h, 60 * MIN);
-  assert.equal(h.sent.length, 3);
-  assert.equal(h.sent[2].text, 'Kya aap Name0 Real Estate ke naam se real estate ka kaam karte hain, ya kisi aur business se related hain?', 'message 3 names the business');
-  assert.ok(h.sent[2].at - h.sent[1].at >= 45 * MIN);
-  await run(h, 3 * 60 * MIN);
-  assert.equal(h.sent.length, 3, 'three messages, then nothing');
-  assert.equal(h.o.store.contact('+923001000000').state, 'done');
+  await run(h, 3 * MIN);
+  const A = '+923001000000';
+  const B = '+923001000001';
+  const t0 = h.sent[0].at;
+  // Contact A: 14:00, 14:01, 14:02.
+  assert.deepEqual(h.sent.map((s) => [s.phone, (s.at - t0) / 1000]), [[A, 0], [A, 60], [A, 120]]);
+  assert.deepEqual(h.sent.map((s) => s.text), [
+    'Assalam-o-Alaikum Name0 bhai.',
+    'Kaise hain aap? Umeed hai aap khairiyat se honge.',
+    'Kya aap Name0 Real Estate ke naam se real estate ka kaam karte hain, ya kisi aur business se related hain?',
+  ]);
+  assert.equal(h.o.store.contact(A).state, 'done');
+  // Contact B: 52.5 minutes (random within 45-60) after A's last message.
+  const aDone = h.sent[2].at;
+  assert.equal(h.o.load().nextDueAt - aDone, 52.5 * MIN);
+  assert.equal(h.o.snapshot().waiting, 'interval');
+  await run(h, 51 * MIN); // until 52 minutes after A's last message
+  assert.equal(h.sent.length, 3, 'nothing to B before the gap');
+  await run(h, 4 * MIN);
+  assert.equal(h.sent.length, 6);
+  assert.deepEqual(h.sent.slice(3).map((s) => s.phone), [B, B, B]);
+  const bStart = (h.sent[3].at - aDone) / MIN;
+  assert.ok(bStart >= 52.5 && bStart < 53, `B started ${bStart} minutes after A finished`);
+  assert.deepEqual(h.sent.slice(3).map((s) => (s.at - h.sent[3].at) / 1000), [0, 60, 120]);
+  await run(h, 2 * 60 * MIN);
+  assert.equal(h.sent.length, 6, 'three messages each, nothing more');
   assert.equal(h.o.load().status, 'stopped');
   assert.equal(h.o.load().pauseReason, 'finished');
+});
+
+test('gaps stay within their ranges: 55-65 s within a contact, 45-60 min between contacts', () => {
+  const h = setup();
+  const cfg = h.o.load().config;
+  for (const [r, stage, contact] of [[0, 55_000, 45 * MIN], [1, 65_000, 60 * MIN], [0.5, 60_000, 52.5 * MIN]]) {
+    h.o.random = () => r;
+    assert.equal(h.o.stageGap(), stage);
+    assert.equal(h.o.contactGap(cfg), contact);
+  }
+  h.o.configure({ intervalMin: 50, intervalMax: 55 });
+  h.o.random = () => 1;
+  assert.equal(h.o.contactGap(h.o.load().config), 55 * MIN);
 });
 
 test('missing names use the version without a name', async () => {
@@ -136,22 +159,32 @@ test('missing names use the version without a name', async () => {
   assert.deepEqual(h.o.preview(h.o.store.contact('+923001000001')).slice(0, 1), ['Assalam-o-Alaikum.']);
 });
 
-test('daily cap counts unique recipients, survives restarts and resets the next day', async () => {
+test('a day of sending: at most the daily cap, one contact at a time, 45+ minutes between contacts', async () => {
   const h = setup({ contacts: 14 });
   h.o.configure({ dailyCap: 10, quietStart: 23, quietEnd: 6 });
   h.o.start({ acknowledge: true });
-  await run(h, 17 * 60 * MIN); // 10:00 -> 03:00 PKT
-  const day1 = h.sent.filter((s) => s.at < Date.parse('2026-10-21T19:00:00Z'));
-  const recipients = new Set(day1.map((s) => s.phone));
-  assert.ok(recipients.size <= 10, `${recipients.size} recipients on day 1`);
-  assert.equal(h.o.snapshot().today.recipients <= 10, true);
-  // A restarted app keeps the count.
-  const again = h.make();
-  assert.ok(again.snapshot().today.recipients <= 10);
-  assert.equal(again.snapshot().today.cap, 10);
-  // Never more than one message per 45 minutes overall.
-  for (let i = 1; i < h.sent.length; i++) assert.ok(h.sent[i].at - h.sent[i - 1].at >= 45 * MIN);
+  await run(h, 17 * 60 * MIN); // 10:00 -> 03:00 in Pakistan
+  // Unique recipients per (local) day never exceed the cap.
+  const byDay = new Map();
+  for (const s of h.o.store.sends({ test: false, limit: 1000 })) byDay.set(s.day, new Set([...(byDay.get(s.day) || []), s.phone]));
+  for (const [day, phones] of byDay) assert.ok(phones.size <= 10, `${phones.size} recipients on ${day}`);
+  assert.equal(Math.max(...[...byDay.values()].map((p) => p.size)), 10, 'the cap was reached');
+  // Each contact's messages are consecutive and about a minute apart; the
+  // next contact starts at least 45 minutes after the previous one's last.
+  const runs = [];
+  for (const s of h.sent) {
+    if (runs.length && runs.at(-1).phone === s.phone) runs.at(-1).list.push(s);
+    else runs.push({ phone: s.phone, list: [s] });
+  }
+  assert.equal(new Set(runs.map((r) => r.phone)).size, runs.length, 'no contact is returned to later');
+  for (const r of runs) {
+    assert.equal(r.list.length, 3);
+    for (let i = 1; i < 3; i++) assert.ok(r.list[i].at - r.list[i - 1].at <= 90_000, 'about a minute apart');
+  }
+  for (let i = 1; i < runs.length; i++) assert.ok(runs[i].list[0].at - runs[i - 1].list[2].at >= 45 * MIN, 'gap between contacts');
   assert.equal(h.sent.length, new Set(h.sent.map((s) => `${s.phone}|${s.text}`)).size, 'no message sent twice');
+  // A restarted app keeps the count.
+  assert.ok(h.make().snapshot().today.recipients <= 10);
 });
 
 test('a full day of capped recipients waits; follow-ups to today’s recipients may continue', async () => {
@@ -172,20 +205,58 @@ test('a full day of capped recipients waits; follow-ups to today’s recipients 
   assert.equal(h.o.snapshot().today.recipients, 10);
 });
 
-test('the 45-minute gap holds across a restart', async () => {
-  const h = setup({ contacts: 3 });
+test('restarts and pauses continue the schedule without resetting it', async () => {
+  const h = setup({ contacts: 2 });
+  const A = '+923001000000';
+  const B = '+923001000001';
   h.o.start({ acknowledge: true });
-  await h.o.tick();
-  assert.equal(h.sent.length, 1);
-  h.o.stop();
+  await h.o.tick(); // A, message 1
+  // Restart 30 s later (the campaign is still running in the database).
+  advance(h, 30_000);
+  let app = h.make();
+  await app.tick();
+  assert.equal(h.sent.length, 1, 'not before the minute is up');
+  advance(h, 30_000);
+  await app.tick();
+  assert.deepEqual(h.sent.map((s) => s.phone), [A, A], 'A continues after the restart, not someone else');
+  // Paused mid-sequence for 10 minutes: resuming finishes A first.
+  app.pause();
   advance(h, 10 * MIN);
-  const restarted = h.make();
-  assert.equal(restarted.start().ok, true, 'already acknowledged');
-  await restarted.tick();
-  assert.equal(h.sent.length, 1, 'restart does not reset the interval');
-  assert.ok(restarted.load().nextDueAt >= h.sent[0].at + 45 * MIN);
-  await run(h, 40 * MIN, restarted);
-  assert.equal(h.sent.length, 2);
+  assert.equal(app.resume().ok, true);
+  await app.tick();
+  assert.deepEqual(h.sent.map((s) => s.phone), [A, A, A]);
+  const aDone = h.sent[2].at;
+  // Restart, and also stop + start, between contacts: B still waits for the
+  // full gap after A's last message.
+  advance(h, 10 * MIN);
+  app = h.make();
+  await run(h, 30 * MIN, app);
+  assert.equal(h.sent.length, 3);
+  app.stop();
+  assert.equal(app.start().ok, true);
+  assert.ok(app.load().nextDueAt - aDone >= 45 * MIN, 'stop/start does not shorten the gap');
+  await run(h, 30 * MIN, app);
+  assert.deepEqual(h.sent.slice(3).map((s) => s.phone), [B, B, B]);
+  assert.ok(h.sent[3].at - aDone >= 45 * MIN);
+});
+
+test('a crash during a send: never resent, and the next contact waits the full gap', async () => {
+  const h = setup({ contacts: 2 });
+  h.o.start({ acknowledge: true });
+  h.transport.send = () => new Promise(() => {}); // the app dies while this is in flight
+  h.o.tick();
+  await new Promise((r) => setImmediate(r));
+  const st = h.o.load();
+  assert.equal(st.current, null);
+  assert.equal(st.nextDueAt - h.clock.t, 52.5 * MIN, 'a full gap is reserved before the send');
+  advance(h, 5 * MIN);
+  h.transport.send = async (phone, text) => (h.sent.push({ phone, text, at: h.clock.t }), { id: 'X' });
+  const app = h.make();
+  app.init();
+  app.dispose();
+  assert.equal(app.store.contact('+923001000000').state, 'uncertain');
+  await run(h, 60 * MIN, app);
+  assert.deepEqual(h.sent.map((s) => s.phone), ['+923001000001', '+923001000001', '+923001000001'], 'the uncertain contact is skipped; B after the gap');
 });
 
 test('each stage is sent at most once, even with two schedulers or a lost update', async () => {
@@ -194,35 +265,38 @@ test('each stage is sent at most once, even with two schedulers or a lost update
   const twin = h.make();
   await Promise.all([h.o.tick(), twin.tick(), h.o.tick()]);
   assert.equal(h.sent.length, 1);
-  // The contact's progress was not saved (e.g. crash after sending): the
-  // reservation still prevents a second stage-1 message.
-  h.o.store.setContact('+923001000000', { stage: 0, state: 'queued' });
-  const st = h.o.load();
-  st.nextDueAt = h.clock.t;
-  h.o.save(st);
-  await h.o.tick();
-  assert.equal(h.sent.length, 1);
-  assert.equal(h.o.store.contact('+923001000000').stage, 1);
+  // The contact's progress was not saved (e.g. a crash after sending): the
+  // stored reservation still prevents a second message 1.
+  h.o.store.setContact('+923001000000', { stage: 0, state: 'queued', lastSentAt: null });
+  await run(h, 2 * 60 * MIN);
+  assert.equal(h.sent.filter((s) => s.text.startsWith('Assalam')).length, 1, 'message 1 never repeated');
+  assert.equal(h.sent.length, new Set(h.sent.map((s) => s.text)).size);
+  assert.equal(h.o.store.contact('+923001000000').stage, 3);
 });
 
-test('a reply pauses that contact; an opt-out stops it for good', async () => {
-  const h = setup({ contacts: 2 });
+test('a reply pauses that contact; the next contact waits the full gap; an opt-out stops it for good', async () => {
+  const h = setup({ contacts: 3 });
+  const [A, B, C] = ['+923001000000', '+923001000001', '+923001000002'];
   h.o.start({ acknowledge: true });
-  await h.o.tick(); // +923001000000 stage 1
-  h.o.onIncoming({ phone: '+923001000000', text: 'Walaikum assalam, kaun?' });
-  assert.equal(h.o.store.contact('+923001000000').state, 'replied');
-  await run(h, 4 * 60 * MIN);
-  assert.ok(h.sent.every((s, i) => i === 0 || s.phone !== '+923001000000'), 'no automated message after the reply');
-  // Opt-out from the other contact, mid-sequence.
-  h.o.onIncoming({ phone: '+923001000001', text: 'Please do not message me again' });
-  const before = h.sent.length;
-  await run(h, 4 * 60 * MIN);
-  assert.equal(h.sent.length, before);
-  assert.equal(h.o.store.contact('+923001000001').state, 'opted_out');
-  assert.equal(h.o.include('+923001000001').ok, false, 'an opt-out cannot be resumed');
-  assert.deepEqual(h.o.addLeads([{ phone: '+923001000001', name: null }]), { ok: true, added: 0, skipped: 1 });
+  await h.o.tick(); // A, message 1
+  const aLast = h.sent[0].at;
+  h.o.onIncoming({ phone: A, text: 'Walaikum assalam, kaun?' });
+  assert.equal(h.o.store.contact(A).state, 'replied');
+  await run(h, 50 * MIN);
+  assert.equal(h.sent.length, 1, 'no more messages to A, and B waits');
+  while (h.sent.length < 2) await run(h, 30_000);
+  assert.equal(h.sent[1].phone, B);
+  assert.ok(h.sent[1].at - aLast >= 45 * MIN, 'B starts 45-60 minutes after A’s last message');
+  // B opts out right after message 1: no more to B; C after the gap.
+  h.o.onIncoming({ phone: B, text: 'Please do not message me again' });
+  await run(h, 60 * MIN);
+  assert.deepEqual(h.sent.map((s) => s.phone), [A, B, C, C, C].slice(0, h.sent.length));
+  assert.equal(h.sent.filter((s) => s.phone === B).length, 1);
+  assert.equal(h.o.store.contact(B).state, 'opted_out');
+  assert.equal(h.o.include(B).ok, false, 'an opt-out cannot be resumed');
+  assert.deepEqual(h.o.addLeads([{ phone: B, name: null }]), { ok: true, added: 0, skipped: 1 });
   // The replied contact can be handed back to the campaign by the user.
-  assert.equal(h.o.include('+923001000000').ok, true);
+  assert.equal(h.o.include(A).ok, true);
 });
 
 test('a reply that was not matched still stops the next message (safety net)', async () => {

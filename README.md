@@ -250,9 +250,12 @@ What WhatsApp makes available, and what it doesn't:
   - Message 3 names the business by default: *Kya aap {business} ke naam se real estate ka kaam karte hain…?* `{business}` is the name on Google Maps without extras such as *"- Best Agency in DHA"* or *"| Lahore"*. Without a usable name, the plain version is sent.
   - The name is the contact's own WhatsApp name, or one word from the business name, such as *Zahid Properties* → *Zahid*. It's used only when the word looks like a name (not *Real*, *Estate*, *Properties*, a city or a number). Otherwise the no-name version is used.
   - Names are never invented. You can edit or clear each contact's name before they're messaged. Previews show the exact text per contact.
-- **Schedule:** one campaign message per **45–60 minutes** (a random time within your range), and at most **10–15 unique contacts per day** (10 by default; every message to a contact that day counts once).
-  - The three messages to a contact are separated by at least the interval, and never sent back to back.
-  - The interval, the daily count and the next send time are kept in the database, so they survive restarts.
+- **Schedule:** one contact at a time.
+  - A contact's three messages go **about a minute apart** (55–65 seconds).
+  - The **next contact** starts a random **45–60 minutes** (your range) after the previous contact's last message, whether they got all three, replied, opted out or a send failed.
+  - Example: contact A at 14:00, 14:01 and 14:02; contact B starts between 14:47 and 15:02.
+  - At most **10–15 unique contacts per day** (10 by default); all of a contact's messages count once.
+  - The contact in progress, the next send time and the daily count are kept in the database. After a restart or a pause, an interrupted contact is finished first, about a minute after their last message, and the gap before the next contact is never shortened.
 - **Quiet hours** apply in the recipient's local time (from the country code; for example, Pakistan uses Pakistan time).
 - **Replies:** any reply stops the sequence for that contact and hands the conversation to you. Messages such as *stop*, *not interested*, *message na karein* or *میسج نہ کریں* opt the number out for good. You can also exclude or opt out any contact yourself.
 - **No duplicates:** each message to each contact is reserved in the database before it is sent, so retries, restarts, a second copy of the app or a reconnect can never send it twice.

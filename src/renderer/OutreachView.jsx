@@ -15,12 +15,12 @@ const STATE_LABEL = {
 };
 const SEND_LABEL = { pending: 'Sending', sent: 'Sent', delivered: 'Delivered', read: 'Read', failed: 'Failed', unknown: 'Unknown' };
 const WAITING = {
-  interval: 'Waiting for the next send window',
+  interval: 'Waiting before the next contact (45–60 minutes after the last one)',
+  next_message: 'Next message to the same contact in about a minute',
   whatsapp: 'Waiting for WhatsApp to connect',
   subscription: 'Waiting for an active subscription',
   daily_cap: 'Daily limit reached: continues tomorrow',
   quiet_hours: 'Quiet hours for the remaining contacts',
-  stage_gap: 'Waiting for the gap between messages',
   nothing_due: 'Nothing due right now',
 };
 const PAUSED = {
@@ -135,7 +135,7 @@ function Acknowledge({ onCancel, onConfirm }) {
       <div className="ack" role="dialog" aria-modal="true" aria-label="Start live outreach">
         <h2>Send automatically from your WhatsApp?</h2>
         <p>
-          WhatsApp’s terms don’t allow automated or bulk messaging from unofficial apps, and numbers that send unexpected messages are often restricted or banned. Lead Finder keeps the volume low (one message every 45–60 minutes, at most 15 new people a day), stops as soon as
+          WhatsApp’s terms don’t allow automated or bulk messaging from unofficial apps, and numbers that send unexpected messages are often restricted or banned. Lead Finder keeps the volume low (one new person every 45–60 minutes, their three messages about a minute apart, at most 15 people a day), stops as soon as
           someone replies or opts out, and pauses if WhatsApp refuses messages. The risk to your number remains yours.
         </p>
         <label className="ack-check">
@@ -334,12 +334,13 @@ export default function OutreachView({ wa, notify, hidden }) {
             <p className="muted small">{live ? 'Messages are sent from your WhatsApp.' : 'Runs the whole schedule without sending anything, so you can check the order and timing.'}</p>
             <div className="settings-grid">
               <label>
-                <span className="field-label">Interval (minutes)</span>
+                <span className="field-label">Gap between contacts (minutes)</span>
                 <span className="range-pair">
                   <input type="number" min={snap.limits.intervalMin} max={snap.limits.intervalMax} value={draft.intervalMin} onChange={(e) => edit({ intervalMin: Number(e.target.value) })} aria-label="Shortest interval" />
                   <span>to</span>
                   <input type="number" min={snap.limits.intervalMin} max={snap.limits.intervalMax} value={draft.intervalMax} onChange={(e) => edit({ intervalMax: Number(e.target.value) })} aria-label="Longest interval" />
                 </span>
+                <span className="muted small">Each contact’s three messages go about a minute apart; the next contact starts a random 45–60 minutes after that.</span>
               </label>
               <label>
                 <span className="field-label">Daily limit (contacts)</span>
@@ -385,7 +386,7 @@ export default function OutreachView({ wa, notify, hidden }) {
             </label>
           </div>
           <p className="muted small">
-            One message per send window, in this order. Use <code>{'{name}'}</code> and <code>{'{business}'}</code> (the business name from Google Maps); the second box is used when that isn’t known.
+            Sent in this order, about a minute apart, to one contact at a time. Use <code>{'{name}'}</code> and <code>{'{business}'}</code> (the business name from Google Maps); the second box is used when that isn’t known.
           </p>
           <fieldset disabled={running}>
             {draft.templates.map((t, i) => (

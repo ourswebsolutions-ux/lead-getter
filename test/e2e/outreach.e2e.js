@@ -147,9 +147,16 @@ test('WhatsApp chats and outreach: history, live messages, campaign, replies, re
   await win.locator('.toast').filter({ hasText: 'Campaign settings saved.' }).waitFor();
 
   // --- Test run: the schedule runs, nothing reaches WhatsApp.
+  // A contact's messages go about a minute apart.
   await out.getByRole('button', { name: 'Start' }).click();
   await win.waitForFunction(() => document.querySelectorAll('.campaign-history tbody tr').length === 1, null, { timeout: 15_000 });
   assert.match(await out.locator('.campaign-history').innerText(), /test run[\s\S]*1 of 3[\s\S]*Sent/i);
+  assert.match(await out.locator('.campaign-status').innerText(), /Next message to the same contact in about a minute/);
+  await win.waitForFunction(() => document.querySelectorAll('.campaign-history tbody tr').length === 2, null, { timeout: 120_000 });
+  const sim = (await win.evaluate(() => window.leadFinder.outreachState())).sends;
+  const simGap = (sim[0].sentAt - sim[1].sentAt) / 1000;
+  assert.ok(simGap >= 55 && simGap <= 100, `test run: message 2 ${simGap}s after message 1`);
+  assert.equal(sim[0].phone, sim[1].phone, 'the same contact');
   assert.equal(sends(log).length, 1, 'only the manual chat reply so far');
   await out.getByRole('button', { name: 'Stop' }).click();
 
@@ -175,15 +182,29 @@ test('WhatsApp chats and outreach: history, live messages, campaign, replies, re
   const facts = await out.locator('.campaign-facts').innerText();
   assert.match(facts, /1 \/ 12 contacts/);
   assert.match(facts, /Test Account/);
-  const nextDue = (await app.evaluate(() => null), await win.evaluate(() => window.leadFinder.outreachState())).nextDueAt;
-  const gap = (nextDue - live[0].at) / 60_000;
-  assert.ok(gap >= 45 && gap <= 60.1, `next message in ${gap.toFixed(1)} minutes`);
+  const firstState = await win.evaluate(() => window.leadFinder.outreachState());
+  const soon = (firstState.nextDueAt - live[0].at) / 1000;
+  assert.ok(soon >= 55 && soon <= 66, `message 2 to the same contact due ${soon}s later`);
+  assert.equal(firstState.current, '+923001234567');
   if (shots) await win.screenshot({ path: path.join(shots, 'outreach.png') });
 
   // --- A reply stops the sequence for that contact.
   await app.evaluate(() => globalThis.__fakeWA.incoming('923001234567', 'Walaikum assalam, kaun?', 'Zahid'));
   await win.locator('.toast').filter({ hasText: /replied/ }).waitFor();
   await rows.filter({ hasText: '+923001234567' }).locator('.st-chip').filter({ hasText: 'Replied' }).waitFor();
+  // The reply ends Zahid's sequence; the next contact is 45-60 minutes after
+  // his last message.
+  let replyState;
+  for (let i = 0; i < 90; i++) {
+    replyState = await win.evaluate(() => window.leadFinder.outreachState());
+    if (replyState.current === null) break; // the scheduler's next tick (every 30 s) moves on
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  assert.equal(replyState.current, null);
+  const nextDue = replyState.nextDueAt;
+  const gap = (nextDue - live[0].at) / 60_000;
+  assert.ok(gap >= 45 && gap <= 60.1, `next contact in ${gap.toFixed(1)} minutes: ${JSON.stringify({ status: replyState.status, waiting: replyState.waiting, current: replyState.current, nextDueAt: nextDue, live0: live[0].at, contacts: replyState.contacts.map((c) => [c.phone, c.state, c.stage, c.lastSentAt]), sends: replyState.sends.map((x) => [x.phone, x.stage, x.status, x.sentAt]) })}`);
+  assert.equal(sends(log).length, 2, 'no further message to Zahid');
 
   // --- Restart: still running, same count and next time; nothing re-sent.
   await app.close();

@@ -3,9 +3,12 @@
 // Real-estate outreach: a three-message introduction to verified WhatsApp
 // leads, sent automatically by a persistent, rate-limited scheduler.
 //
+// Timing: a contact's three messages go about one minute apart; the next
+// contact starts 45-60 minutes (random within the configured range) after
+// the previous contact's last message.
+//
 // Safety rules (all enforced here, whatever the UI sends):
-//   - at most one campaign message per 45-60 minutes (random within the
-//     configured range), at most 10-15 unique recipients per day;
+//   - one contact at a time, at most 10-15 unique recipients per day;
 //   - each stage is reserved in the database before it is sent, so a
 //     stage is never sent twice (retries, restarts, duplicate events);
 //   - nothing is sent in the recipient's quiet hours;
@@ -20,6 +23,7 @@ const { DEFAULT_TEMPLATES, render, validateTemplates, isOptOut, cleanBusiness } 
 const LIMITS = { intervalMin: 45, intervalMax: 60, capMin: 10, capMax: 15 };
 const DEFAULT_CONFIG = { templates: DEFAULT_TEMPLATES, intervalMin: 45, intervalMax: 60, dailyCap: 10, quietStart: 21, quietEnd: 9, test: true };
 const MIN = 60_000;
+const STAGE_GAP = 60_000; // between one contact's messages (55-65 s)
 const STATE_KEY = 'outreach';
 
 // Recipient time zone from the country calling code (one-zone countries).
@@ -82,7 +86,7 @@ class Outreach extends EventEmitter {
 
   load() {
     const saved = this.state.get(STATE_KEY) || {};
-    return { status: 'stopped', pauseReason: null, nextDueAt: null, acknowledgedAt: null, failures: 0, ...saved, config: { ...DEFAULT_CONFIG, ...(saved.config || {}) } };
+    return { status: 'stopped', pauseReason: null, nextDueAt: null, current: null, acknowledgedAt: null, failures: 0, ...saved, config: { ...DEFAULT_CONFIG, ...(saved.config || {}) } };
   }
 
   save(st) {
@@ -134,10 +138,17 @@ class Outreach extends EventEmitter {
     st.status = 'running';
     st.pauseReason = null;
     st.failures = 0;
-    // Never sooner than the minimum gap after the last campaign message,
-    // even across restarts.
-    const last = this.store.lastSendAt(st.config.test);
-    st.nextDueAt = Math.max(this.clock(), last ? last + st.config.intervalMin * MIN : 0);
+    // A contact whose sequence was interrupted (pause, stop, restart) is
+    // finished first, a minute after their last message; otherwise the next
+    // contact waits the full gap after the last campaign message.
+    const now = this.clock();
+    const current = this.current(st);
+    if (current) st.nextDueAt = Math.max(now, (current.lastSentAt || 0) + STAGE_GAP);
+    else {
+      st.current = null;
+      const last = this.store.lastSendAt(st.config.test);
+      st.nextDueAt = Math.max(now, last ? last + this.contactGap(st.config) : 0);
+    }
     this.save(st);
     this.kick();
     return { ok: true, snapshot: this.snapshot(st) };
@@ -266,36 +277,57 @@ class Outreach extends EventEmitter {
     this.emit('change', this.snapshot());
   }
 
-  // Picks the next message: follow-ups first (oldest first), then new
+  // ~1 minute between one contact's messages; 45-60 minutes between contacts.
+  stageGap() {
+    return STAGE_GAP - 5000 + Math.round(this.random() * 10_000);
+  }
+
+  contactGap(cfg) {
+    return Math.round((cfg.intervalMin + this.random() * (cfg.intervalMax - cfg.intervalMin)) * MIN);
+  }
+
+  // The contact whose sequence is in progress, if it still is.
+  current(st) {
+    if (!st.current) return null;
+    const c = this.store.contact(st.current);
+    return c && c.state === 'active' && c.stage >= 1 && c.stage < 3 ? c : null;
+  }
+
+  // Picks the next message. The contact in progress comes first (their next
+  // message); otherwise a contact whose sequence was resumed, then new
   // contacts, within the daily cap and outside quiet hours.
   next(now, st) {
     const cfg = st.config;
     const day = dayOf(now);
     const used = this.store.recipientsOn(day, cfg.test);
+    const allowed = (c) => this.store.messagedOn(c.phone, day, cfg.test) || used < cfg.dailyCap;
+    const quiet = (c) => inQuietHours(hourIn(now, this.zoneOf(c.phone)), cfg.quietStart, cfg.quietEnd);
+    const cur = this.current(st);
+    if (cur) {
+      // Finish this contact before anyone else (waiting if needed).
+      if (quiet(cur)) return { reason: 'quiet_hours' };
+      if (!allowed(cur)) return { reason: 'daily_cap' };
+      return { contact: cur, stage: cur.stage + 1, day };
+    }
     const contacts = this.store.contacts();
-    const followups = contacts.filter((c) => c.state === 'active' && c.stage >= 1 && c.stage < 3).sort((a, b) => a.lastSentAt - b.lastSentAt);
+    const resumed = contacts.filter((c) => c.state === 'active' && c.stage >= 1 && c.stage < 3).sort((a, b) => a.lastSentAt - b.lastSentAt);
     const fresh = contacts.filter((c) => c.state === 'queued' && c.stage === 0);
-    let quiet = false;
+    let quietSeen = false;
     let capped = false;
-    let gap = false;
-    for (const c of [...followups, ...fresh]) {
-      if (c.stage > 0 && now - c.lastSentAt < cfg.intervalMin * MIN) {
-        gap = true;
-        continue;
-      }
+    for (const c of [...resumed, ...fresh]) {
       if (this.store.isOptedOut(c.phone)) continue;
-      if (inQuietHours(hourIn(now, this.zoneOf(c.phone)), cfg.quietStart, cfg.quietEnd)) {
-        quiet = true;
+      if (quiet(c)) {
+        quietSeen = true;
         continue;
       }
-      if (!this.store.messagedOn(c.phone, day, cfg.test) && used >= cfg.dailyCap) {
+      if (!allowed(c)) {
         capped = true;
         continue;
       }
       return { contact: c, stage: c.stage + 1, day };
     }
-    if (!followups.length && !fresh.length) return { reason: 'done' };
-    return { reason: capped ? 'daily_cap' : quiet ? 'quiet_hours' : gap ? 'stage_gap' : 'nothing_due' };
+    if (!resumed.length && !fresh.length) return { reason: 'done' };
+    return { reason: capped ? 'daily_cap' : quietSeen ? 'quiet_hours' : 'nothing_due' };
   }
 
   async tick() {
@@ -306,7 +338,16 @@ class Outreach extends EventEmitter {
       if (st.status !== 'running') return this.setWaiting(null);
       const test = st.config.test;
       const now = this.clock();
-      if (st.nextDueAt && now < st.nextDueAt) return this.setWaiting('interval');
+      if (st.current && !this.current(st)) {
+        // The contact in progress left the sequence early (reply, opt-out,
+        // exclusion): the next contact waits the full gap after their last
+        // message.
+        const ended = this.store.contact(st.current);
+        st.current = null;
+        st.nextDueAt = Math.max(st.nextDueAt || 0, (ended?.lastSentAt || now) + this.contactGap(st.config));
+        this.save(st);
+      }
+      if (st.nextDueAt && now < st.nextDueAt) return this.setWaiting(st.current ? 'next_message' : 'interval');
       if (!test && !this.transport.ready()) return this.setWaiting('whatsapp');
       // Asked only when a message is due (it is a licence-server request).
       if (!test && !(await this.canSend())) return this.setWaiting('subscription');
@@ -327,6 +368,19 @@ class Outreach extends EventEmitter {
     }
   }
 
+  // After a contact's message: their next one in about a minute, or (after
+  // the third) the next contact in 45-60 minutes.
+  scheduleAfter(st, phone, stage, at) {
+    if (stage < 3) {
+      st.current = phone;
+      st.nextDueAt = at + this.stageGap();
+    } else {
+      st.current = null;
+      st.nextDueAt = at + this.contactGap(st.config);
+    }
+    this.waiting = stage < 3 ? 'next_message' : 'interval'; // shown at once, not at the next tick
+  }
+
   async sendOne({ contact, stage, day }, st) {
     const cfg = st.config;
     const now = this.clock();
@@ -338,12 +392,17 @@ class Outreach extends EventEmitter {
     }
     const id = this.store.reserve({ phone: contact.phone, stage, test: cfg.test, day, now });
     if (id === null) {
-      // Already attempted in an earlier run: bring the contact up to date.
+      // Already attempted in an earlier run: bring the contact up to date,
+      // never send it again.
       this.store.setContact(contact.phone, { stage, state: stage >= 3 ? 'done' : 'active', lastSentAt: contact.lastSentAt ?? now }, now);
+      this.scheduleAfter(st, contact.phone, stage, contact.lastSentAt ?? now);
+      this.save(st);
       return;
     }
-    // The slot is used whatever happens next.
-    st.nextDueAt = now + Math.round((cfg.intervalMin + this.random() * (cfg.intervalMax - cfg.intervalMin)) * MIN);
+    // Until this send succeeds, assume the worst: a full gap before anyone
+    // else (this is what a crash during the send leaves behind).
+    st.current = null;
+    st.nextDueAt = now + this.contactGap(cfg);
     this.save(st);
     const text = render(cfg.templates[stage - 1], this.values(contact));
     try {
@@ -352,6 +411,7 @@ class Outreach extends EventEmitter {
       this.store.markSent(id, res.id, at);
       this.store.setContact(contact.phone, { stage, state: stage >= 3 ? 'done' : 'active', lastSentAt: at, note: null }, at);
       st.failures = 0;
+      this.scheduleAfter(st, contact.phone, stage, at);
       this.save(st);
       this.emit('sent', { phone: contact.phone, stage, text, waId: res.id, test: cfg.test, at });
     } catch (err) {
@@ -360,6 +420,7 @@ class Outreach extends EventEmitter {
         // Checked before anything was handed to WhatsApp: nothing was sent.
         this.store.release(id);
         st.nextDueAt = now;
+        if (stage > 1) st.current = contact.phone; // still this contact's turn
         this.save(st);
         return this.setWaiting('whatsapp');
       }
@@ -404,6 +465,7 @@ class Outreach extends EventEmitter {
       pauseReason: st.pauseReason,
       waiting: st.status === 'running' ? this.waiting : null,
       nextDueAt: st.nextDueAt,
+      current: st.current || null,
       acknowledged: Boolean(st.acknowledgedAt),
       config: st.config,
       limits: LIMITS,
@@ -414,4 +476,4 @@ class Outreach extends EventEmitter {
   }
 }
 
-module.exports = { Outreach, DEFAULT_CONFIG, LIMITS, timeZoneOf, inQuietHours, hourIn, dayOf, isRestriction };
+module.exports = { Outreach, DEFAULT_CONFIG, LIMITS, STAGE_GAP, timeZoneOf, inQuietHours, hourIn, dayOf, isRestriction };
