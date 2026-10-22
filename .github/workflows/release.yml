@@ -54,9 +54,22 @@ jobs:
       - name: Build installers
         run: npm run release -- ${{ matrix.args }}
 
-      # Start each installed app once with no Node or dev tools around: it must
-      # render its UI and load its bundled modules (see smokeTest in main.js).
-      - name: Smoke test (Linux AppImage and .deb)
+      # Each installed app is started twice, with no Node or dev tools around
+      # it (see smokeTest in main.js):
+      #   shipped: as installed; it must use the licence address in
+      #     src/main/license-config.json (what that answers is printed);
+      #   server: pointed at the real licence server code served under
+      #     /lead-getter like production (throwaway key, scripts/
+      #     ci-licence-server.js); plans and a signed status must work.
+      - name: Start a licence server for the checks
+        shell: bash
+        run: |
+          node scripts/ci-licence-server.js "$RUNNER_TEMP/lic" 8799 > "$RUNNER_TEMP/lic.log" 2>&1 &
+          for i in $(seq 30); do [ -f "$RUNNER_TEMP/lic/pubkey.txt" ] && break; sleep 1; done
+          cat "$RUNNER_TEMP/lic.log"
+          echo "LIC_PUBKEY=$(cat "$RUNNER_TEMP/lic/pubkey.txt")" >> "$GITHUB_ENV"
+
+      - name: Installed app checks (Linux .deb and AppImage)
         if: runner.os == 'Linux'
         shell: bash
         run: |
@@ -64,12 +77,18 @@ jobs:
           sudo apt-get install -y -qq ./release/lead-finder_*_amd64.deb
           for bin in "/opt/Lead Finder/lead-finder" "$(ls release/*.AppImage)"; do
             extra=""; case "$bin" in *.AppImage) extra="--appimage-extract-and-run";; esac
-            LEAD_FINDER_USER_DATA="$RUNNER_TEMP/ud-$RANDOM" LEAD_FINDER_SMOKE_TEST="$RUNNER_TEMP/smoke.json" \
+            echo "::group::$bin (as shipped)"
+            LEAD_FINDER_USER_DATA="$RUNNER_TEMP/ud-$RANDOM" LEAD_FINDER_SMOKE_TEST="$RUNNER_TEMP/s1.json" xvfb-run -a "$bin" $extra --no-sandbox || true
+            node scripts/ci-check-smoke.js "$RUNNER_TEMP/s1.json" shipped
+            echo "::endgroup::"; echo "::group::$bin (licence server)"
+            LEAD_FINDER_USER_DATA="$RUNNER_TEMP/ud-$RANDOM" LEAD_FINDER_SMOKE_TEST="$RUNNER_TEMP/s2.json" \
+              LEAD_FINDER_LICENSE_URL=http://127.0.0.1:8799/lead-getter LEAD_FINDER_LICENSE_PUBKEY="$LIC_PUBKEY" LEAD_FINDER_SMOKE_REQUIRE_LICENCE=1 \
               xvfb-run -a "$bin" $extra --no-sandbox || true
-            cat "$RUNNER_TEMP/smoke.json"; grep -q '"ok": true' "$RUNNER_TEMP/smoke.json"; rm "$RUNNER_TEMP/smoke.json"
+            node scripts/ci-check-smoke.js "$RUNNER_TEMP/s2.json" server
+            echo "::endgroup::"; rm -f "$RUNNER_TEMP"/s?.json
           done
 
-      - name: Smoke test (Windows installer)
+      - name: Installed app checks (Windows installer)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -77,22 +96,34 @@ jobs:
           Start-Process $setup.FullName -ArgumentList '/S' -Wait
           $exe = Get-ChildItem "$env:LOCALAPPDATA\Programs" -Recurse -Filter 'Lead Finder.exe' | Select-Object -First 1
           if (-not $exe) { throw 'Installed app not found' }
-          $env:LEAD_FINDER_USER_DATA = "$env:RUNNER_TEMP\ud"
-          $env:LEAD_FINDER_SMOKE_TEST = "$env:RUNNER_TEMP\smoke.json"
+          "Installed: $($exe.FullName)"
+          $env:LEAD_FINDER_USER_DATA = "$env:RUNNER_TEMP\ud1"
+          $env:LEAD_FINDER_SMOKE_TEST = "$env:RUNNER_TEMP\s1.json"
           Start-Process $exe.FullName -Wait
-          Get-Content $env:LEAD_FINDER_SMOKE_TEST
-          if (-not (Select-String -Path $env:LEAD_FINDER_SMOKE_TEST -Pattern '"ok": true' -Quiet)) { throw 'smoke test failed' }
+          node scripts/ci-check-smoke.js "$env:RUNNER_TEMP\s1.json" shipped
+          if ($LASTEXITCODE -ne 0) { throw 'installed app (as shipped) failed' }
+          $env:LEAD_FINDER_USER_DATA = "$env:RUNNER_TEMP\ud2"
+          $env:LEAD_FINDER_SMOKE_TEST = "$env:RUNNER_TEMP\s2.json"
+          $env:LEAD_FINDER_LICENSE_URL = 'http://127.0.0.1:8799/lead-getter'
+          $env:LEAD_FINDER_LICENSE_PUBKEY = $env:LIC_PUBKEY
+          $env:LEAD_FINDER_SMOKE_REQUIRE_LICENCE = '1'
+          Start-Process $exe.FullName -Wait
+          node scripts/ci-check-smoke.js "$env:RUNNER_TEMP\s2.json" server
+          if ($LASTEXITCODE -ne 0) { throw 'installed app (licence server) failed' }
 
-      - name: Smoke test (macOS app)
+      - name: Installed app checks (macOS app)
         if: runner.os == 'macOS'
         shell: bash
         run: |
           dmg=$(ls release/*-arm64.dmg)
           hdiutil attach "$dmg" -nobrowse -mountpoint /tmp/lf
-          LEAD_FINDER_USER_DATA="$RUNNER_TEMP/ud" LEAD_FINDER_SMOKE_TEST="$RUNNER_TEMP/smoke.json" \
-            "/tmp/lf/Lead Finder.app/Contents/MacOS/Lead Finder" || true
+          app="/tmp/lf/Lead Finder.app/Contents/MacOS/Lead Finder"
+          LEAD_FINDER_USER_DATA="$RUNNER_TEMP/ud1" LEAD_FINDER_SMOKE_TEST="$RUNNER_TEMP/s1.json" "$app" || true
+          node scripts/ci-check-smoke.js "$RUNNER_TEMP/s1.json" shipped
+          LEAD_FINDER_USER_DATA="$RUNNER_TEMP/ud2" LEAD_FINDER_SMOKE_TEST="$RUNNER_TEMP/s2.json" \
+            LEAD_FINDER_LICENSE_URL=http://127.0.0.1:8799/lead-getter LEAD_FINDER_LICENSE_PUBKEY="$LIC_PUBKEY" LEAD_FINDER_SMOKE_REQUIRE_LICENCE=1 "$app" || true
+          node scripts/ci-check-smoke.js "$RUNNER_TEMP/s2.json" server
           hdiutil detach /tmp/lf
-          cat "$RUNNER_TEMP/smoke.json"; grep -q '"ok": true' "$RUNNER_TEMP/smoke.json"
 
       - uses: actions/upload-artifact@v4
         with:

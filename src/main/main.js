@@ -948,7 +948,7 @@ function smokeTest(reportFile) {
     await fs.writeFile(reportFile, JSON.stringify({ ok, error, ...report }, null, 2)).catch(() => {});
     app.exit(ok ? 0 : 1);
   };
-  setTimeout(() => finish(false, 'timed out'), 60_000).unref();
+  setTimeout(() => finish(false, 'timed out'), 90_000).unref();
   win.webContents.once('did-finish-load', async () => {
     try {
       await new Promise((r) => setTimeout(r, 1500));
@@ -959,7 +959,26 @@ function smokeTest(reportFile) {
         sqlite: store.db != null,
       };
       report.licenseServer = licenseConfig().serverUrl;
-      const ok = report.lockScreen && Object.values(report.modules).every(Boolean);
+      // The licence server this installed app talks to, and what it answers.
+      // With LEAD_FINDER_SMOKE_REQUIRE_LICENCE=1 the plans and a verified
+      // signed status are required (release checks against a test server).
+      let shipped = {};
+      try {
+        shipped = require('./license-config.json');
+      } catch {}
+      const lic = { serverUrl: report.licenseServer, shippedServerUrl: shipped.serverUrl || null, source: process.env.LEAD_FINDER_LICENSE_URL ? 'LEAD_FINDER_LICENSE_URL' : 'license-config.json' };
+      try {
+        lic.plans = (await license.plans()).plans.map((p) => p.id);
+      } catch (err) {
+        lic.plansError = err.message;
+        lic.plansErrorCode = err.code;
+      }
+      const st = await license.status();
+      lic.status = st.reason;
+      lic.statusMessage = st.message;
+      report.licence = lic;
+      const licenceOk = Array.isArray(lic.plans) && lic.plans.length === 3 && !['offline', 'misconfigured', 'invalid', 'unconfigured'].includes(st.reason);
+      const ok = report.lockScreen && Object.values(report.modules).every(Boolean) && (process.env.LEAD_FINDER_SMOKE_REQUIRE_LICENCE !== '1' || licenceOk);
       finish(ok, ok ? undefined : 'checks failed');
     } catch (err) {
       finish(false, err.message);
