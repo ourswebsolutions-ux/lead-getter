@@ -308,6 +308,16 @@ If Chrome, or Lead Finder's tab, closes while a search is running, the search pa
 - **Manage categories:** the pencil button next to the category filter renames or deletes saved categories. Renaming onto an existing name offers to **merge** the two. Deleting a category keeps its leads as *Uncategorized*. Leads are never deleted by category changes.
 - **Reduced motion:** with the system's reduce-motion setting on, animations, confetti and the moving background are switched off.
 
+## Subscription server error (401) in the installed app
+
+`npm run dev` runs the licence server on your computer and points the app at it. Installed apps use the production address in `src/main/license-config.json`: `https://subscription.axorawebsolutions.com/lead-getter`.
+
+If the licence server isn't deployed there, the subscription website answers instead with its admin login (HTTP 401). The app then says the licence server isn't installed at that address.
+
+- **What was asked and answered:** each install records it in `licence.log` in its data folder, for example `~/.config/Lead Finder/licence.log` on Linux.
+- **Check the server:** `npm run check:licence`.
+- **Deploy it:** [server/README.md → Deployment](server/README.md#deployment).
+
 ## CAPTCHAs, limits, and errors
 
 - If Google shows a CAPTCHA, an "unusual traffic" page, or a consent page, the search **pauses** and keeps its place. Lead Finder never solves or gets around it. Each recovery step is used **at most once per search**, so a persistent block never becomes a cycle of new tabs or restarts:

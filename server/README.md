@@ -44,40 +44,46 @@ An expired Approve/Cancel link of a still-pending application emails you fresh l
 
 ## Deployment
 
-**Production address:** `https://subscription.axorawebsolutions.com/lead-getter`. That's the `serverUrl` in `src/main/license-config.json`, which the installers use. This server runs on the same subdomain as the subscription website, under the path `/lead-getter`. The website itself has no routes the app could use: all of its routes need its admin credentials.
+**Production address:** `https://subscription.axorawebsolutions.com/lead-getter`. That's the `serverUrl` in `src/main/license-config.json`, which every installed app uses.
 
-For development, `npm run dev` runs this server on `127.0.0.1:8787` and points the app at it, whatever `license-config.json` says.
+This server runs on the same machine as the subscription website, as its own PM2 service. nginx sends `/lead-getter/` to it, and everything else stays with the website, whose code doesn't change. Until this is set up, the website answers `/lead-getter/...` itself with its admin login (HTTP 401, `WWW-Authenticate: Basic realm="Axora Subscriptions"`). Installed apps then report that the licence server isn't installed at that address.
 
-### cPanel ("Setup Node.js App", next to the subscription website)
+`npm run dev` doesn't need any of this: it starts this server on your computer (`http://127.0.0.1:8787`) and points the app at it. To run the dev app against the production address instead, use `npm run dev -- --production-licence`.
 
-1. Upload the `server/` folder, for example to `~/lead-getter-licence`, and run `npm install --omit=dev` in it (cPanel's **Run NPM Install** button).
-2. **Create Application:**
-   - Node.js **22.13 or newer**. The server uses the built-in `node:sqlite`.
-   - Application root: the folder from step 1.
-   - Application URL: `subscription.axorawebsolutions.com/lead-getter`.
-   - Startup file: `src/index.js`.
-3. Environment variables: copy them from your local `server/.env`, keeping `LICENSE_PRIVATE_KEY` unchanged, because the app's public key matches it. Then set:
-   - `PUBLIC_BASE_URL=https://subscription.axorawebsolutions.com/lead-getter`
-   - `HOST=127.0.0.1`
-   - `DATA_DIR`: an absolute path outside `public_html`, for example `/home/<user>/lead-getter-data`
-   - `SUBSCRIPTION_API_TOKEN`: the website's `ADMIN_API_TOKEN`
-4. Start the app and open `https://subscription.axorawebsolutions.com/lead-getter/health`, which should show `{"ok":true}`.
+### On the website's server (PM2 + nginx)
 
-The server works whether or not the host strips the `/lead-getter` prefix before passing requests on.
+Requires Node.js **22.13 or newer** (the server uses the built-in `node:sqlite`) and PM2.
 
-### VPS (nginx)
+1. Install, as the user that runs the website:
 
-Run `node src/index.js` under systemd, with the environment above and `PORT=8787`. Add this to the subscription site's `server` block, before `location /`:
+   ```bash
+   curl -fsSLo install.sh https://raw.githubusercontent.com/ourswebsolutions-ux/lead-getter/main/server/deploy/install.sh
+   bash install.sh            # clones to /opt/lead-getter (APP_DIR=... to change)
+   ```
 
-```nginx
-location /lead-getter/ {
-    proxy_pass http://127.0.0.1:8787/;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-}
-```
+   The first run creates `/opt/lead-getter/server/.env` and stops. Fill it in by copying the values from `server/.env` on your computer, keeping the same `LICENSE_PRIVATE_KEY` (installed apps trust its public key). Then set:
 
-In both cases, back up `DATA_DIR` along with the environment variables. The subscription records themselves live in the website's database.
+   ```
+   PUBLIC_BASE_URL=https://subscription.axorawebsolutions.com/lead-getter
+   HOST=127.0.0.1
+   PORT=8787
+   DATA_DIR=/var/lib/lead-getter
+   SUBSCRIPTION_API_URL=http://127.0.0.1:3060/api/v1
+   ```
+
+   Then run `bash install.sh` again. It starts the `lead-getter-licence` PM2 service and checks `/lead-getter/health`.
+2. Add [deploy/nginx-lead-getter.conf](deploy/nginx-lead-getter.conf) inside the website's `server { … }` block, **above** `location / { … }`, then run `sudo nginx -t && sudo systemctl reload nginx`. The snippet raises the request size to 8 MB, because payment screenshots are larger than nginx's 1 MB default.
+3. Check from any computer with the repository: `npm run check:licence`. It must show ✔ for health, plans and the signed status. The release workflow runs the same check and won't publish while it fails.
+
+**Updates:** `bash /opt/lead-getter/server/deploy/install.sh`.
+
+**Logs:** `pm2 logs lead-getter-licence`.
+
+**Back up** `server/.env` and `DATA_DIR`.
+
+### Other hosts
+
+Any host works the same way: run `node --env-file=.env src/index.js` (Node 22.13+) and proxy HTTPS requests for `PUBLIC_BASE_URL` to `HOST:PORT`. The server accepts requests with or without the `/lead-getter` prefix. If the address changes, set it with `npm run setup -- --public-url https://…` (or edit `src/main/license-config.json`) and rebuild the installers.
 
 ## How approval works
 

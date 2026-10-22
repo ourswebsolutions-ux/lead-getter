@@ -555,7 +555,7 @@ export default function App({ onLock }) {
           onClick={() => setPlansOpen({ notice: null })}
         >
           <Icon name="crown" size={14} />
-          <span>{!sub ? 'Plan…' : sub.reason === 'active' ? (sub.subscription?.expiresAt ? `${sub.subscription.daysLeft} days left` : 'Lifetime') : { trial: `Free: ${sub.trial?.remaining} search${sub.trial?.remaining === 1 ? '' : 'es'} left`, trial_used: 'Get a plan', pending: 'Pending approval', expired: 'Expired', cancelled: 'Apply again', none: 'Get a plan', offline: 'Plans', unconfigured: 'Plans', invalid: 'Plan: error', suspended: 'Suspended', inactive: 'Not activated', unavailable: 'Plan: checking', email_in_use: 'Email in use' }[sub.reason]}</span>
+          <span>{!sub ? 'Plan…' : sub.reason === 'active' ? (sub.subscription?.expiresAt ? `${sub.subscription.daysLeft} days left` : 'Lifetime') : { trial: `Free: ${sub.trial?.remaining} search${sub.trial?.remaining === 1 ? '' : 'es'} left`, trial_used: 'Get a plan', pending: 'Pending approval', expired: 'Expired', cancelled: 'Apply again', none: 'Get a plan', offline: 'Plans', unconfigured: 'Plans', misconfigured: 'Plan: server error', invalid: 'Plan: error', suspended: 'Suspended', inactive: 'Not activated', unavailable: 'Plan: checking', email_in_use: 'Email in use' }[sub.reason]}</span>
         </button>
         <WhatsAppPanel wa={wa} />
         <ThemeToggle />

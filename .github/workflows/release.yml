@@ -49,7 +49,7 @@ jobs:
 
       - name: Unit tests (no network)
         shell: bash
-        run: node --test test/chats.test.js test/outreach.test.js test/campaigns.test.js test/updater.test.js test/axora.test.js test/subscription.test.js test/applock.test.js test/categories.test.js test/csv.test.js test/db.test.js test/phone.test.js test/session.test.js test/website.test.js test/whatsapp.test.js test/chrome.test.js test/maps-dom.test.js
+        run: node --test test/license-errors.test.js test/chats.test.js test/outreach.test.js test/campaigns.test.js test/updater.test.js test/axora.test.js test/subscription.test.js test/applock.test.js test/categories.test.js test/csv.test.js test/db.test.js test/phone.test.js test/session.test.js test/website.test.js test/whatsapp.test.js test/chrome.test.js test/maps-dom.test.js
 
       - name: Build installers
         run: npm run release -- ${{ matrix.args }}
@@ -115,6 +115,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Installers talk to the licence server in src/main/license-config.json.
+      # Publishing while it isn't answering there would ship apps that can't
+      # check subscriptions (it must answer as the licence server and sign
+      # with the key the app trusts).
+      - name: Check the production licence server
+        run: node scripts/check-licence-server.js
       - uses: actions/download-artifact@v4
         with:
           path: dist-installers

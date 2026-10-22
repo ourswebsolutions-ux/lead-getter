@@ -44,6 +44,7 @@ const REASON_TEXT = {
   cancelled: 'Your last subscription application was cancelled. You can apply again.',
   expired: 'Your subscription has expired. Renew it to continue finding leads.',
   offline: 'Your subscription could not be verified. Check the internet connection and try again.',
+  misconfigured: 'The subscription server address in this copy of Lead Finder does not answer as the licence server, so subscriptions can’t be checked.',
   unconfigured: 'Subscriptions are not configured in this copy of Lead Finder.',
   invalid: 'The subscription server gave an invalid answer, so access could not be confirmed.',
   suspended: 'Your subscription has been suspended, so paid lead searches are blocked. Contact Axora Web Solutions to have it restored.',
@@ -55,7 +56,9 @@ const REASON_TEXT = {
 class LicenseClient {
   // store: LeadStore (app_state), cipher: { encrypt, decrypt } or null,
   // config: { serverUrl, publicKey (SPKI DER base64) }
-  constructor({ store, cipher, config, fetchImpl = globalThis.fetch, timeoutMs = 15_000, clock = () => Date.now(), machineId = readMachineId }) {
+  // log(entry): diagnostics for failed requests (address, status, a short
+  // piece of the answer); never keys, signatures or tokens.
+  constructor({ store, cipher, config, fetchImpl = globalThis.fetch, timeoutMs = 15_000, clock = () => Date.now(), machineId = readMachineId, log = () => {} }) {
     const raw = typeof machineId === 'function' ? machineId() : machineId;
     this.machine = raw ? crypto.createHash('sha256').update(`lead-finder:${raw}`).digest('hex') : '';
     this.clock = clock;
@@ -64,6 +67,7 @@ class LicenseClient {
     this.config = config || {};
     this.fetch = fetchImpl;
     this.timeoutMs = timeoutMs;
+    this.log = log;
     this.last = null;
     try {
       this.serverKey = this.config.publicKey ? crypto.createPublicKey({ key: Buffer.from(this.config.publicKey, 'base64'), format: 'der', type: 'spki' }) : null;
@@ -118,14 +122,46 @@ class LicenseClient {
     try {
       res = await this.fetch(this.url(pathQuery), { method, headers, body: body ? payload : undefined, signal: AbortSignal.timeout(timeoutMs) });
     } catch (err) {
-      throw new LicenseError('offline', err?.name === 'TimeoutError' ? 'The subscription server did not answer in time. Please try again.' : this.unreachableText());
+      throw this.networkError(err, method, pathQuery);
     }
+    const out = await this.answer(res, method, pathQuery);
+    if (out instanceof LicenseError) throw out;
+    return out;
+  }
+
+  // A request that got no HTTP answer at all.
+  networkError(err, method, pathQuery) {
+    this.log({ event: 'network-error', method, url: this.url(pathQuery.split('?')[0]), error: String(err?.cause?.code || err?.name || err?.message || err).slice(0, 120) });
+    return new LicenseError('offline', err?.name === 'TimeoutError' ? 'The subscription server did not answer in time. Please try again.' : this.unreachableText());
+  }
+
+  // Reads an HTTP answer. Failures are told apart instead of all being
+  // called "could not be reached":
+  //   - an answer that isn't the licence server's (e.g. a login prompt from
+  //     another website at that address) -> 'misconfigured';
+  //   - the licence server's own refusal -> its message;
+  //   - 5xx -> 'server'.
+  async answer(res, method, pathQuery) {
+    const text = await res.text().catch(() => '');
     let data = null;
     try {
-      data = await res.json();
+      data = text ? JSON.parse(text) : null;
     } catch {}
-    if (!res.ok) throw new LicenseError('server', data?.error || `Subscription server error (${res.status}).`, res.status);
-    return data;
+    if (res.ok && data) return data;
+    const type = res.headers?.get?.('content-type') || '';
+    const challenge = res.headers?.get?.('www-authenticate') || '';
+    this.log({ event: 'http-error', method, url: this.url(pathQuery.split('?')[0]), status: res.status, contentType: type.slice(0, 60), wwwAuthenticate: challenge.slice(0, 80), body: text.replace(/\s+/g, ' ').slice(0, 300) });
+    // The licence server always answers JSON { error: '...' } (or the data).
+    const fromLicenceServer = data && typeof data === 'object' && (typeof data.error === 'string' || res.ok);
+    if (!fromLicenceServer) {
+      const why = challenge ? 'asked for a website login' : !text ? 'sent an empty answer' : 'sent something that is not the licence server’s answer';
+      return new LicenseError('misconfigured', `The subscription server address (${this.config.serverUrl}) answered HTTP ${res.status} and ${why}: the Lead Finder licence server is not installed there. Subscriptions can’t be checked until it is (see server/README.md, “Deployment”).`, res.status);
+    }
+    // The server's own message when it has one ("Server error" is its
+    // generic answer to unexpected failures).
+    if (data.error && data.error !== 'Server error') return new LicenseError('server', data.error, res.status);
+    if (res.status >= 500) return new LicenseError('server', `The subscription server had a problem (HTTP ${res.status}). Please try again later.`, res.status);
+    return new LicenseError('server', `The subscription server refused the request (HTTP ${res.status}).`, res.status);
   }
 
   // A local server address means the server simply isn't running; anything
@@ -145,13 +181,16 @@ class LicenseClient {
 
   async plans() {
     if (!this.configured) throw new LicenseError('unconfigured', REASON_TEXT.unconfigured);
+    let res;
     try {
-      const res = await this.fetch(this.url('/api/plans'), { signal: AbortSignal.timeout(this.timeoutMs) });
-      if (!res.ok) throw new Error(String(res.status));
-      return await res.json();
-    } catch {
-      throw new LicenseError('offline', this.unreachableText());
+      res = await this.fetch(this.url('/api/plans'), { signal: AbortSignal.timeout(this.timeoutMs) });
+    } catch (err) {
+      throw this.networkError(err, 'GET', '/api/plans');
     }
+    const out = await this.answer(res, 'GET', '/api/plans');
+    if (out instanceof LicenseError) throw out;
+    if (!Array.isArray(out?.plans)) throw new LicenseError('misconfigured', `The subscription server address (${this.config.serverUrl}) did not return the plan list: the Lead Finder licence server is not installed there.`);
+    return out;
   }
 
   // Current status, freshly signed by the server. Never cached as authority.
@@ -164,7 +203,8 @@ class LicenseClient {
     try {
       ({ token } = await this.request('GET', `/api/license?nonce=${nonce}`));
     } catch (err) {
-      return (this.last = { ...out, reason: err.code === 'unconfigured' ? 'unconfigured' : 'offline', message: err.message || REASON_TEXT.offline });
+      const reason = err.code === 'unconfigured' || err.code === 'misconfigured' ? err.code : 'offline';
+      return (this.last = { ...out, reason, message: err.message || REASON_TEXT[reason] });
     }
     const p = verifyToken(token, this.serverKey);
     if (!p || p.deviceId !== out.deviceId || p.nonce !== nonce) return (this.last = { ...out, reason: 'invalid', message: REASON_TEXT.invalid });

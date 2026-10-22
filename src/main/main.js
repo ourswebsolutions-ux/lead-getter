@@ -323,7 +323,7 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
         // A started free-trial search runs to the end; a subscription that
         // expires or is suspended mid-search stops it (an unanswered check
         // does not).
-        if (st && !access.trial && !st.allowed && st.reason !== 'offline' && st.reason !== 'unavailable') {
+        if (st && !access.trial && !st.allowed && !['offline', 'unavailable', 'misconfigured'].includes(st.reason)) {
           sendStatus({ state: 'stopping', message: st.message });
           controller.abort();
         }
@@ -811,7 +811,15 @@ app.whenReady().then(() => {
   try {
     store = new LeadStore(path.join(app.getPath('userData'), 'leads.db'));
     appLock = new AppLock({ store, cipher: keychainCipher() });
-    license = new LicenseClient({ store, cipher: keychainCipher(), config: licenseConfig() });
+    // Failed licence-server requests are recorded in licence.log (address,
+    // status, a short piece of the answer; never keys or signatures).
+    const licenceLog = fileLog(path.join(app.getPath('userData'), 'licence.log'));
+    const licCfg = licenseConfig();
+    // Which licence server this run uses, and why (the dev launcher sets
+    // LEAD_FINDER_LICENSE_URL to the local server; installers use
+    // license-config.json). An address only, nothing secret.
+    licenceLog({ event: 'config', serverUrl: licCfg.serverUrl, source: process.env.LEAD_FINDER_LICENSE_URL ? 'LEAD_FINDER_LICENSE_URL' : 'license-config.json', packaged: app.isPackaged, version: app.getVersion() });
+    license = new LicenseClient({ store, cipher: keychainCipher(), config: licCfg, log: licenceLog });
     const last = store.getState('lastSearch');
     if (last && ['running', 'connecting', 'paused', 'stopping'].includes(last.state)) interrupted = last;
   } catch (err) {

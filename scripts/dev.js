@@ -9,6 +9,8 @@
 // everything cleanly.
 //
 // `npm start` (--prod): Electron with the built UI (licence server as above).
+// `npm run dev -- --production-licence`: no local licence server; the app
+// talks to the production address, like an installed copy.
 
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
@@ -173,10 +175,17 @@ process.on('SIGTERM', () => shutdown(0));
 
 (async () => {
   takeLock();
-  const licenseUrl = await startLicenseServer().catch((err) => {
-    log('server', `${err.message}. Continuing without it.`);
-    return null;
-  });
+  // --production-licence: no local licence server; the app uses the address
+  // installers use (src/main/license-config.json), exactly like an installed
+  // copy. Useful to reproduce what customers see.
+  const productionLicence = process.argv.includes('--production-licence');
+  if (productionLicence) log('server', `using the production licence server from src/main/license-config.json (${require('../src/main/license-config.json').serverUrl})`);
+  const licenseUrl = productionLicence
+    ? null
+    : await startLicenseServer().catch((err) => {
+        log('server', `${err.message}. Continuing without it.`);
+        return null;
+      });
   const appEnv = licenseUrl ? { LEAD_FINDER_LICENSE_URL: licenseUrl } : {};
 
   let vite = null;
