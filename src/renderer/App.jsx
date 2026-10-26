@@ -305,6 +305,33 @@ function websiteChip(l) {
   return <span className="chip chip-accent">No website</span>;
 }
 
+// Progress of each lead source while they search side by side.
+const WORKER_TEXT = { running: 'Running', paused: 'Paused', completed: 'Completed', failed: 'Failed', stopped: 'Stopped' };
+
+function WorkerRows({ workers }) {
+  return (
+    <ul className="workers" aria-label="Search progress by source">
+      {[
+        ['maps', 'Google Maps'],
+        ['facebook', 'Facebook'],
+      ].map(([key, label]) => {
+        const w = workers[key];
+        if (!w) return null;
+        return (
+          <li key={key} className={`worker w-${w.state}`} aria-label={`${label}: ${WORKER_TEXT[w.state] || w.state}`}>
+            <span className="worker-name">{label}</span>
+            <span className="worker-state">{WORKER_TEXT[w.state] || w.state}</span>
+            <span className="worker-msg">{w.message}</span>
+            <span className="worker-count">
+              {w.leads ?? 0} lead{w.leads === 1 ? '' : 's'} · {w.processed ?? 0} checked
+            </span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
 // --- App -------------------------------------------------------------------------
 
 const WEBSITE_LABELS = { without: 'Without website', with: 'With website', all: 'All businesses' };
@@ -710,7 +737,7 @@ export default function App({ onLock }) {
             <span className="source-label">Facebook Lead Search</span>
             <span className="muted">
               {facebookOn
-                ? 'On: after Google Maps, public Facebook posts are searched with the same keyword and category (uses your Facebook login in Chrome).'
+                ? 'On: public Facebook posts are searched at the same time as Google Maps, with the same keyword and category (in a separate Chrome window, using your Facebook login).'
                 : 'Off: Google Maps only.'}
             </span>
           </div>
@@ -723,10 +750,6 @@ export default function App({ onLock }) {
               <span className="dot" />
               {status.state === 'error' && <span className="phase">{status.phase === 'connection' ? 'Chrome connection' : 'Search'}</span>}
               {status.state === 'paused' && <span className="phase phase-warn">Paused</span>}
-              {ACTIVE.has(status.state) && status.sources?.includes('facebook') && (
-                <span className="phase">{status.source === 'facebook' ? 'Facebook' : 'Google Maps'}</span>
-              )}
-              {!ACTIVE.has(status.state) && ['unavailable', 'error'].includes(status.facebook?.state) && <span className="phase phase-warn">Facebook</span>}
               <span className="msg">{status.message}</span>
             </div>
             <dl className="stats">
@@ -750,13 +773,8 @@ export default function App({ onLock }) {
                 <dt>Qualified</dt>
                 <dd className="num">{status.leads ?? 0}</dd>
               </div>
-              {status.facebook && (
-                <div>
-                  <dt>From Facebook</dt>
-                  <dd className="num">{status.facebook.leads ?? 0}</dd>
-                </div>
-              )}
             </dl>
+            {status.workers && <WorkerRows workers={status.workers} />}
           </div>
         </section>
 

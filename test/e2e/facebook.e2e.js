@@ -59,7 +59,7 @@ test('Facebook Lead Search switch and Facebook leads in the Leads table', async 
   assert.equal(await sw.getAttribute('aria-checked'), 'false');
   await win.getByText('Off: Google Maps only.').waitFor();
   await sw.click();
-  await win.getByText(/On: after Google Maps, public Facebook posts are searched/).waitFor();
+  await win.getByText(/On: public Facebook posts are searched at the same time as Google Maps/).waitFor();
   assert.equal(await sw.getAttribute('aria-checked'), 'true');
   await app.close();
   const stored = new DatabaseSync(dbFile, { readOnly: true });

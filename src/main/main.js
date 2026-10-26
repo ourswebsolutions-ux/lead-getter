@@ -58,7 +58,7 @@ const chrome = new ChromeConnection({
     return response === 0;
   },
 });
-const tabs = { main: null, check: null, detail: null };
+const tabs = { main: null, check: null, detail: null, facebook: null };
 let lastStatus = { state: 'idle', message: 'Ready' };
 let interrupted = null; // last search, if the app ended while it was running
 
@@ -237,12 +237,28 @@ function validateFilter(raw) {
 
 // --- Chrome tabs -----------------------------------------------------------
 
+// Google Maps works in the tabs of one window (main, check, detail);
+// Facebook has a window of its own. Each search worker only ever uses its
+// own pages, so neither navigates, hides or slows down the other's page.
+const MAPS_TABS = ['main', 'check', 'detail'];
+const FACEBOOK_TABS = ['facebook'];
+
 async function tab(name) {
   const t = tabs[name];
   if (t && !t.isClosed()) return t;
   if (!chrome.connected) throw new Error('Target page, context or browser has been closed');
-  tabs[name] = await chrome.context.newPage();
+  tabs[name] = name === 'facebook' ? await chrome.newWindowPage() : await newMapsTab();
   return tabs[name];
+}
+
+// A new tab in the Google Maps window, next to an open Maps tab. With none
+// left, a plain tab, or a window of its own while Facebook's window is open
+// (a plain tab could land there).
+async function newMapsTab() {
+  const beside = MAPS_TABS.map((k) => tabs[k]).find((p) => p && !p.isClosed());
+  if (beside) return chrome.newTabBeside(beside);
+  if (tabs.facebook && !tabs.facebook.isClosed()) return chrome.newWindowPage();
+  return chrome.context.newPage();
 }
 
 // A tab opened during block recovery replaces the role's old tab.
@@ -303,7 +319,7 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
   let expectedProfilePath = null;
   const startedAt = new Date().toISOString();
   let stats = null;
-  sendStatus({ state: 'connecting', phase: 'connection', step: 'connecting', keyword, category: category.name, sources: withFacebook ? ['maps', 'facebook'] : ['maps'], source: 'maps', facebook: null, processed: 0, leads: 0, newLeads: 0, skipped: 0, message: 'Connecting to Chrome' });
+  sendStatus({ state: 'connecting', phase: 'connection', step: 'connecting', keyword, category: category.name, sources: withFacebook ? ['maps', 'facebook'] : ['maps'], source: 'maps', facebook: null, workers: null, processed: 0, leads: 0, newLeads: 0, skipped: 0, message: 'Connecting to Chrome' });
 
   search.promise = (async () => {
     try {
@@ -342,35 +358,43 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
         check: () => tab('check'),
         detail: () => tab('detail'),
         facebook: () => tab('facebook'),
-        open: () => chrome.context.newPage(),
+        open: () => newMapsTab(),
         adopt: (name, page) => adoptTab(name, page),
       };
-      const recovery = {
+      // Both workers may lose Chrome at the same moment: one reconnect or
+      // restart runs at a time, and the other worker waits for it.
+      let chromeTask = null;
+      const once = (fn) => (chromeTask ||= fn().finally(() => (chromeTask = null)));
+      const recoveryFor = (own) => ({
         // Chrome or the tab closed during the search: reopen/reconnect the
         // same profile (Chrome may ask the user to Allow), never another one.
         reconnect: async () => {
+          if (chromeTask) await chromeTask.catch(() => {});
           if (chrome.connected) {
-            for (const k of Object.keys(tabs)) tabs[k] = null; // only a tab was closed
+            for (const k of own) tabs[k] = null; // only this worker's tab was closed
             return;
           }
-          const profile = await chrome.connect({ signal: controller.signal });
-          if (expectedProfilePath && profile.path !== expectedProfilePath) {
-            await chrome.disconnect();
-            throw Object.assign(new Error(`Chrome reopened with a different profile ("${profile.name}"); Lead Finder will not switch accounts`), {
-              code: 'wrong_profile',
-            });
-          }
-          resetTabs(profile);
-          sendStatus({ profile: profileLabel(profile) });
+          await once(async () => {
+            const profile = await chrome.connect({ signal: controller.signal });
+            if (expectedProfilePath && profile.path !== expectedProfilePath) {
+              await chrome.disconnect();
+              throw Object.assign(new Error(`Chrome reopened with a different profile ("${profile.name}"); Lead Finder will not switch accounts`), {
+                code: 'wrong_profile',
+              });
+            }
+            resetTabs(profile);
+            sendStatus({ profile: profileLabel(profile) });
+          });
         },
-        canRestart: () => chrome.canRestart(),
-        restart: async () => {
-          const profile = await chrome.restartAndAttach(controller.signal);
-          resetTabs(profile);
-          sendStatus({ profile: profileLabel(profile) });
-          return true;
-        },
-      };
+        canRestart: () => !chromeTask && chrome.canRestart(),
+        restart: () =>
+          once(async () => {
+            const profile = await chrome.restartAndAttach(controller.signal);
+            resetTabs(profile);
+            sendStatus({ profile: profileLabel(profile) });
+            return true;
+          }),
+      });
       stats = await runSources({
         withFacebook,
         signal: controller.signal,
@@ -379,8 +403,8 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
           send('leads:added', payload);
           verifier?.poke(); // check the new number on WhatsApp in the background
         },
-        createMaps: (emit) => new SearchSession({ keyword, categoryId: category.id, websiteFilter, store, signal: controller.signal, pages, recovery, emit }),
-        createFacebook: (emit, mapsStats) =>
+        createMaps: (emit) => new SearchSession({ keyword, categoryId: category.id, websiteFilter, store, signal: controller.signal, pages, recovery: recoveryFor(MAPS_TABS), emit }),
+        createFacebook: (emit) =>
           new FacebookSession({
             keyword,
             categoryId: category.id,
@@ -390,9 +414,8 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
             store,
             signal: controller.signal,
             pages,
-            recovery,
+            recovery: recoveryFor(FACEBOOK_TABS),
             emit,
-            stats: mapsStats,
           }),
       });
       clearInterval(recheck);

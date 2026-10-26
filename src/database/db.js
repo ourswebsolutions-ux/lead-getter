@@ -427,7 +427,9 @@ class LeadStore {
     });
   }
 
+  // Nested calls join the transaction already open.
   transaction(fn) {
+    if (this.db.isTransaction) return fn();
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const out = fn();
@@ -631,8 +633,10 @@ class LeadStore {
 
   // Saves a checked business. Returns { lead, isNewLead } where lead is set
   // when the stored row is a qualified lead.
+  // One transaction: the Google Maps and Facebook workers save side by side,
+  // and the check for the same number and the insert or merge are one step.
   save(result, now = new Date().toISOString()) {
-    return this.withRetry(() => {
+    return this.withRetry(() => this.transaction(() => {
       const existing = this.stmt.get.get(result.placeKey);
       let status = result.websiteStatus;
       let detail = result.websiteDetail || null;
@@ -688,7 +692,7 @@ class LeadStore {
         lead: saved.qualified ? toLead(saved) : null,
         isNewLead: Boolean(saved.qualified) && !(existing && existing.qualified) && !fromFacebook,
       };
-    });
+    }));
   }
 
   // --- Facebook -----------------------------------------------------------------

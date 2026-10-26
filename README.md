@@ -150,9 +150,12 @@ Pacing is deliberately slow: a few seconds between listings and a longer break e
 **Facebook Lead Search** is an ON/OFF switch under the search form. The app stores it, and every search reads it when it starts.
 
 - **OFF** (the default): only Google Maps is searched, exactly as before. Facebook is never opened.
-- **ON:** after the Google Maps search finishes, the same search goes on in a separate Facebook tab of the same Chrome profile. It uses that profile's Facebook login and searches **posts**:
-  - for the keyword (`garment shops in Lahore`);
-  - and for the category with the keyword's place (`Garments Lahore`), when the keyword doesn't already contain the category.
+- **ON:** Google Maps and Facebook search **at the same time**, with the same keyword and category.
+  - **Separate pages:** Google Maps works in its tabs, as before. Facebook works in a separate Chrome window of the same profile, using that profile's Facebook login. Neither worker ever navigates, hides or slows down the other's page. New Maps tabs open from a Maps tab, so they stay in the Maps window, and the Facebook page is kept active while it's behind other windows.
+  - **What Facebook searches:** posts for the keyword (`garment shops in Lahore`), and for the category with the keyword's place (`Garments Lahore`) when the keyword doesn't already contain the category.
+  - **Saving and progress:** both save leads to the same database as they find them, and leads appear in the table right away. The search status shows a row for each source: *Running*, *Paused*, *Completed*, *Failed* or *Stopped*, with its own message and counts.
+  - **Independent:** one source failing doesn't stop the other. The search completes when both are done, and counts as failed only if both failed. **Stop Search** stops both.
+  - **Chrome recovery:** if Chrome or a tab closes, each worker reopens only its own pages, and a reconnect or Chrome restart runs once for both.
 - **Reading posts:**
   - It reads the posts in the results, opening Facebook's own *See more* on long posts, and scrolls until Facebook shows no more results, 150 posts per query, or you press **Stop Search**.
   - It doesn't open individual posts or pages. The pace is a few seconds per scroll.
@@ -172,6 +175,7 @@ Pacing is deliberately slow: a few seconds between listings and a longer break e
   - the date.
   - Its website is shown as *Not checked*: a Facebook lead's website isn't verified, so the Website filter's *With* and *Without* options leave it out.
 - **One lead per number, across both sources:**
+  - Each save checks for the number and inserts or merges in a single database transaction, so the same number found by both sources at the same moment still gives one lead.
   - If the number is already a lead, from Google Maps or Facebook, no second lead is made. The post is recorded as another source of that lead, and only empty fields are filled in.
   - The lead's date, category, campaign history and Seen status stay as they were.
   - A Facebook lead later found on Google Maps becomes that Maps listing, keeping the same lead, date and history.
@@ -408,7 +412,7 @@ src/renderer/   React UI (Vite)
 src/browser/    chrome.js (discovery + CDP attach), maps.js (Maps page ops),
                 website.js (qualification rules), web-check.js, search-session.js,
                 facebook.js + facebook-session.js (Facebook posts),
-                search-sources.js (Maps, then Facebook when it is on)
+                search-sources.js (Maps and Facebook side by side when it is on)
 src/database/   SQLite store (node:sqlite, built into Electron)
 src/export/     CSV generation
 test/           Unit tests, Electron E2E test, real-Chrome integration script

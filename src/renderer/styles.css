@@ -1109,3 +1109,15 @@ html.theme-anim *, html.theme-anim *::before, html.theme-anim *::after {
 .chip.src-maps { background: var(--sunken); }
 button.chip.src-facebook { border: 0; font: inherit; font-size: 12px; cursor: pointer; background: color-mix(in srgb, #1877f2 14%, transparent); color: color-mix(in srgb, #1877f2 80%, var(--text)); }
 button.chip.src-facebook:hover { background: color-mix(in srgb, #1877f2 22%, transparent); }
+
+/* Per-source progress while Google Maps and Facebook search side by side. */
+.workers { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; }
+.worker { display: grid; grid-template-columns: 96px 86px minmax(0, 1fr) auto; align-items: center; gap: 10px; font-size: 12.5px; }
+.worker-name { font-weight: 600; }
+.worker-state { justify-self: start; padding: 1px 8px; border-radius: 999px; background: var(--sunken); color: var(--text-2); font-weight: 500; }
+.w-running .worker-state { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
+.w-completed .worker-state { background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--text); }
+.w-paused .worker-state, .w-failed .worker-state { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--text); }
+.worker-msg { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+.worker-count { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+@media (max-width: 720px) { .worker { grid-template-columns: 1fr auto; } .worker-msg { grid-column: 1 / -1; } }

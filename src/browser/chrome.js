@@ -659,6 +659,62 @@ class ChromeConnection {
     }
   }
 
+  // A page in a new window of the same Chrome session, for work that runs
+  // alongside the search tabs: Chrome shows one tab per window, so a tab
+  // in the search tabs' window would be hidden (and slowed down) whenever
+  // the search switches tabs. The page is also kept active for Chrome while
+  // its window is behind others. Falls back to a new tab if Chrome does not
+  // open the window.
+  async newWindowPage() {
+    const before = new Set(this.context.pages());
+    let page = null;
+    try {
+      const cdp = await this.browser.newBrowserCDPSession();
+      try {
+        const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank', newWindow: true });
+        page = await this.pageForTarget(targetId, before);
+      } finally {
+        await cdp.detach().catch(() => {});
+      }
+    } catch {
+      page = null;
+    }
+    if (!page) page = await this.context.newPage();
+    await keepActive(this.context, page);
+    return page;
+  }
+
+  // A new tab in the same window as `page`. Chrome puts tabs opened over
+  // DevTools into whichever window was used last (which may be the other
+  // worker's window), so the tab is opened from `page` itself, without a
+  // link back to it (noopener). Falls back to a plain new tab.
+  async newTabBeside(page) {
+    if (page && !page.isClosed()) {
+      try {
+        const popup = page.waitForEvent('popup', { timeout: 10_000 });
+        popup.catch(() => {});
+        await page.evaluate(() => {
+          window.open('about:blank', '_blank', 'noopener');
+        });
+        return await popup;
+      } catch {
+        // page busy navigating, or the tab did not open: use a plain tab
+      }
+    }
+    return this.context.newPage();
+  }
+
+  async pageForTarget(targetId, before, timeout = 10_000) {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      for (const p of this.context.pages()) {
+        if (!before.has(p) && (await targetIdOf(this.context, p)) === targetId) return p;
+      }
+      await wait(100);
+    }
+    return null;
+  }
+
   // Detaches Lead Finder from Chrome. For a CDP-attached browser Playwright
   // only disconnects; Chrome and the user's tabs stay open.
   async disconnect() {
@@ -667,6 +723,35 @@ class ChromeConnection {
     this.context = null;
     this.profile = null;
     if (b) await b.close().catch(() => {});
+  }
+}
+
+async function targetIdOf(context, page) {
+  let cdp;
+  try {
+    cdp = await context.newCDPSession(page);
+    return (await cdp.send('Target.getTargetInfo')).targetInfo.targetId;
+  } catch {
+    return null;
+  } finally {
+    await cdp?.detach().catch(() => {});
+  }
+}
+
+// Focus emulation and the "active" lifecycle state keep a page's timers and
+// loading running while another window is in front. They last as long as
+// the DevTools session that set them, so the session stays open (Chrome ends
+// it when the page closes).
+const activeSessions = new WeakMap();
+async function keepActive(context, page) {
+  try {
+    const cdp = await context.newCDPSession(page);
+    await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => {});
+    await cdp.send('Page.enable').catch(() => {});
+    await cdp.send('Page.setWebLifecycleState', { state: 'active' }).catch(() => {});
+    activeSessions.set(page, cdp);
+  } catch {
+    // best effort: the page still works, only more slowly in the background
   }
 }
 

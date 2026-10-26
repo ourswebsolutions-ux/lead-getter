@@ -252,47 +252,71 @@ test('upgrading a version 6 database keeps every lead and adds the Facebook fiel
 // --- the search flow -------------------------------------------------------------------
 
 const FAST = { listing: [0, 0], scroll: [0, 0], longBreak: [0, 0], afterBlock: 0, blockPoll: 5, netRetries: [1, 1], reconnectDelays: [1], fbScroll: [0, 0], fbBetweenQueries: [0, 0] };
-const fakePage = { bringToFront: async () => {}, url: () => '', evaluate: async () => true };
+const tick = () => new Promise((r) => setTimeout(r, 1));
+// Separate pages per worker, as in the app (Maps tabs, Facebook window);
+// every browser call records which page it was made on.
+const fakePage = (name) => ({ name, bringToFront: async () => {}, url: () => '', evaluate: async () => true });
 
-function mockMaps(listings) {
+// `gate(link)` may hold a listing open (to interleave with Facebook).
+function mockMaps(listings, { gate = async () => {}, mode = null } = {}) {
   let opened = null;
+  const calls = { search: 0, pages: new Set(), opened: [] };
+  const on = (page) => calls.pages.add(page.name);
   return {
-    calls: { search: 0 },
+    calls,
     placeKey: maps.placeKey,
     cleanMapsUrl: maps.cleanMapsUrl,
-    detectBlock: async () => null,
-    async search() {
-      this.calls.search++;
-      return { mode: listings.length ? 'list' : 'empty' };
+    detectBlock: async (page) => (on(page), null),
+    async search(page) {
+      on(page);
+      calls.search++;
+      await tick();
+      return mode ? { mode, detail: 'test' } : { mode: listings.length ? 'list' : 'empty' };
     },
-    collectLinks: async () => listings.map((l) => ({ url: l.url, name: l.name })),
-    scrollFeed: async () => ({ end: true }),
-    openListing: async (_p, link) => ((opened = listings.find((l) => l.url === link.url)), true),
+    collectLinks: async (page) => (on(page), listings.map((l) => ({ url: l.url, name: l.name }))),
+    scrollFeed: async (page) => (on(page), { end: true }),
+    openListing: async (page, link) => {
+      on(page);
+      await tick();
+      await gate(link);
+      opened = listings.find((l) => l.url === link.url);
+      calls.opened.push(opened.name);
+      return true;
+    },
     gotoListing: async () => false,
-    returnToResults: async () => true,
-    extractDetails: async () => ({ name: opened.name, website: '', phoneTel: opened.phone, phoneText: '', address: 'Lahore, Pakistan', infoLoaded: true, closed: false, url: opened.url }),
+    returnToResults: async (page) => (on(page), true),
+    extractDetails: async (page) => (on(page), { name: opened.name, website: '', phoneTel: opened.phone, phoneText: '', address: 'Lahore, Pakistan', infoLoaded: true, closed: false, url: opened.url }),
   };
 }
 
 // Facebook results: pages of posts revealed by scrolling; `mode` for the
 // search page (list/login/checkpoint/blocked/empty), or a thrown error.
-function mockFacebook({ pagesOfPosts = [], mode = 'list', fail = null } = {}) {
+function mockFacebook({ pagesOfPosts = [], mode = 'list', fail = null, gate = async () => {} } = {}) {
   let shown = 1;
-  const calls = { openSearch: [], collect: 0 };
+  const calls = { openSearch: [], collect: 0, pages: new Set() };
+  const on = (page) => calls.pages.add(page.name);
   return {
     calls,
     buildQueries: fb.buildQueries,
     extractPhones: fb.extractPhones,
-    async openSearch(_page, query) {
+    async openSearch(page, query) {
+      on(page);
       calls.openSearch.push(query);
+      await tick();
       if (fail) throw fail;
       shown = 1;
       return { mode };
     },
-    detectState: async () => null,
-    expandSeeMore: async () => 0,
-    collectPosts: async () => (calls.collect++, pagesOfPosts.slice(0, shown).flat()),
-    scrollResults: async () => {
+    detectState: async (page) => (on(page), null),
+    expandSeeMore: async (page) => (on(page), 0),
+    collectPosts: async (page) => {
+      on(page);
+      await tick();
+      await gate(calls.collect++);
+      return pagesOfPosts.slice(0, shown).flat();
+    },
+    scrollResults: async (page) => {
+      on(page);
       shown++;
       return { end: shown >= pagesOfPosts.length };
     },
@@ -301,19 +325,21 @@ function mockFacebook({ pagesOfPosts = [], mode = 'list', fail = null } = {}) {
 
 const post = (n, text, extra = {}) => fb.parsePost({ text, author: `Author ${n}`, authorUrl: `https://www.facebook.com/author${n}`, hrefs: [`https://www.facebook.com/author${n}/posts/${n}?__tn__=x`], ...extra });
 
-function search({ withFacebook, listings = [], facebook = mockFacebook(), store = new LeadStore(':memory:'), signal = new AbortController().signal, categoryName = 'Garments', country = 'PK' }) {
+function search({ withFacebook, listings = [], mapsOpts = {}, facebook = mockFacebook(), store = new LeadStore(':memory:'), signal = new AbortController().signal, categoryName = 'Garments', country = 'PK' }) {
   const statuses = [];
   const leads = [];
-  const mapsMock = mockMaps(listings);
+  const mapsMock = mockMaps(listings, mapsOpts);
   const cat = store.ensureCategory(categoryName);
-  const pages = { main: async () => fakePage, check: async () => fakePage, detail: async () => fakePage, facebook: async () => fakePage };
+  const mapsPages = { main: fakePage('maps:main'), check: fakePage('maps:check'), detail: fakePage('maps:detail') };
+  const fbPage = fakePage('facebook');
+  const pages = { main: async () => mapsPages.main, check: async () => mapsPages.check, detail: async () => mapsPages.detail, facebook: async () => fbPage };
   const done = runSources({
     withFacebook,
     signal,
     send: (event, payload) => (event === 'lead' ? leads.push(payload) : statuses.push(payload)),
     createMaps: (emit) => new SearchSession({ keyword: 'garment shops in Lahore', categoryId: cat.id, store, pages, signal, maps: mapsMock, webCheck: async () => ({ status: 'no_website' }), pacing: FAST, emit }),
-    createFacebook: (emit, stats) =>
-      new FacebookSession({ keyword: 'garment shops in Lahore', categoryId: cat.id, categoryName, country: store.commonPhoneCountry() || country, store, pages, signal, facebook, pacing: FAST, emit, stats }),
+    createFacebook: (emit) =>
+      new FacebookSession({ keyword: 'garment shops in Lahore', categoryId: cat.id, categoryName, country: store.commonPhoneCountry() || country, store, pages, signal, facebook, pacing: FAST, emit }),
   });
   return { done, statuses, leads, store, mapsMock, facebook, cat };
 }
@@ -325,95 +351,148 @@ test('Facebook Lead Search OFF: only Google Maps runs, with the same events as b
   const off = search({ withFacebook: false, listings: [listing(1, '+923001111111'), listing(2, '+923002222222')], facebook });
   const stats = await off.done;
   assert.equal(facebook.calls.openSearch.length, 0, 'Facebook is never opened');
-  assert.equal(stats.facebook, undefined);
+  assert.deepEqual(stats, { processed: 2, leads: 2, newLeads: 2, skipped: 0 });
   assert.equal(off.leads.length, 2);
   assert.ok(off.leads.every((l) => l.source === 'maps'));
   const last = off.statuses.at(-1);
   assert.equal(last.state, 'done');
   assert.equal(last.message, 'Search finished: no more results');
-  assert.ok(!off.statuses.some((s) => s.source === 'facebook'));
+  assert.ok(off.statuses.every((s) => !s.workers && s.source !== 'facebook'), 'no per-source progress');
 });
 
-test('Facebook Lead Search ON: Maps, then Facebook posts for the same keyword and category', async () => {
+test('Facebook Lead Search ON: both sources start together and run side by side', async () => {
+  // Maps holds its second listing until Facebook has read its posts, and
+  // Facebook holds its first read until Maps has opened a listing: run one
+  // after the other, this could never finish.
+  let mapsOpened;
+  const mapsStarted = new Promise((r) => (mapsOpened = r));
+  let fbRead;
+  const fbHasRead = new Promise((r) => (fbRead = r));
   const facebook = mockFacebook({
     pagesOfPosts: [
       [post(1, 'Wholesale garments, call 0300 1234567'), post(2, 'Need suppliers, budget 25000')],
-      [post(3, 'Factory rates', { hrefs: ['https://www.facebook.com/author3/posts/3', 'https://wa.me/923217654321'] }), post(4, 'Same shop on Maps: 0300 1111111')],
+      [post(3, 'Factory rates', { hrefs: ['https://www.facebook.com/author3/posts/3', 'https://wa.me/923217654321'] })],
     ],
+    gate: async (n) => {
+      if (n === 0) await mapsStarted;
+      if (n === 1) fbRead();
+    },
   });
-  const on = search({ withFacebook: true, listings: [listing(1, '+923001111111')], facebook });
-  const stats = await on.done;
-  assert.deepEqual(facebook.calls.openSearch, ['garment shops in Lahore', 'Garments Lahore']);
-  // Leads: 1 from Maps, 2 new from Facebook, and the Maps number seen again.
-  const all = on.store.listLeads();
-  assert.equal(all.length, 3, 'no duplicate for the number found in both');
-  const both = all.find((l) => l.phone === '+923001111111');
-  assert.deepEqual(both.sources, ['maps', 'facebook']);
-  const fromPost = all.find((l) => l.phone === '+923001234567');
-  assert.deepEqual([fromPost.source, fromPost.category, fromPost.fbPostUrl, fromPost.name], ['facebook', 'Garments', 'https://www.facebook.com/author1/posts/1', 'Author 1']);
-  assert.ok(all.find((l) => l.phone === '+923217654321'), 'WhatsApp link number saved');
-  assert.ok(!all.some((l) => l.description === 'Need suppliers, budget 25000'), 'no lead without a number');
-  assert.deepEqual(stats.facebook, { posts: 4, leads: 3, newLeads: 2 }, 'the second query sees the same posts and skips them');
-  assert.equal(stats.newLeads, 3);
+  const on = search({
+    withFacebook: true,
+    listings: [listing(1, '+923001111111'), listing(2, '+923002222222')],
+    mapsOpts: { gate: async (link) => (link.name === 'Shop 1' ? mapsOpened() : fbHasRead) },
+    facebook,
+  });
+  const stats = await Promise.race([on.done, new Promise((_, no) => setTimeout(() => no(new Error('the two sources waited for each other')), 5000))]);
 
-  // Progress shows the source, and the final status reports both.
-  assert.ok(on.statuses.some((s) => s.state === 'running' && s.source === 'facebook' && /^Google Maps: Search finished: no more results\. Now searching Facebook$/.test(s.message)));
-  assert.ok(!on.statuses.slice(0, -1).some((s) => s.state === 'done'), 'no early "done" while Facebook runs');
+  // Facebook started before Google Maps finished.
+  const firstFb = on.statuses.findIndex((s) => s.source === 'facebook');
+  const mapsDone = on.statuses.findIndex((s) => s.workers?.maps.state === 'completed');
+  assert.ok(firstFb >= 0 && firstFb < mapsDone, 'Facebook progress appears while Google Maps is still running');
+  assert.ok(on.statuses.some((s) => s.workers?.maps.state === 'running' && s.workers?.facebook.state === 'running'), 'both running at once');
+  // Every lead from both sources is in the one table.
+  const all = on.store.listLeads();
+  assert.deepEqual(all.map((l) => l.phone).sort(), ['+923001111111', '+923001234567', '+923002222222', '+923217654321']);
+  assert.ok(!all.some((l) => l.description === 'Need suppliers, budget 25000'), 'no lead without a number');
+  assert.equal(on.leads.length, 4, 'each lead reached the table as it was found');
+  assert.deepEqual(stats.facebook, { posts: 3, leads: 2, newLeads: 2 });
+  assert.equal(stats.newLeads, 4);
+  assert.deepEqual(facebook.calls.openSearch, ['garment shops in Lahore', 'Garments Lahore']);
+  // Each worker only touched its own pages.
+  assert.deepEqual([...facebook.calls.pages], ['facebook']);
+  assert.ok([...on.mapsMock.calls.pages].every((p) => p.startsWith('maps:')));
+
   const last = on.statuses.at(-1);
   assert.equal(last.state, 'done');
-  assert.equal(last.facebook.state, 'done');
-  assert.match(last.message, /^Google Maps: Search finished: no more results\. Facebook: 4 posts read, 3 with a valid number \(2 new leads\)\.$/);
+  assert.deepEqual([last.workers.maps.state, last.workers.facebook.state], ['completed', 'completed']);
+  assert.deepEqual([last.workers.maps.leads, last.workers.facebook.leads], [2, 2]);
+  assert.match(last.message, /^Google Maps: Search finished: no more results\. Facebook: 3 posts read, 2 with a valid number \(2 new leads\)\.$/);
 });
 
-test('Facebook problems are reported without failing the Google Maps search', async () => {
+test('the same number found by both sources at the same time is one lead', async () => {
+  for (const fbFirst of [true, false]) {
+    let release;
+    const hold = new Promise((r) => (release = r));
+    const facebook = mockFacebook({
+      pagesOfPosts: [[post(1, 'Wholesale, call 0300 1111111')]],
+      gate: async () => (fbFirst ? release() : hold),
+    });
+    const r = search({
+      withFacebook: true,
+      listings: [listing(1, '+923001111111')],
+      mapsOpts: { gate: async () => (fbFirst ? hold : release()) },
+      facebook,
+    });
+    await r.done;
+    const all = r.store.listLeads();
+    assert.equal(all.length, 1, `one lead (${fbFirst ? 'Facebook' : 'Maps'} first)`);
+    assert.deepEqual(all[0].sources, ['maps', 'facebook']);
+    assert.equal(all[0].name, 'Shop 1');
+    assert.equal(r.store.countNewLeadsSince('2000-01-01'), 1);
+    assert.equal(r.store.db.prepare('SELECT COUNT(*) n FROM businesses WHERE qualified = 1').get().n, 1);
+  }
+});
+
+test('a Facebook failure never stops Google Maps, and the reverse', async () => {
   for (const [mode, re] of [
     ['login', /Facebook asked to log in/],
     ['checkpoint', /security check/],
     ['blocked', /temporarily blocked/],
+    ['failed', /Facebook search results did not load/],
   ]) {
-    const r = search({ withFacebook: true, listings: [listing(1, '+923001111111')], facebook: mockFacebook({ mode }) });
+    const r = search({ withFacebook: true, listings: [listing(1, '+923001111111'), listing(2, '+923002222222'), listing(3, '+923003333333')], facebook: mockFacebook({ mode }) });
     await r.done;
     const last = r.statuses.at(-1);
     assert.equal(last.state, 'done', mode);
-    assert.equal(last.facebook.state, 'unavailable');
-    assert.equal(last.facebook.kind, mode);
+    assert.deepEqual([last.workers.maps.state, last.workers.facebook.state], ['completed', 'failed'], mode);
+    assert.equal(last.facebook.kind, mode === 'failed' ? 'not_loaded' : mode);
     assert.match(last.message, re);
-    assert.equal(r.store.listLeads().length, 1, 'the Maps lead is saved');
+    assert.equal(r.store.listLeads().length, 3, `Maps went on after Facebook failed (${mode})`);
+    // Facebook failed at once, while Maps was still working.
+    const fbFailed = r.statuses.findIndex((s) => s.workers?.facebook.state === 'failed');
+    assert.ok(fbFailed === -1 || r.statuses[fbFailed].workers.maps.state === 'running' || r.statuses.at(-1) === r.statuses[fbFailed]);
   }
-  // Search pages that never load are reported as a problem, not as "0 posts".
-  const blank = search({ withFacebook: true, listings: [listing(1, '+923001111111')], facebook: mockFacebook({ mode: 'failed' }) });
-  await blank.done;
-  assert.equal(blank.statuses.at(-1).state, 'done');
-  assert.equal(blank.statuses.at(-1).facebook.kind, 'not_loaded');
-  assert.match(blank.statuses.at(-1).message, /Facebook: Facebook search results did not load\..*\(failed\)/);
-  // An unexpected Facebook failure (page crashed, timeout) is reported too.
   const crash = search({ withFacebook: true, listings: [listing(1, '+923001111111')], facebook: mockFacebook({ fail: new Error('page.goto: Timeout 45000ms exceeded') }) });
   await crash.done;
   assert.equal(crash.statuses.at(-1).state, 'done');
   assert.match(crash.statuses.at(-1).message, /Facebook: The Facebook search did not finish \(page\.goto: Timeout/);
-  // A Maps problem still lets Facebook run; the final status is the Maps error.
-  // (No Maps leads and no country hint: only international numbers are read.)
-  const blocked = search({ withFacebook: true, listings: [], country: null, facebook: mockFacebook({ pagesOfPosts: [[post(1, 'Call 0300 1234567 or +92 321 7654321')]] }) });
-  blocked.mapsMock.search = async () => ({ mode: 'failed', detail: 'test' });
-  await blocked.done;
-  assert.equal(blocked.statuses.at(-1).state, 'error');
-  assert.match(blocked.statuses.at(-1).message, /^Google Maps: The Google Maps search for .* Facebook: 1 post read/);
-  assert.deepEqual(blocked.store.listLeads().map((l) => [l.phone, l.source]), [['+923217654321', 'facebook']]);
+
+  // Google Maps fails; Facebook carries on and saves its leads.
+  const mapsDown = search({ withFacebook: true, listings: [listing(1, '+923001111111')], mapsOpts: { mode: 'failed' }, facebook: mockFacebook({ pagesOfPosts: [[post(1, 'Call 0300 1234567')], [post(2, 'Call 0321 7654321')]] }) });
+  await mapsDown.done;
+  const last = mapsDown.statuses.at(-1);
+  assert.equal(last.state, 'done', 'one source completed, so the search completed');
+  assert.deepEqual([last.workers.maps.state, last.workers.facebook.state], ['failed', 'completed']);
+  assert.match(last.message, /^Google Maps: The Google Maps search for .* Facebook: 2 posts read/);
+  assert.deepEqual(mapsDown.store.listLeads().map((l) => l.source), ['facebook', 'facebook']);
+
+  // Both fail: the search failed.
+  const both = search({ withFacebook: true, listings: [listing(1, '+923001111111')], mapsOpts: { mode: 'failed' }, facebook: mockFacebook({ mode: 'login' }) });
+  await both.done;
+  assert.equal(both.statuses.at(-1).state, 'error');
+  assert.deepEqual([both.statuses.at(-1).workers.maps.state, both.statuses.at(-1).workers.facebook.state], ['failed', 'failed']);
 });
 
-test('Stop during the Facebook part ends the search as stopped', async () => {
+test('Stop ends both workers; what was saved stays', async () => {
   const ctl = new AbortController();
-  const facebook = mockFacebook({ pagesOfPosts: [[post(1, 'Call 0300 1234567')], [post(2, 'Call 0300 7654321')]] });
-  const orig = facebook.collectPosts;
-  facebook.collectPosts = async (...a) => {
-    const out = await orig(...a);
-    ctl.abort();
-    return out;
-  };
-  const r = search({ withFacebook: true, listings: [listing(1, '+923001111111')], facebook, signal: ctl.signal });
+  const facebook = mockFacebook({
+    pagesOfPosts: [[post(1, 'Call 0300 1234567')], [post(2, 'Call 0300 7654321')], [post(3, 'Call 0300 7654322')]],
+    gate: async (n) => n === 1 && ctl.abort(),
+  });
+  const listings = Array.from({ length: 30 }, (_, i) => listing(i + 1, `+92300${String(1000000 + i)}`));
+  const r = search({ withFacebook: true, listings, facebook, signal: ctl.signal });
   await r.done;
-  assert.equal(r.statuses.at(-1).state, 'stopped');
-  assert.equal(facebook.calls.openSearch.length, 1);
+  const last = r.statuses.at(-1);
+  assert.equal(last.state, 'stopped');
+  assert.deepEqual([last.workers.maps.state, last.workers.facebook.state], ['stopped', 'stopped']);
+  assert.ok(r.mapsMock.calls.opened.length < listings.length, 'Maps stopped early too');
+  // Saved leads are whole rows; nothing half-written.
+  const saved = r.store.listLeads();
+  assert.ok(saved.length >= 1);
+  assert.ok(saved.every((l) => l.phone && l.name));
+  assert.equal(r.store.db.isTransaction, false);
+  assert.ok(r.statuses.slice(0, -1).filter((s) => s.workers).every((s, i, a) => i < a.findIndex((x) => x.state === 'stopping') || s.state === 'stopping' || a.findIndex((x) => x.state === 'stopping') === -1), 'stays "stopping" after Stop');
 });
 
 test('a later search does not re-save posts it already read, and keeps campaign history', async () => {

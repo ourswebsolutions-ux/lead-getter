@@ -1,8 +1,8 @@
 'use strict';
 
 // The Facebook part of a search: post searches for the same keyword and
-// category in a tab of the same Chrome session, reading the numbers posts
-// show. Built on SearchSession, so Stop, pacing, network retries and Chrome
+// category in a window of its own in the same Chrome session (it runs
+// alongside the Google Maps search), reading the numbers posts show. Built on SearchSession, so Stop, pacing, network retries and Chrome
 // reconnects behave exactly as in the Google Maps search.
 //
 // It never ends the whole search: run() returns an outcome instead of a
@@ -35,8 +35,8 @@ class FacebookUnavailable extends FatalSearchError {
 
 class FacebookSession extends SearchSession {
   // categoryName: for the extra category query; country: how local numbers
-  // in posts are read; stats: the Maps session's counters, continued here.
-  constructor({ categoryName = '', country = null, facebook = fbDefault, stats = null, pacing = {}, ...opts }) {
+  // in posts are read.
+  constructor({ categoryName = '', country = null, facebook = fbDefault, pacing = {}, ...opts }) {
     super({ ...opts, pacing: { ...DEFAULT_PACING, ...FB_PACING, ...pacing } });
     this.fb = facebook;
     this.country = country;
@@ -44,7 +44,6 @@ class FacebookSession extends SearchSession {
     this.doneQueries = new Set();
     this.loadedQueries = 0;
     this.seenPosts = new Set();
-    if (stats) this.stats = stats;
     this.stats.facebook = { posts: 0, leads: 0, newLeads: 0 };
   }
 
@@ -73,8 +72,8 @@ class FacebookSession extends SearchSession {
   // Each query once; after a reconnect, finished queries are skipped and
   // posts already read are not read again.
   async searchOnce() {
+    // Its own window: not brought to the front, so the Maps tabs keep theirs.
     const page = await this.op(() => this.pages.facebook());
-    await this.op(() => page.bringToFront());
     for (const query of this.queries) {
       if (this.doneQueries.has(query)) continue;
       if (this.doneQueries.size) await this.pause(this.pacing.fbBetweenQueries);
