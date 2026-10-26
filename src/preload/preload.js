@@ -32,6 +32,8 @@ contextBridge.exposeInMainWorld('leadFinder', {
   applySubscription: (form) => ipcRenderer.invoke('subscription:apply', form && typeof form === 'object' ? { plan: String(form.plan ?? ''), message: String(form.message ?? ''), email: String(form.email ?? '') } : {}),
   onSubscription: (cb) => subscribe('subscription:status', cb),
   stopSearch: () => ipcRenderer.invoke('search:stop'),
+  facebookSearch: () => ipcRenderer.invoke('facebook:get'),
+  setFacebookSearch: (on) => ipcRenderer.invoke('facebook:set', Boolean(on)),
   getStatus: () => ipcRenderer.invoke('search:status'),
   // scope: 'filtered' (leads matching filter) or 'all'
   exportCsv: (scope, filter) => ipcRenderer.invoke('export:csv', scope === 'all' ? 'all' : 'filtered', filter),

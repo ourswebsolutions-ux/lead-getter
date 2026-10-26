@@ -49,12 +49,14 @@ function formatChecked(iso) {
 }
 
 // Applies a batch of live leads (newest last) to the list in one pass.
+// Matched by id: a Facebook lead later found on Google Maps keeps its id but
+// gets the listing's key.
 function upsertMany(list, batch) {
-  const byKey = new Map(batch.map((l) => [l.placeKey, l]));
+  const byKey = new Map(batch.map((l) => [l.id, l]));
   const next = list.map((l) => {
-    const u = byKey.get(l.placeKey);
+    const u = byKey.get(l.id);
     if (!u) return l;
-    byKey.delete(l.placeKey);
+    byKey.delete(l.id);
     return u;
   });
   return [...[...byKey.values()].reverse(), ...next];
@@ -203,6 +205,20 @@ const LeadRow = memo(function LeadRow({ lead: l, fresh, selected, pastView, onTo
       </td>
       <td>{websiteChip(l)}</td>
       <td>{l.category ? <span className="cat">{l.category}</span> : <span className="muted">Uncategorized</span>}</td>
+      <td className="sources">
+        {(l.sources || ['maps']).includes('maps') && <span className="chip src-maps">Maps</span>}
+        {(l.sources || []).includes('facebook') && (
+          <button
+            type="button"
+            className="chip src-facebook"
+            title={`Found in a Facebook post${l.contactName ? ` by ${l.contactName}` : ''}${l.description ? `:\n${l.description.slice(0, 300)}` : ''}`}
+            aria-label={`Open the Facebook post for ${l.name}`}
+            onClick={() => api.openListing(l.fbPostUrl)}
+          >
+            Facebook
+          </button>
+        )}
+      </td>
       <td>
         {l.campaign === 'seen' ? (
           <span className={`chip camp-seen camp-${l.campaignDelivery}`} title={`Campaign message ${l.campaignDelivery === 'read' ? 'read' : l.campaignDelivery === 'delivered' ? 'delivered' : 'sent'}`}>
@@ -224,9 +240,15 @@ const LeadRow = memo(function LeadRow({ lead: l, fresh, selected, pastView, onTo
         )}
       </td>
       <td className="row-actions">
-        <button type="button" className="icon-btn" aria-label={`Open ${l.name} on Google Maps`} title="Open listing on Google Maps" onClick={() => api.openListing(l.mapsUrl)}>
-          <Icon name="external" />
-        </button>
+        {l.source === 'facebook' ? (
+          <button type="button" className="icon-btn" aria-label={`Open ${l.name} on Facebook`} title="Open the Facebook post" onClick={() => api.openListing(l.fbPostUrl)}>
+            <Icon name="external" />
+          </button>
+        ) : (
+          <button type="button" className="icon-btn" aria-label={`Open ${l.name} on Google Maps`} title="Open listing on Google Maps" onClick={() => api.openListing(l.mapsUrl)}>
+            <Icon name="external" />
+          </button>
+        )}
         <button type="button" className="icon-btn danger" aria-label={`Delete ${l.name}`} title="Delete lead" onClick={() => onDelete([l.id])}>
           <Icon name="trash" />
         </button>
@@ -262,6 +284,13 @@ function websiteChip(l) {
       <span className={`chip ${l.websiteStatus.startsWith('Possible') ? 'chip-soft' : 'chip-site'}`} title={l.websiteStatus}>
         {l.websiteStatus.startsWith('Possible') ? 'Possible website' : 'Website'}
         {site ? <span className="chip-detail">{site}</span> : null}
+      </span>
+    );
+  }
+  if (l.websiteKind === 'unknown') {
+    return (
+      <span className="chip" title={l.websiteStatus}>
+        Not checked
       </span>
     );
   }
@@ -322,6 +351,8 @@ export default function App({ onLock }) {
   const [siteView, setSiteView] = useState('all'); // table: all | without | with
   const [waOnly, setWaOnly] = useState(false);
   const [campaignView, setCampaignView] = useState('all'); // all | seen | unseen
+  const [sourceView, setSourceView] = useState('all'); // all | maps | facebook
+  const [facebookOn, setFacebookOn] = useState(false); // Facebook Lead Search (stored in the app)
   const [tableSearch, setTableSearch] = useState('');
   const [searchQuery, setSearchQuery] = useState(''); // debounced
   const [sub, setSub] = useState(null);
@@ -369,6 +400,7 @@ export default function App({ onLock }) {
     if (siteView !== 'all') f.website = siteView;
     if (waOnly) f.whatsapp = 'available';
     if (campaignView !== 'all') f.campaign = campaignView;
+    if (sourceView !== 'all') f.source = sourceView;
     if (searchQuery) f.search = searchQuery;
     if (view === 'today') f.date = today;
     else if (pastMode === 'date' && pastDate) f.date = pastDate;
@@ -377,7 +409,7 @@ export default function App({ onLock }) {
       if (range.to) f.to = range.to;
     } else f.before = today;
     return f;
-  }, [view, today, pastMode, pastDate, range, catFilter, siteView, waOnly, campaignView, searchQuery]);
+  }, [view, today, pastMode, pastDate, range, catFilter, siteView, waOnly, campaignView, sourceView, searchQuery]);
   const filterRef = useRef(filter);
   filterRef.current = filter;
   const viewKey = JSON.stringify(filter);
@@ -437,6 +469,7 @@ export default function App({ onLock }) {
     loadCategories();
     api.getStatus().then(setStatus).catch(() => {});
     api.getInterrupted().then(setInterrupted).catch(() => {});
+    api.facebookSearch().then((r) => setFacebookOn(Boolean(r?.on))).catch(() => {});
     const offStatus = api.onStatus(setStatus);
     const offSummary = api.onSummary(setSummary);
     api.whatsappState().then(setWa).catch(() => {});
@@ -459,14 +492,15 @@ export default function App({ onLock }) {
       if (batch.length) setLeads((list) => upsertMany(list, batch));
     };
     const offLead = api.onLead((lead) => {
-      freshIds.current.add(lead.placeKey);
+      freshIds.current.add(lead.id);
       const f = filterRef.current;
       const catOk = f.category === 'all' || (f.category === 'none' ? lead.categoryId == null : lead.categoryId === f.category);
       const siteOk = !f.website || f.website === lead.websiteKind;
       // A new lead is Unseen; with a search, the table reloads instead.
       const campOk = !f.campaign || f.campaign === (lead.campaign || 'unseen');
+      const sourceOk = !f.source || (lead.sources || ['maps']).includes(f.source);
       // New numbers are not checked on WhatsApp yet, so they wait for the check.
-      if (catOk && siteOk && campOk && !f.search && !f.whatsapp && f.date === lead.discoveredDate) {
+      if (catOk && siteOk && campOk && sourceOk && !f.search && !f.whatsapp && f.date === lead.discoveredDate) {
         queue.push(lead);
         if (!frame) frame = requestAnimationFrame(flush);
       }
@@ -493,6 +527,16 @@ export default function App({ onLock }) {
 
   const active = ACTIVE.has(status.state);
   const canStart = !active && keyword.trim().length >= 2 && formatCategory(category).length >= 2;
+
+  async function toggleFacebook() {
+    const next = !facebookOn;
+    setFacebookOn(next);
+    const res = await api.setFacebookSearch(next).catch((e) => ({ ok: false, error: e.message }));
+    if (!res.ok) {
+      setFacebookOn(!next);
+      notify({ type: 'error', text: `Could not change Facebook Lead Search: ${res.error}` });
+    }
+  }
 
   async function runSearch(kw, cat) {
     const res = await api.startSearch(kw, cat, websiteFilter);
@@ -650,6 +694,26 @@ export default function App({ onLock }) {
               </button>
             </div>
           </form>
+          <div className="source-row">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={facebookOn}
+              aria-label="Facebook Lead Search"
+              className={`switch ${facebookOn ? 'on' : ''}`}
+              disabled={active}
+              title={active ? 'Takes effect from the next search' : undefined}
+              onClick={toggleFacebook}
+            >
+              <span className="switch-knob" />
+            </button>
+            <span className="source-label">Facebook Lead Search</span>
+            <span className="muted">
+              {facebookOn
+                ? 'On: after Google Maps, public Facebook posts are searched with the same keyword and category (uses your Facebook login in Chrome).'
+                : 'Off: Google Maps only.'}
+            </span>
+          </div>
 
           <div className={`progress state-${status.state}`} aria-live="polite">
             <div className="progress-bar" aria-hidden="true">
@@ -659,6 +723,10 @@ export default function App({ onLock }) {
               <span className="dot" />
               {status.state === 'error' && <span className="phase">{status.phase === 'connection' ? 'Chrome connection' : 'Search'}</span>}
               {status.state === 'paused' && <span className="phase phase-warn">Paused</span>}
+              {ACTIVE.has(status.state) && status.sources?.includes('facebook') && (
+                <span className="phase">{status.source === 'facebook' ? 'Facebook' : 'Google Maps'}</span>
+              )}
+              {!ACTIVE.has(status.state) && ['unavailable', 'error'].includes(status.facebook?.state) && <span className="phase phase-warn">Facebook</span>}
               <span className="msg">{status.message}</span>
             </div>
             <dl className="stats">
@@ -682,6 +750,12 @@ export default function App({ onLock }) {
                 <dt>Qualified</dt>
                 <dd className="num">{status.leads ?? 0}</dd>
               </div>
+              {status.facebook && (
+                <div>
+                  <dt>From Facebook</dt>
+                  <dd className="num">{status.facebook.leads ?? 0}</dd>
+                </div>
+              )}
             </dl>
           </div>
         </section>
@@ -771,6 +845,14 @@ export default function App({ onLock }) {
                 <option value="unseen">Unseen (not messaged)</option>
               </select>
             </label>
+            <label className="select-wrap">
+              <span>Source</span>
+              <select aria-label="Show source" value={sourceView} onChange={(e) => setSourceView(e.target.value)}>
+                <option value="all">All sources</option>
+                <option value="maps">Google Maps</option>
+                <option value="facebook">Facebook</option>
+              </select>
+            </label>
             <label className="table-search">
               <Icon name="search" size={14} />
               <input type="search" value={tableSearch} placeholder="Name, business or phone" aria-label="Search leads" onChange={(e) => setTableSearch(e.target.value)} />
@@ -852,6 +934,7 @@ export default function App({ onLock }) {
                       <th>Address</th>
                       <th>Website</th>
                       <th>Category</th>
+                      <th>Source</th>
                       <th>Campaign</th>
                       <th>Discovered</th>
                       <th className="actions-col">
@@ -862,9 +945,9 @@ export default function App({ onLock }) {
                   <tbody>
                     {leads.slice(0, shown).map((l) => (
                       <LeadRow
-                        key={l.placeKey}
+                        key={l.id}
                         lead={l}
-                        fresh={freshIds.current.has(l.placeKey)}
+                        fresh={freshIds.current.has(l.id)}
                         selected={selected.has(l.id)}
                         pastView={view !== 'today'}
                         onToggle={toggle}

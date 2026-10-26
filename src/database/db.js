@@ -5,6 +5,7 @@
 // phone and address, and only those are shown and exported. Leads carry the
 // search category and the local date they were discovered.
 
+const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 const { normalizePhone, betterPhone, E164 } = require('./phone');
 
@@ -107,6 +108,12 @@ class LeadStore {
           discovered_date = CASE WHEN qualified = 0 AND :qualified = 1 THEN :today ELSE discovered_date END,
           discovered_at = CASE WHEN qualified = 0 AND :qualified = 1 THEN :now ELSE discovered_at END
         WHERE place_key = :place_key`),
+      adopt: this.db.prepare(`
+        UPDATE businesses SET
+          place_key = :place_key, maps_url = :maps_url, name = :name, phone = :phone, phone_raw = :phone_raw, phone_status = :phone_status,
+          phone_country = :phone_country, address = :address, website_status = :website_status, website_detail = :website_detail,
+          keyword = COALESCE(keyword, :keyword), checked_at = :now, category_id = COALESCE(category_id, :category_id)
+        WHERE id = :id`),
       categoryByKey: this.db.prepare('SELECT id, name FROM categories WHERE name_key = ?'),
       insertCategory: this.db.prepare('INSERT INTO categories (name, name_key, created_at, last_used_at) VALUES (?, ?, ?, ?)'),
       touchCategory: this.db.prepare('UPDATE categories SET last_used_at = ? WHERE id = ?'),
@@ -143,6 +150,35 @@ class LeadStore {
     this.migrateV4();
     this.migrateV5();
     this.migrateV6();
+    this.migrateV7();
+  }
+
+  // Version 7: Facebook as a second lead source. A lead keeps the first
+  // Facebook post it was found in (and its author), and every post that
+  // mentioned the number is recorded in lead_sources.
+  migrateV7() {
+    if (this.db.prepare('PRAGMA user_version').get().user_version >= 7) return;
+    this.transaction(() => {
+      const has = (col) => this.db.prepare("SELECT 1 FROM pragma_table_info('businesses') WHERE name = ?").get(col);
+      for (const col of ['fb_post_url', 'fb_page_url', 'contact_name', 'description']) {
+        if (!has(col)) this.db.exec(`ALTER TABLE businesses ADD COLUMN ${col} TEXT`);
+      }
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS lead_sources (
+          id          INTEGER PRIMARY KEY,
+          business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+          source      TEXT NOT NULL CHECK (source IN ('facebook')),
+          url         TEXT NOT NULL,
+          page_url    TEXT,
+          author      TEXT,
+          text        TEXT,
+          phone       TEXT NOT NULL,
+          found_at    TEXT NOT NULL,
+          UNIQUE (source, url, phone)
+        );
+        CREATE INDEX IF NOT EXISTS lead_sources_business ON lead_sources (business_id);
+        PRAGMA user_version = 7;`);
+    });
   }
 
   // Version 6: category campaigns (a campaign can follow one lead category
@@ -504,6 +540,10 @@ class LeadStore {
       clauses.push('b.discovered_date < ?');
       params.push(filter.before);
     }
+    // Source: found on Google Maps (Facebook leads have a 'fb:' key) and/or
+    // in a Facebook post.
+    if (filter.source === 'maps') clauses.push("b.place_key NOT LIKE 'fb:%'");
+    else if (filter.source === 'facebook') clauses.push('b.fb_post_url IS NOT NULL');
     if (filter.website === 'without') clauses.push("b.website_status IN ('no_website', 'social_only')");
     else if (filter.website === 'with') clauses.push("b.website_status IN ('has_website', 'possible_website')");
     // Campaign status: Seen = a campaign message to this number was sent
@@ -513,13 +553,13 @@ class LeadStore {
       clauses.push(`${filter.campaign === 'unseen' ? 'NOT ' : ''}EXISTS (SELECT 1 FROM outreach_sends s
         WHERE s.phone = b.phone AND s.test = 0 AND s.status IN ('sent', 'delivered', 'read'))`);
     }
-    // Search: business name, or (by digits) the phone number.
+    // Search: business or contact name, or (by digits) the phone number.
     const q = typeof filter.search === 'string' ? filter.search.trim().slice(0, 100) : '';
     if (q) {
       const like = (v) => `%${v.replace(/[\\%_]/g, '\\$&')}%`;
       const digits = q.replace(/\D/g, '');
-      clauses.push(`(b.name LIKE ? ESCAPE '\\'${digits.length >= 3 ? " OR b.phone LIKE ? ESCAPE '\\' OR b.phone_raw LIKE ? ESCAPE '\\'" : ''})`);
-      params.push(like(q));
+      clauses.push(`(b.name LIKE ? ESCAPE '\\' OR b.contact_name LIKE ? ESCAPE '\\'${digits.length >= 3 ? " OR b.phone LIKE ? ESCAPE '\\' OR b.phone_raw LIKE ? ESCAPE '\\'" : ''})`);
+      params.push(like(q), like(q));
       if (digits.length >= 3) params.push(like(digits), like(digits));
     }
     // Only numbers WhatsApp itself confirmed (not earlier manual marks).
@@ -558,21 +598,35 @@ class LeadStore {
   deleteLeads(ids) {
     const list = [...new Set(ids.map(Number).filter(Number.isInteger))];
     if (!list.length) return 0;
-    return this.withRetry(() =>
-      this.transaction(() => {
-        const stmt = this.db.prepare(`UPDATE businesses SET ${TOMBSTONE} WHERE id = ? AND qualified = 1`);
-        let n = 0;
-        for (const id of list) n += Number(stmt.run(id).changes);
-        return n;
-      }),
-    );
+    return this.withRetry(() => this.transaction(() => this.tombstone(list)));
   }
 
   deleteFiltered(filter = {}) {
     const w = this.where(filter);
     return this.withRetry(() =>
-      this.transaction(() => Number(this.db.prepare(`UPDATE businesses AS b SET ${TOMBSTONE} WHERE ${w.sql}`).run(...w.params).changes)),
+      this.transaction(() => this.tombstone(this.db.prepare(`SELECT b.id FROM businesses b WHERE ${w.sql}`).all(...w.params).map((r) => r.id))),
     );
+  }
+
+  // Inside a transaction. A lead that was found on Facebook also leaves a
+  // Facebook marker (a hash of the number, not the number) so Facebook
+  // searches do not add it again either.
+  tombstone(ids, now = new Date().toISOString()) {
+    const get = this.db.prepare('SELECT id, place_key, phone, fb_post_url FROM businesses WHERE id = ? AND qualified = 1');
+    const clear = this.db.prepare(`UPDATE businesses SET ${TOMBSTONE} WHERE id = ?`);
+    const dropSources = this.db.prepare('DELETE FROM lead_sources WHERE business_id = ?');
+    const marker = this.db.prepare(`INSERT INTO businesses (place_key, maps_url, name, website_status, qualified, discovered_at, checked_at)
+      VALUES (?, '', '', 'deleted', 0, ?, ?) ON CONFLICT(place_key) DO NOTHING`);
+    let n = 0;
+    for (const id of ids) {
+      const row = get.get(id);
+      if (!row) continue;
+      if (row.fb_post_url && row.phone && !row.place_key.startsWith('fb:')) marker.run(facebookKey(row.phone), now, now);
+      clear.run(id);
+      dropSources.run(id);
+      n++;
+    }
+    return n;
   }
 
   // Saves a checked business. Returns { lead, isNewLead } where lead is set
@@ -617,18 +671,117 @@ class LeadStore {
         now,
         today: localDate(new Date(now)),
       };
+      // The same number found on Facebook first: that lead becomes this
+      // listing, keeping its id, date, campaign history and Facebook post.
+      const fromFacebook = !existing && qualified && ph.status === 'valid' ? this.db.prepare('SELECT id FROM businesses WHERE place_key = ? AND qualified = 1').get(facebookKey(ph.phone)) : null;
       if (existing) {
         const { keyword, ...updateRow } = row;
         this.stmt.update.run(updateRow);
+      } else if (fromFacebook) {
+        const { qualified: _q, today: _t, ...adoptRow } = row;
+        this.stmt.adopt.run({ ...adoptRow, id: fromFacebook.id });
       } else {
         this.stmt.insert.run(row);
       }
       const saved = this.stmt.getLead.get(result.placeKey);
       return {
         lead: saved.qualified ? toLead(saved) : null,
-        isNewLead: Boolean(saved.qualified) && !(existing && existing.qualified),
+        isNewLead: Boolean(saved.qualified) && !(existing && existing.qualified) && !fromFacebook,
       };
     });
+  }
+
+  // --- Facebook -----------------------------------------------------------------
+
+  // Saves a number found in a Facebook post: { phone (E.164), country, raw,
+  // name, contactName, postUrl, pageUrl, text, keyword, categoryId }.
+  // A number that is already a lead (from Google Maps or Facebook) is not
+  // added again: the post is recorded as another source and only empty
+  // fields are filled in. Its date, category, campaign history and Seen
+  // status stay as they were. A deleted number is not added back.
+  // Returns { lead, isNewLead, newSource } or { lead: null, skipped }.
+  saveFacebookLead(r, now = new Date().toISOString()) {
+    if (!E164.test(String(r.phone))) throw new Error('Only validated international numbers are saved from Facebook.');
+    const key = facebookKey(r.phone);
+    const text = r.text ? String(r.text).slice(0, 2000) : null;
+    return this.withRetry(() =>
+      this.transaction(() => {
+        const marker = this.stmt.get.get(key);
+        if (marker && !marker.qualified) return { lead: null, skipped: 'deleted' };
+        const existing = this.db.prepare('SELECT id FROM businesses WHERE phone = ? AND qualified = 1 ORDER BY id LIMIT 1').get(r.phone);
+        let id;
+        if (existing) {
+          id = existing.id;
+          this.db
+            .prepare(
+              `UPDATE businesses SET fb_post_url = COALESCE(fb_post_url, ?), fb_page_url = COALESCE(fb_page_url, ?),
+                 contact_name = COALESCE(contact_name, ?), description = COALESCE(description, ?),
+                 name = CASE WHEN name = '' THEN ? ELSE name END, category_id = COALESCE(category_id, ?)
+               WHERE id = ?`,
+            )
+            .run(r.postUrl, r.pageUrl || null, r.contactName || null, text, r.name || '', r.categoryId ?? null, id);
+        } else {
+          const ins = this.stmt.insert.run({
+            place_key: key,
+            maps_url: r.postUrl,
+            name: r.name || '',
+            phone: r.phone,
+            phone_raw: r.raw || r.phone,
+            phone_status: 'valid',
+            phone_country: r.country || null,
+            address: null,
+            website_status: 'not_checked',
+            website_detail: null,
+            qualified: 1,
+            keyword: r.keyword || null,
+            category_id: r.categoryId ?? null,
+            now,
+            today: localDate(new Date(now)),
+          });
+          id = Number(ins.lastInsertRowid);
+          this.db
+            .prepare('UPDATE businesses SET fb_post_url = ?, fb_page_url = ?, contact_name = ?, description = ? WHERE id = ?')
+            .run(r.postUrl, r.pageUrl || null, r.contactName || null, text, id);
+        }
+        const added = this.db
+          .prepare(
+            `INSERT INTO lead_sources (business_id, source, url, page_url, author, text, phone, found_at)
+             VALUES (?, 'facebook', ?, ?, ?, ?, ?, ?) ON CONFLICT(source, url, phone) DO NOTHING`,
+          )
+          .run(id, r.postUrl, r.pageUrl || null, r.contactName || null, text, r.phone, now).changes;
+        return { lead: toLead(this.db.prepare(`${LEAD_SELECT} WHERE b.id = ?`).get(id)), isNewLead: !existing, newSource: added > 0 };
+      }),
+    );
+  }
+
+  // A post whose numbers were already saved (it is not read again).
+  hasFacebookPost(url) {
+    return Boolean(this.withRetry(() => this.db.prepare("SELECT 1 FROM lead_sources WHERE source = 'facebook' AND url = ? LIMIT 1").get(url)));
+  }
+
+  // Facebook posts of a lead (newest first).
+  leadSources(id) {
+    return this.withRetry(() =>
+      this.db
+        .prepare("SELECT url, page_url AS pageUrl, author, text, phone, found_at AS foundAt FROM lead_sources WHERE business_id = ? ORDER BY found_at DESC, id DESC")
+        .all(id),
+    );
+  }
+
+  // The country most leads' numbers belong to: local numbers in Facebook
+  // posts (which carry no address) are read as numbers of this country.
+  commonPhoneCountry() {
+    return (
+      this.withRetry(() =>
+        this.db
+          .prepare(
+            `SELECT phone_country AS c, COUNT(*) AS n FROM businesses
+             WHERE qualified = 1 AND phone_status = 'valid' AND phone_country IS NOT NULL
+             GROUP BY phone_country ORDER BY n DESC, phone_country LIMIT 1`,
+          )
+          .get(),
+      )?.c || null
+    );
   }
 
   // Validated lead numbers that still need an automatic WhatsApp check:
@@ -732,6 +885,7 @@ function statusText(row) {
   if (row.website_status === 'no_website') return 'No website found';
   if (row.website_status === 'has_website') return row.website_detail ? `Website: ${row.website_detail}` : 'Has website';
   if (row.website_status === 'possible_website') return row.website_detail ? `Possible website: ${row.website_detail}` : 'Possible website';
+  if (row.website_status === 'not_checked') return 'Website not checked (found on Facebook)';
   if (row.website_status === 'social_only') {
     return row.website_detail ? `No website (social page only: ${row.website_detail})` : 'No website (social page only)';
   }
@@ -756,7 +910,7 @@ function toLead(row) {
     mapsUrl: row.maps_url,
     websiteStatus: statusText(row),
     websiteDetail: row.website_detail || '',
-    websiteKind: ['has_website', 'possible_website'].includes(row.website_status) ? 'with' : 'without',
+    websiteKind: ['has_website', 'possible_website'].includes(row.website_status) ? 'with' : row.website_status === 'not_checked' ? 'unknown' : 'without',
     keyword: row.keyword || '',
     categoryId: row.category_id ?? null,
     category: row.category_name || '',
@@ -765,6 +919,13 @@ function toLead(row) {
     // Campaign status: 'seen' once a campaign message was sent to this
     // number; campaignDelivery is the best receipt (sent/delivered/read).
     campaign: row.camp_rank > 0 ? 'seen' : 'unseen',
+    // Where the lead was found: Google Maps and/or a Facebook post.
+    source: String(row.place_key).startsWith('fb:') ? 'facebook' : 'maps',
+    sources: [...(String(row.place_key).startsWith('fb:') ? [] : ['maps']), ...(row.fb_post_url ? ['facebook'] : [])],
+    fbPostUrl: row.fb_post_url || '',
+    fbPageUrl: row.fb_page_url || '',
+    contactName: row.contact_name || '',
+    description: row.description || '',
     campaignDelivery: ['', 'sent', 'delivered', 'read'][row.camp_rank || 0] || null,
   };
 }
@@ -777,6 +938,12 @@ const LEAD_SELECT = `SELECT b.*, c.name AS category_name, w.status AS wa_status,
   LEFT JOIN whatsapp_checks w ON w.phone = b.phone AND b.phone_status = 'valid'`;
 
 const TOMBSTONE = `qualified = 0, website_status = 'deleted', website_detail = NULL, name = '', phone = NULL, phone_raw = NULL,
-  phone_status = NULL, phone_country = NULL, address = NULL, maps_url = ''`;
+  phone_status = NULL, phone_country = NULL, address = NULL, maps_url = '', fb_post_url = NULL, fb_page_url = NULL, contact_name = NULL, description = NULL`;
 
-module.exports = { LeadStore, QUALIFIED_STATUSES, localDate, formatCategory, categoryKey, DATE_RE };
+// Key of a lead found on Facebook: one per number. A hash, so the marker a
+// deleted lead leaves behind does not keep the number.
+function facebookKey(phone) {
+  return `fb:${crypto.createHash('sha256').update(String(phone)).digest('hex').slice(0, 32)}`;
+}
+
+module.exports = { LeadStore, QUALIFIED_STATUSES, localDate, formatCategory, categoryKey, facebookKey, DATE_RE };

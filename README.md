@@ -145,6 +145,52 @@ Details: [docs/AXORA-INTEGRATION.md](docs/AXORA-INTEGRATION.md).
 
 Pacing is deliberately slow: a few seconds between listings and a longer break every 25 listings.
 
+## Facebook Lead Search
+
+**Facebook Lead Search** is an ON/OFF switch under the search form. The app stores it, and every search reads it when it starts.
+
+- **OFF** (the default): only Google Maps is searched, exactly as before. Facebook is never opened.
+- **ON:** after the Google Maps search finishes, the same search goes on in a separate Facebook tab of the same Chrome profile. It uses that profile's Facebook login and searches **posts**:
+  - for the keyword (`garment shops in Lahore`);
+  - and for the category with the keyword's place (`Garments Lahore`), when the keyword doesn't already contain the category.
+- **Reading posts:**
+  - It reads the posts in the results, opening Facebook's own *See more* on long posts, and scrolls until Facebook shows no more results, 150 posts per query, or you press **Stop Search**.
+  - It doesn't open individual posts or pages. The pace is a few seconds per scroll.
+  - Posts already saved by an earlier search aren't saved again.
+- **Numbers:**
+  - Only numbers a post shows are saved: in its text, or in its WhatsApp (`wa.me`) or `tel:` links.
+  - Each number is checked with libphonenumber, and only numbers valid for their country are kept, at most 5 per post.
+  - Local numbers (`0300 1234567`) are read as numbers of the country most of your leads are in, or this computer's region if you have no leads yet.
+  - A post without a number doesn't create a lead, and nothing is guessed or filled in.
+  - A commenter's number is not the poster's, so comments are ignored.
+- **What a Facebook lead stores:**
+  - the post author's name (business name and contact name);
+  - the number;
+  - the search's category and keyword;
+  - the post text (up to 2,000 characters);
+  - the post URL and the author's page URL;
+  - the date.
+  - Its website is shown as *Not checked*: a Facebook lead's website isn't verified, so the Website filter's *With* and *Without* options leave it out.
+- **One lead per number, across both sources:**
+  - If the number is already a lead, from Google Maps or Facebook, no second lead is made. The post is recorded as another source of that lead, and only empty fields are filled in.
+  - The lead's date, category, campaign history and Seen status stay as they were.
+  - A Facebook lead later found on Google Maps becomes that Maps listing, keeping the same lead, date and history.
+  - A deleted lead isn't added back by either source. Its marker keeps a hash, not the number.
+- **Leads table:**
+  - A **Source** column shows *Maps* and/or *Facebook*. Click *Facebook* to open the post.
+  - A **Source** filter (All, Google Maps, Facebook) works together with category, Seen/Unseen, search (business name, contact name, phone), dates and paging.
+  - The CSV export adds *Source, Facebook Post URL, Facebook Page URL, Contact Name, Post Text*.
+- **Problems:**
+  - These are reported in the search status, and the Google Maps results are saved and stay a finished search:
+    - not logged in: Facebook isn't opened at all, because the login cookie is missing;
+    - a login page or expired session;
+    - a security check (checkpoint or CAPTCHA);
+    - "temporarily blocked";
+    - results that don't load;
+    - any other error.
+  - Lead Finder never logs in, answers a check or works around a block.
+- **Facebook's terms:** like the Google Maps terms below, [Facebook's terms](https://www.facebook.com/terms.php) restrict automated collection. Lead Finder reads only what your own logged-in account is shown, slowly. You're responsible for how you use it.
+
 ### Website rules (conservative)
 
 | Situation | Result |
@@ -171,7 +217,7 @@ Lead Finder never fetches a business's website itself, so a site that is tempora
 - **Export CSV (n)** exports exactly the leads shown: the current category and/or date, or the date range.
 - **Export all** exports every saved lead.
 
-Columns: `Business Name, Phone, Phone Status, Address, Google Maps URL, Website Status, WhatsApp, Category, Date Discovered`. Files are UTF-8 with a BOM, saved through a native save dialog.
+Columns: `Business Name, Phone, Phone Status, Address, Google Maps URL, Website Status, WhatsApp, Category, Date Discovered, Source, Facebook Post URL, Facebook Page URL, Contact Name, Post Text`. Files are UTF-8 with a BOM, saved through a native save dialog.
 
 ### Delete
 
@@ -360,7 +406,9 @@ src/main/       Electron main process: window, validated IPC, search lifecycle
 src/preload/    Restricted bridge (window.leadFinder)
 src/renderer/   React UI (Vite)
 src/browser/    chrome.js (discovery + CDP attach), maps.js (Maps page ops),
-                website.js (qualification rules), web-check.js, search-session.js
+                website.js (qualification rules), web-check.js, search-session.js,
+                facebook.js + facebook-session.js (Facebook posts),
+                search-sources.js (Maps, then Facebook when it is on)
 src/database/   SQLite store (node:sqlite, built into Electron)
 src/export/     CSV generation
 test/           Unit tests, Electron E2E test, real-Chrome integration script
@@ -369,7 +417,7 @@ scripts/        dev.js (npm run dev), release.js (npm run release)
 build/          App icon
 ```
 
-Security: context isolation on, Node integration off, sandboxed renderer, strict CSP in builds, IPC accepted only from the app's own page, navigation and new windows blocked, and only Google Maps URLs can be opened externally.
+Security: context isolation on, Node integration off, sandboxed renderer, strict CSP in builds, IPC accepted only from the app's own page, navigation and new windows blocked, and only Google Maps and Facebook URLs can be opened externally.
 
 ## Real-Chrome integration tests
 

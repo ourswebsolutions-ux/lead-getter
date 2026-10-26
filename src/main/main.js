@@ -8,6 +8,8 @@ const { E164 } = require('../database/phone');
 const { leadsToCsv } = require('../export/csv');
 const { ChromeConnection, ChromeError, ConnectCancelled } = require('../browser/chrome');
 const { SearchSession, WEBSITE_FILTERS } = require('../browser/search-session');
+const { FacebookSession } = require('../browser/facebook-session');
+const { runSources } = require('../browser/search-sources');
 const { AppLock } = require('./applock');
 const { LicenseClient, readScreenshot } = require('./license');
 const { Updater, fileLog } = require('./updater');
@@ -228,6 +230,7 @@ function validateFilter(raw) {
     if (typeof f[k] === 'string' && DATE_RE.test(f[k])) out[k] = f[k];
   }
   if (f.campaign === 'seen' || f.campaign === 'unseen') out.campaign = f.campaign;
+  if (f.source === 'maps' || f.source === 'facebook') out.source = f.source;
   if (typeof f.search === 'string' && f.search.trim()) out.search = f.search.trim().slice(0, 100);
   return out;
 }
@@ -289,6 +292,9 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
     return { ok: false, error: `Could not save the category: ${err.message}` };
   }
 
+  // Facebook Lead Search (the switch above the Leads table), as it is when
+  // the search starts.
+  const withFacebook = facebookSearchOn();
   const controller = new AbortController();
   search = { controller };
   // Remembered so a search cut short by a crash can be resumed.
@@ -297,7 +303,7 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
   let expectedProfilePath = null;
   const startedAt = new Date().toISOString();
   let stats = null;
-  sendStatus({ state: 'connecting', phase: 'connection', step: 'connecting', keyword, category: category.name, processed: 0, leads: 0, newLeads: 0, skipped: 0, message: 'Connecting to Chrome' });
+  sendStatus({ state: 'connecting', phase: 'connection', step: 'connecting', keyword, category: category.name, sources: withFacebook ? ['maps', 'facebook'] : ['maps'], source: 'maps', facebook: null, processed: 0, leads: 0, newLeads: 0, skipped: 0, message: 'Connecting to Chrome' });
 
   search.promise = (async () => {
     try {
@@ -331,52 +337,64 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
         }
       }, 30 * 60 * 1000);
       controller.signal.addEventListener('abort', () => clearInterval(recheck), { once: true });
-      const session = new SearchSession({
-        keyword,
-        categoryId: category.id,
-        websiteFilter,
-        store,
+      const pages = {
+        main: () => tab('main'),
+        check: () => tab('check'),
+        detail: () => tab('detail'),
+        facebook: () => tab('facebook'),
+        open: () => chrome.context.newPage(),
+        adopt: (name, page) => adoptTab(name, page),
+      };
+      const recovery = {
+        // Chrome or the tab closed during the search: reopen/reconnect the
+        // same profile (Chrome may ask the user to Allow), never another one.
+        reconnect: async () => {
+          if (chrome.connected) {
+            for (const k of Object.keys(tabs)) tabs[k] = null; // only a tab was closed
+            return;
+          }
+          const profile = await chrome.connect({ signal: controller.signal });
+          if (expectedProfilePath && profile.path !== expectedProfilePath) {
+            await chrome.disconnect();
+            throw Object.assign(new Error(`Chrome reopened with a different profile ("${profile.name}"); Lead Finder will not switch accounts`), {
+              code: 'wrong_profile',
+            });
+          }
+          resetTabs(profile);
+          sendStatus({ profile: profileLabel(profile) });
+        },
+        canRestart: () => chrome.canRestart(),
+        restart: async () => {
+          const profile = await chrome.restartAndAttach(controller.signal);
+          resetTabs(profile);
+          sendStatus({ profile: profileLabel(profile) });
+          return true;
+        },
+      };
+      stats = await runSources({
+        withFacebook,
         signal: controller.signal,
-        pages: {
-          main: () => tab('main'),
-          check: () => tab('check'),
-          detail: () => tab('detail'),
-          open: () => chrome.context.newPage(),
-          adopt: (name, page) => adoptTab(name, page),
-        },
-        recovery: {
-          // Chrome or the tab closed during the search: reopen/reconnect the
-          // same profile (Chrome may ask the user to Allow), never another one.
-          reconnect: async () => {
-            if (chrome.connected) {
-              for (const k of Object.keys(tabs)) tabs[k] = null; // only a tab was closed
-              return;
-            }
-            const profile = await chrome.connect({ signal: controller.signal });
-            if (expectedProfilePath && profile.path !== expectedProfilePath) {
-              await chrome.disconnect();
-              throw Object.assign(new Error(`Chrome reopened with a different profile ("${profile.name}"); Lead Finder will not switch accounts`), {
-                code: 'wrong_profile',
-              });
-            }
-            resetTabs(profile);
-            sendStatus({ profile: profileLabel(profile) });
-          },
-          canRestart: () => chrome.canRestart(),
-          restart: async () => {
-            const profile = await chrome.restartAndAttach(controller.signal);
-            resetTabs(profile);
-            sendStatus({ profile: profileLabel(profile) });
-            return true;
-          },
-        },
-        emit: (event, payload) => {
-          if (event !== 'lead') return sendStatus(payload);
+        send: (event, payload) => {
+          if (event === 'status') return sendStatus(payload);
           send('leads:added', payload);
           verifier?.poke(); // check the new number on WhatsApp in the background
         },
+        createMaps: (emit) => new SearchSession({ keyword, categoryId: category.id, websiteFilter, store, signal: controller.signal, pages, recovery, emit }),
+        createFacebook: (emit, mapsStats) =>
+          new FacebookSession({
+            keyword,
+            categoryId: category.id,
+            categoryName: category.name,
+            // Local numbers in posts: the country of most leads, else this computer's region.
+            country: store.commonPhoneCountry() || app.getLocaleCountryCode() || null,
+            store,
+            signal: controller.signal,
+            pages,
+            recovery,
+            emit,
+            stats: mapsStats,
+          }),
       });
-      stats = await session.run();
       clearInterval(recheck);
     } catch (err) {
       if (err instanceof ConnectCancelled) {
@@ -419,6 +437,16 @@ function sendSummary({ keyword, category, startedAt, stats }) {
     alreadySaved: Math.max(0, qualifiedSeen - newLeads),
     started: Boolean(stats),
   });
+}
+
+function facebookSearchOn() {
+  return store.getState('facebookSearch') === true;
+}
+
+function setFacebookSearch(on) {
+  if (typeof on !== 'boolean') return { ok: false, error: 'Invalid value' };
+  store.setState('facebookSearch', on);
+  return { ok: true, on };
 }
 
 function stopSearch() {
@@ -822,14 +850,17 @@ async function deleteFiltered(rawFilter) {
 }
 
 function openListing(url) {
-  // Only Google Maps listing URLs are opened, in the user's default browser.
+  // Only Google Maps listings and Facebook posts or pages are opened, in the
+  // user's default browser.
   let u;
   try {
     u = new URL(String(url));
   } catch {
     return { ok: false };
   }
-  if (u.protocol !== 'https:' || !/^(www\.)?google\.[a-z.]+$/.test(u.hostname) || !u.pathname.startsWith('/maps/')) {
+  const maps = /^(www\.)?google\.[a-z.]+$/.test(u.hostname) && u.pathname.startsWith('/maps/');
+  const facebook = /^(www|m|web)\.facebook\.com$/.test(u.hostname);
+  if (u.protocol !== 'https:' || !(maps || facebook)) {
     return { ok: false };
   }
   shell.openExternal(u.toString());
@@ -964,6 +995,8 @@ app.whenReady().then(() => {
   });
   handle('search:start', (keyword, category, website) => startSearch(keyword, category, website));
   handle('search:stop', () => stopSearch());
+  handle('facebook:get', () => ({ on: facebookSearchOn() }));
+  handle('facebook:set', (on) => setFacebookSearch(on));
   handle('search:status', () => lastStatus);
   handle('export:csv', (scope, filter) => exportCsv(scope === 'all' ? 'all' : 'filtered', filter));
   handle('lead:open', (url) => openListing(url));

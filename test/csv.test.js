@@ -20,7 +20,7 @@ test('CSV has BOM, header, quoting and Unicode intact', () => {
   ]);
   assert.ok(csv.startsWith('﻿'));
   const lines = csv.slice(1).split('\r\n');
-  assert.equal(lines[0], 'Business Name,Phone,Phone Status,Address,Google Maps URL,Website Status,WhatsApp,Category,Date Discovered');
+  assert.equal(lines[0], 'Business Name,Phone,Phone Status,Address,Google Maps URL,Website Status,WhatsApp,Category,Date Discovered,Source,Facebook Post URL,Facebook Page URL,Contact Name,Post Text');
   assert.ok(lines[1].startsWith('"Khan ""Best"" Estate, Lahore",+923001234567,Valid,گلبرگ، لاہور,'));
   assert.ok(lines[1].includes(',No website found,Available,Software House,2026-10-20 '));
   assert.ok(lines[2].startsWith(`"'=HYPERLINK(""x"")"`));

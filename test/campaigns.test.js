@@ -309,7 +309,7 @@ test('upgrade from version 4 keeps the existing campaign, its contacts, history 
   db.setState('outreach', { status: 'paused', pauseReason: 'user', nextDueAt: 5000, acknowledgedAt: 123, config: { dailyCap: 14, test: false } });
   db.close();
   const up = new LeadStore(file);
-  assert.equal(up.db.prepare('PRAGMA user_version').get().user_version, 6);
+  assert.equal(up.db.prepare('PRAGMA user_version').get().user_version, 7);
   const store = new OutreachStore(up.db);
   const [c] = store.campaigns();
   assert.equal(c.name, 'Campaign 1');

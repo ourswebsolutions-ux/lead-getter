@@ -1100,3 +1100,12 @@ html.theme-anim *, html.theme-anim *::before, html.theme-anim *::after {
 .campaign-sub { margin: 12px 0 4px; font-size: 12.5px; color: var(--muted); font-weight: 600; }
 .st-campaign.st-completed { background: var(--sunken); color: var(--accent); }
 .st-campaign.st-off { background: var(--sunken); color: var(--muted); }
+
+/* Lead sources: the Facebook Lead Search switch and the Source column. */
+.source-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; font-size: 13px; flex-wrap: wrap; }
+.source-label { font-weight: 600; }
+.sources { white-space: nowrap; }
+.sources .chip + .chip { margin-left: 4px; }
+.chip.src-maps { background: var(--sunken); }
+button.chip.src-facebook { border: 0; font: inherit; font-size: 12px; cursor: pointer; background: color-mix(in srgb, #1877f2 14%, transparent); color: color-mix(in srgb, #1877f2 80%, var(--text)); }
+button.chip.src-facebook:hover { background: color-mix(in srgb, #1877f2 22%, transparent); }

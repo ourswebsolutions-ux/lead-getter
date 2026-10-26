@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Facebook search (test fixture)</title>
+<style>
+  body { font: 14px sans-serif; margin: 0; }
+  [role="article"] { height: 420px; border-bottom: 1px solid #ccc; padding: 8px; }
+  .more-text { display: none; }
+</style>
+</head>
+<body>
+<div role="feed" id="feed"></div>
+<script>
+  // Posts in the shape Facebook's post search renders them: an author link in
+  // a heading, a message block, a timestamp link that is the post's own
+  // address (with tracking parameters), and comments as nested articles.
+  const POSTS = [
+    { author: 'Ali Garments Wholesale', authorUrl: '/AliGarments?__tn__=%3C', post: '/AliGarments/posts/1001?__cft__[0]=AZX&__tn__=%2CO', text: 'Wholesale garments available in Lahore. Call 0300 1234567 for rates.' },
+    { author: 'Sara Ahmed', authorUrl: '/profile.php?id=555&__tn__=x', post: '/groups/778899/posts/2002/?__cft__[0]=Q', text: 'Looking for clothing suppliers, any recommendations? Price range 1500-2000.', comment: 'DM me, my number is 0345 7654321' },
+    { author: 'Lahore Cloth House', authorUrl: '/LahoreCloth', post: '/permalink.php?story_fbid=3003&id=444&__tn__=-R', text: 'New stock of lawn suits.', more: ' Order on WhatsApp: ', wa: 'https://wa.me/923217654321' },
+    { author: 'No Link Page', authorUrl: '/NoLink', post: null, text: 'Ladies suits stitching, contact 0333 1112223' },
+  ];
+  const LATER = [
+    { author: 'Kids Wear Factory', authorUrl: '/KidsWear', post: '/KidsWear/posts/4004', text: 'Factory rates for kids wear +92 42 35761234' },
+  ];
+  const feed = document.getElementById('feed');
+  function render(p) {
+    const a = document.createElement('div');
+    a.setAttribute('role', 'article');
+    a.innerHTML = `<h3><a href="${p.authorUrl}">${p.author}</a></h3>
+      ${p.post ? `<a class="ts" href="${p.post}">2h</a>` : ''}
+      <div data-ad-preview="message"><span>${p.text}</span>${p.more ? `<span class="more-text">${p.more}<a href="https://l.facebook.com/l.php?u=${encodeURIComponent(p.wa)}&h=AT0">${p.wa}</a></span><div role="button" class="see-more">See more</div>` : ''}</div>
+      ${p.comment ? `<div role="article" class="comment"><span>${p.comment}</span></div>` : ''}`;
+    const btn = a.querySelector('.see-more');
+    if (btn) btn.addEventListener('click', () => { a.querySelector('.more-text').style.display = 'inline'; btn.remove(); });
+    feed.appendChild(a);
+  }
+  POSTS.forEach(render);
+  let loaded = false;
+  window.addEventListener('scroll', () => {
+    if (loaded || window.scrollY + window.innerHeight < document.body.scrollHeight - 50) return;
+    loaded = true;
+    setTimeout(() => {
+      LATER.forEach(render);
+      const end = document.createElement('div');
+      end.textContent = 'End of results';
+      document.body.appendChild(end);
+    }, 100);
+  });
+</script>
+</body>
+</html>
