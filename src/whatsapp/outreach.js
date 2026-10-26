@@ -101,7 +101,7 @@ class Outreach extends EventEmitter {
   // details(contact) -> { business } (the lead's business name);
   // hasReplied(phone, sinceMs) -> bool (safety net for missed reply events);
   // canSend() -> Promise<bool> (subscription).
-  // leads() -> LeadStore.listLeads() rows (for category campaigns);
+  // leads(filter) -> LeadStore.listLeads(filter) rows (for category campaigns);
   // nameFor(lead) -> the name to use for a lead added automatically.
   constructor({ store, state, transport, details = () => ({}), hasReplied = () => false, canSend = async () => true, clock = () => Date.now(), random = Math.random, zoneOf = timeZoneOf, tickMs = 30_000, leads = () => [], nameFor = (lead) => extractName(lead.name) }) {
     super();
@@ -218,7 +218,7 @@ class Outreach extends EventEmitter {
     if (!st?.category) return 0;
     if (!force && now - (this.syncedAt.get(id) || 0) < SYNC_EVERY) return 0;
     this.syncedAt.set(id, now);
-    const leads = this.leads();
+    const leads = this.leads({ category: st.category });
     const { eligible } = eligibleContacts({ leads, store: this.store, campaign: st, filters: { categories: [st.category] } });
     // Oldest leads first (the order they were collected in).
     const when = new Map(leads.map((l) => [l.id, l.discoveredAt || '']));

@@ -43,7 +43,7 @@ function world({ file } = {}) {
       clock: () => clock.t,
       random: () => 0.5, // 60 s between a lead's messages, 52.5 min between leads
       tickMs: 1e9,
-      leads: () => db.listLeads({}),
+      leads: (filter = {}) => db.listLeads(filter),
     });
   const o = make();
   const cats = { garments: db.ensureCategory('Garments'), restaurants: db.ensureCategory('Restaurants') };

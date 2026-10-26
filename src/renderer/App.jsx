@@ -12,6 +12,8 @@ import { currentTheme, setTheme } from './theme.js';
 import Plans, { statusLine } from './Plans.jsx';
 import { ChangePin } from './LockScreen.jsx';
 
+const ROWS_PER_PAGE = 500;
+
 const api = window.leadFinder;
 
 const ACTIVE = new Set(['connecting', 'running', 'paused', 'stopping']);
@@ -379,6 +381,9 @@ export default function App({ onLock }) {
   const filterRef = useRef(filter);
   filterRef.current = filter;
   const viewKey = JSON.stringify(filter);
+  // Long lists are drawn in pages so thousands of rows don't stall the window.
+  const [shown, setShown] = useState(ROWS_PER_PAGE);
+  useEffect(() => setShown(ROWS_PER_PAGE), [viewKey]);
 
   const loadCategories = useCallback(() => api.listCategories().then(setCatData).catch(() => {}), []);
 
@@ -855,7 +860,7 @@ export default function App({ onLock }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {leads.map((l) => (
+                    {leads.slice(0, shown).map((l) => (
                       <LeadRow
                         key={l.placeKey}
                         lead={l}
@@ -872,7 +877,18 @@ export default function App({ onLock }) {
                     ))}
                   </tbody>
                 </table>
-              ) : loading ? (
+              ) : null}
+              {leads.length > shown && (
+                <div className="table-more">
+                  <span>
+                    Showing {shown.toLocaleString()} of {leads.length.toLocaleString()} leads
+                  </span>
+                  <button type="button" className="btn btn-ghost" onClick={() => setShown((n) => n + ROWS_PER_PAGE)}>
+                    Show {Math.min(ROWS_PER_PAGE, leads.length - shown).toLocaleString()} more
+                  </button>
+                </div>
+              )}
+              {leads.length > 0 ? null : loading ? (
                 <div className="skeleton" aria-label="Loading leads">
                   {Array.from({ length: 6 }, (_, i) => (
                     <div key={i} className="skeleton-row" style={{ animationDelay: `${i * 60}ms` }}>

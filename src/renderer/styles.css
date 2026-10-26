@@ -388,6 +388,7 @@ input[type='checkbox']:checked::after {
 .table-wrap { position: relative; flex: 1; min-height: 0; overflow: auto; }
 .table-wrap.is-loading .view { opacity: 0.55; transition: opacity var(--med); }
 .view { animation: fade var(--med) var(--ease); min-height: 100%; }
+.table-more { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 14px 16px; color: var(--muted); font-size: 13px; }
 
 table { width: 100%; min-width: 960px; border-collapse: separate; border-spacing: 0; }
 th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }

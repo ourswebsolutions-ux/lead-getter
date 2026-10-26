@@ -510,7 +510,7 @@ function initChatsAndOutreach(cipher) {
     hasReplied: (phone, since) => Boolean(since) && chatStore.hasIncomingSince(jidOfPhone(phone), since),
     canSend: async () => (await license.status()).allowed,
     // Category campaigns fill their queues from the saved leads.
-    leads: () => store.listLeads({}),
+    leads: (filter = {}) => store.listLeads(filter),
     nameFor: (lead) => require('../whatsapp/templates').pickName({ contactName: chatStore.chat(jidOfPhone(lead.phone))?.name, businessName: lead.name }).name,
   });
   chats.on('update', (u) => send('chats:update', u));
