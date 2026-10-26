@@ -26,7 +26,11 @@ const WAITING = {
   quiet_hours: 'Outside sending hours for the remaining contacts',
   not_started: 'Waiting for the start date',
   nothing_due: 'Nothing due right now',
+  other_campaign: 'Waiting: another campaign is messaging a lead',
+  completed: 'Completed: every eligible lead has been messaged. New leads are added automatically.',
+  retry_later: 'Waiting to retry failed messages',
 };
+const DISPLAY = { off: 'OFF', running: 'Running', paused: 'Paused', completed: 'Completed' };
 const PAUSED = {
   user: 'Paused',
   restricted: 'Paused: WhatsApp refused messages (possible restriction). Check your account before resuming.',
@@ -278,17 +282,35 @@ function Acknowledge({ onCancel, onConfirm }) {
   );
 }
 
-function CampaignList({ overview, selected, onSelect, checked, setChecked, onCreate, onBulk }) {
+// One row per lead category with its ON/OFF switch; campaigns made before
+// category campaigns existed are listed below as "Other campaigns".
+function CategoryCampaigns({ overview, cats, selected, onSelect, onToggle, toggling, checked, setChecked, onBulk }) {
+  const rows = [...(cats?.categories || []).map((c) => ({ key: String(c.id), name: c.name })), ...(cats?.uncategorized > 0 ? [{ key: 'none', name: 'Uncategorized' }] : [])];
+  const byCategory = new Map(overview.campaigns.filter((c) => c.category).map((c) => [c.category, c]));
+  const others = overview.campaigns.filter((c) => !c.category);
   const all = overview.campaigns;
   const allOn = all.length > 0 && all.every((c) => checked.has(c.id));
+  const check = (id) => (
+    <input
+      type="checkbox"
+      checked={checked.has(id)}
+      aria-label={`Select ${all.find((c) => c.id === id)?.name}`}
+      onChange={(e) =>
+        setChecked((s) => {
+          const n = new Set(s);
+          if (e.target.checked) n.add(id);
+          else n.delete(id);
+          return n;
+        })
+      }
+    />
+  );
   return (
     <div className="panel campaign-list">
       <div className="templates-head">
-        <h3>Campaigns</h3>
-        <button type="button" className="btn" onClick={onCreate}>
-          <Icon name="send" /> New campaign
-        </button>
+        <h3>Category campaigns</h3>
       </div>
+      <p className="muted small">Switch a category ON: its leads confirmed on WhatsApp that were never messaged are queued and messaged one by one. New leads join automatically.</p>
       {all.length > 0 && (
         <div className="bulk-bar">
           <label className="check">
@@ -303,36 +325,58 @@ function CampaignList({ overview, selected, onSelect, checked, setChecked, onCre
           </button>
         </div>
       )}
-      {!all.length ? (
-        <p className="muted">No campaigns yet. Create one to start.</p>
-      ) : (
-        <ul className="campaign-items" aria-label="Campaigns">
-          {all.map((c) => (
-            <li key={c.id} className={selected === c.id ? 'on' : ''}>
-              <input
-                type="checkbox"
-                checked={checked.has(c.id)}
-                aria-label={`Select ${c.name}`}
-                onChange={(e) =>
-                  setChecked((s) => {
-                    const n = new Set(s);
-                    if (e.target.checked) n.add(c.id);
-                    else n.delete(c.id);
-                    return n;
-                  })
-                }
-              />
-              <button type="button" className="campaign-item" onClick={() => onSelect(c.id)} aria-current={selected === c.id}>
-                <span className="campaign-item-name">{c.name}</span>
+      {!rows.length && <p className="muted">No lead categories yet. Search for leads with a category first.</p>}
+      <ul className="campaign-items" aria-label="Category campaigns">
+        {rows.map((r) => {
+          const c = byCategory.get(r.key);
+          const st = overview.categories?.[r.key] || { seen: 0, unseenVerified: 0, unseenNotVerified: 0 };
+          const on = Boolean(c && c.status !== 'stopped');
+          const display = c ? c.display : 'off';
+          return (
+            <li key={r.key} className={c && selected === c.id ? 'on' : ''}>
+              {c ? check(c.id) : <span className="check-spacer" />}
+              <button type="button" className="campaign-item" onClick={() => onSelect(r.key, c)} aria-current={Boolean(c && selected === c.id)}>
+                <span className="campaign-item-name">{r.name}</span>
                 <span className="muted small">
-                  {c.contacts} contact{c.contacts === 1 ? '' : 's'} · {c.counts.done || 0} done · {c.counts.replied || 0} replied
+                  {st.unseenVerified} ready · {st.seen} seen{st.unseenNotVerified ? ` · ${st.unseenNotVerified} not on WhatsApp / not checked` : ''}
                 </span>
               </button>
-              <span className={`chip ${c.test ? 'chip-soft' : 'chip-live'}`}>{c.test ? 'Test' : 'Live'}</span>
-              <span className={`chip st-campaign st-${c.status}`}>{c.status === 'running' ? 'Running' : c.status === 'paused' ? 'Paused' : 'Stopped'}</span>
+              {c && <span className={`chip ${c.test ? 'chip-soft' : 'chip-live'}`}>{c.test ? 'Test' : 'Live'}</span>}
+              <span className={`chip st-campaign st-${display}`}>{DISPLAY[display]}</span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={on}
+                aria-label={`${r.name} campaign`}
+                className={`switch ${on ? 'on' : ''}`}
+                disabled={toggling === r.key}
+                onClick={() => onToggle(r.key, !on)}
+              >
+                <span className="switch-knob" />
+              </button>
             </li>
-          ))}
-        </ul>
+          );
+        })}
+      </ul>
+      {others.length > 0 && (
+        <>
+          <h4 className="campaign-sub">Other campaigns</h4>
+          <ul className="campaign-items" aria-label="Other campaigns">
+            {others.map((c) => (
+              <li key={c.id} className={selected === c.id ? 'on' : ''}>
+                {check(c.id)}
+                <button type="button" className="campaign-item" onClick={() => onSelect(null, c)} aria-current={selected === c.id}>
+                  <span className="campaign-item-name">{c.name}</span>
+                  <span className="muted small">
+                    {c.contacts} contact{c.contacts === 1 ? '' : 's'} · chosen by hand
+                  </span>
+                </button>
+                <span className={`chip ${c.test ? 'chip-soft' : 'chip-live'}`}>{c.test ? 'Test' : 'Live'}</span>
+                <span className={`chip st-campaign st-${c.display}`}>{DISPLAY[c.display]}</span>
+              </li>
+            ))}
+          </ul>
+        </>
       )}
     </div>
   );
@@ -407,7 +451,9 @@ export default function OutreachView({ wa, notify, hidden }) {
   const [previewPhone, setPreviewPhone] = useState('');
   const [preview, setPreview] = useState(null);
   const [picker, setPicker] = useState(false);
-  const [ack, setAck] = useState(false);
+  const [ack, setAck] = useState(null); // null | { category } | { campaign: true }
+  const [cats, setCats] = useState(null);
+  const [toggling, setToggling] = useState(null);
   const [confirm, setConfirm] = useState(null); // { kind, ids }
   const [busy, setBusy] = useState(false);
 
@@ -419,6 +465,7 @@ export default function OutreachView({ wa, notify, hidden }) {
     setChecked((s) => new Set([...s].filter((id) => r.campaigns.some((c) => c.id === id))));
     setSelected((cur) => (r.campaigns.some((c) => c.id === cur) ? cur : r.campaigns[0]?.id ?? null));
     api.outreachHistory().then((h) => h.ok && setHistory(h.history));
+    api.listCategories().then(setCats).catch(() => {});
   }, []);
 
   const loadSnap = useCallback(async (id) => {
@@ -498,7 +545,7 @@ export default function OutreachView({ wa, notify, hidden }) {
     setBusy(true);
     try {
       const r = await fn();
-      if (!r.ok && r.needsAcknowledgement) setAck(true);
+      if (!r.ok && r.needsAcknowledgement) setAck({ campaign: true });
       else if (!r.ok) notify({ type: 'error', text: r.error });
       await loadOverview();
       await loadSnap(selected);
@@ -513,12 +560,33 @@ export default function OutreachView({ wa, notify, hidden }) {
     await act(() => api.outreachStart(snap.id, acknowledge));
   }
 
-  async function create() {
-    const r = await api.outreachCreate('');
-    if (r.ok) {
+  async function selectCategory(key, campaign) {
+    if (campaign) return setSelected(campaign.id);
+    const r = await api.outreachCategoryCampaign(key);
+    if (!r.ok) return notify({ type: 'error', text: r.error });
+    await loadOverview();
+    setSelected(r.id);
+  }
+
+  // The category switch: ON fills the queue and starts sending; OFF stops
+  // scheduling (a message already being sent finishes).
+  async function toggleCategory(key, on, acknowledge = false) {
+    setToggling(key);
+    try {
+      const r = await api.outreachSetCategory(key, on, acknowledge);
+      if (!r.ok && r.needsAcknowledgement) {
+        setAck({ category: key });
+        return;
+      }
+      if (!r.ok) notify({ type: 'error', text: r.error });
       await loadOverview();
-      setSelected(r.id);
-    } else notify({ type: 'error', text: r.error });
+      if (r.id) {
+        setSelected(r.id);
+        await loadSnap(r.id);
+      }
+    } finally {
+      setToggling(null);
+    }
   }
 
   async function bulk(kind) {
@@ -558,7 +626,17 @@ export default function OutreachView({ wa, notify, hidden }) {
   return (
     <section className="outreach" hidden={hidden} aria-label="Real-estate outreach">
       <div className="outreach-col">
-        <CampaignList overview={overview} selected={selected} onSelect={setSelected} checked={checked} setChecked={setChecked} onCreate={create} onBulk={(kind) => setConfirm({ kind, ids: [...checked] })} />
+        <CategoryCampaigns
+          overview={overview}
+          cats={cats}
+          selected={selected}
+          onSelect={selectCategory}
+          onToggle={toggleCategory}
+          toggling={toggling}
+          checked={checked}
+          setChecked={setChecked}
+          onBulk={(kind) => setConfirm({ kind, ids: [...checked] })}
+        />
 
         {snap && draft && (
           <>
@@ -595,12 +673,26 @@ export default function OutreachView({ wa, notify, hidden }) {
                 </div>
               </dl>
               <div className="campaign-controls">
-                {!running && !paused && (
+                {snap.category && (
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={running || paused}
+                    aria-label={`${snap.name} campaign switch`}
+                    className={`switch ${running || paused ? 'on' : ''}`}
+                    disabled={toggling === snap.category}
+                    onClick={() => toggleCategory(snap.category, !(running || paused))}
+                  >
+                    <span className="switch-knob" />
+                  </button>
+                )}
+                {snap.category && <span className="muted small">{running || paused ? 'ON' : 'OFF'}: {DISPLAY[snap.display]}</span>}
+                {!snap.category && !running && !paused && (
                   <button type="button" className="btn btn-primary" disabled={busy || !contacts.length} onClick={() => start()}>
                     <Icon name="play" /> Start
                   </button>
                 )}
-                {running && (
+                {!snap.category && running && (
                   <button type="button" className="btn" disabled={busy} onClick={() => act(() => api.outreachPause(snap.id))}>
                     <Icon name="pause" /> Pause
                   </button>
@@ -610,7 +702,7 @@ export default function OutreachView({ wa, notify, hidden }) {
                     <Icon name="play" /> Resume
                   </button>
                 )}
-                {(running || paused) && (
+                {!snap.category && (running || paused) && (
                   <button type="button" className="btn" disabled={busy} onClick={() => act(() => api.outreachStop(snap.id))}>
                     <Icon name="stop" /> Stop
                   </button>
@@ -736,13 +828,16 @@ export default function OutreachView({ wa, notify, hidden }) {
           <>
             <div className="panel campaign-contacts">
               <div className="templates-head">
-                <h3>Contacts in {snap.name}</h3>
-                <button type="button" className="btn" onClick={() => setPicker(true)}>
-                  <Icon name="users" /> Add verified leads
-                </button>
+                <h3>Queue: {snap.name}</h3>
+                {!snap.category && (
+                  <button type="button" className="btn" onClick={() => setPicker(true)}>
+                    <Icon name="users" /> Add verified leads
+                  </button>
+                )}
               </div>
+              {snap.category && <p className="muted small">Filled automatically with {snap.name} leads confirmed on WhatsApp that were never messaged (Unseen), oldest first.</p>}
               {!contacts.length ? (
-                <p className="muted">No contacts yet. Add leads whose numbers were confirmed on WhatsApp.</p>
+                <p className="muted">{snap.category ? 'Nobody in the queue yet. Switch the campaign ON, or wait for leads to be confirmed on WhatsApp.' : 'No contacts yet. Add leads whose numbers were confirmed on WhatsApp.'}</p>
               ) : (
                 <div className="table-scroll">
                   <table className="mini-table">
@@ -775,7 +870,7 @@ export default function OutreachView({ wa, notify, hidden }) {
                           <td className="progress-cell">
                             <Stage n={c.stage} />
                             <span className={`chip st-chip st-${c.state}`} title={c.note || ''}>
-                              {STATE_LABEL[c.state] || c.state}
+                              {c.state === 'failed' && c.retryAt ? 'Failed: retrying' : STATE_LABEL[c.state] || c.state}
                             </span>
                           </td>
                           <td className="row-actions">
@@ -853,10 +948,12 @@ export default function OutreachView({ wa, notify, hidden }) {
       {picker && snap && <LeadPicker campaign={snap} onClose={() => setPicker(false)} onAdded={() => (loadOverview(), loadSnap(snap.id))} notify={notify} />}
       {ack && (
         <Acknowledge
-          onCancel={() => setAck(false)}
+          onCancel={() => setAck(null)}
           onConfirm={() => {
-            setAck(false);
-            start(true);
+            const pending = ack;
+            setAck(null);
+            if (pending.category) toggleCategory(pending.category, true, true);
+            else start(true);
           }}
         />
       )}

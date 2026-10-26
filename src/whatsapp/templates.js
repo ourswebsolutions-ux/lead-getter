@@ -74,8 +74,9 @@ function pickName({ contactName, pushName, businessName } = {}) {
   return { name: null, source: null };
 }
 
+// {business_name} is another spelling of {business}.
 function usedPlaceholders(text) {
-  return [...String(text).matchAll(/\{(\w+)\}/g)].map((m) => m[1]);
+  return [...String(text).matchAll(/\{(\w+)\}/g)].map((m) => (m[1] === 'business_name' ? 'business' : m[1]));
 }
 
 // Problems with a set of three templates (empty list = fine).
@@ -89,7 +90,7 @@ function validateTemplates(list) {
     if (!text) errors.push(`${n} is empty.`);
     if (text.length > 1000 || fallback.length > 1000) errors.push(`${n} is too long (1000 characters maximum).`);
     for (const p of [...usedPlaceholders(text), ...usedPlaceholders(fallback)]) {
-      if (!PLACEHOLDERS.includes(p)) errors.push(`${n} uses an unknown placeholder {${p}}. Use {name} or {business}.`);
+      if (!PLACEHOLDERS.includes(p)) errors.push(`${n} uses an unknown placeholder {${p}}. Use {name} or {business} ({business_name}).`);
     }
     for (const p of PLACEHOLDERS) {
       const what = p === 'name' ? 'a known name' : 'a business name';
@@ -103,7 +104,7 @@ function validateTemplates(list) {
 // The text to send for one stage. When a placeholder has no value, the
 // fallback is used (or the text with that part left out if it has none).
 function render(template, { name = null, business = null } = {}) {
-  const values = { name, business };
+  const values = { name, business, business_name: business };
   const text = String(template.text || '');
   const missing = usedPlaceholders(text).some((p) => !values[p]);
   const chosen = missing ? String(template.fallback || '').trim() || null : text;

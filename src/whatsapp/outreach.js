@@ -24,7 +24,8 @@
 //     rules on automated messages. Test runs send nothing.
 
 const { EventEmitter } = require('node:events');
-const { DEFAULT_TEMPLATES, render, validateTemplates, isOptOut, cleanBusiness } = require('./templates');
+const { DEFAULT_TEMPLATES, render, validateTemplates, isOptOut, cleanBusiness, extractName } = require('./templates');
+const { eligibleContacts, isVerified } = require('./eligibility');
 
 const LIMITS = { intervalMin: 45, intervalMax: 60, capMin: 10, capMax: 15 };
 const DEFAULT_CONFIG = {
@@ -42,6 +43,11 @@ const DEFAULT_CONFIG = {
 };
 const MIN = 60_000;
 const STAGE_GAP = 60_000; // between one contact's messages (55-65 s)
+const SYNC_EVERY = 60_000; // category campaigns look for new eligible leads
+// Definite failures are retried automatically: 3 attempts in all, the
+// second after an hour, the third after six hours. Uncertain sends never.
+const MAX_ATTEMPTS = 3;
+const RETRY_AFTER = [60 * 60_000, 6 * 60 * 60_000];
 const ACK_KEY = 'outreach.ack';
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -95,9 +101,12 @@ class Outreach extends EventEmitter {
   // details(contact) -> { business } (the lead's business name);
   // hasReplied(phone, sinceMs) -> bool (safety net for missed reply events);
   // canSend() -> Promise<bool> (subscription).
-  constructor({ store, state, transport, details = () => ({}), hasReplied = () => false, canSend = async () => true, clock = () => Date.now(), random = Math.random, zoneOf = timeZoneOf, tickMs = 30_000 }) {
+  // leads() -> LeadStore.listLeads() rows (for category campaigns);
+  // nameFor(lead) -> the name to use for a lead added automatically.
+  constructor({ store, state, transport, details = () => ({}), hasReplied = () => false, canSend = async () => true, clock = () => Date.now(), random = Math.random, zoneOf = timeZoneOf, tickMs = 30_000, leads = () => [], nameFor = (lead) => extractName(lead.name) }) {
     super();
-    Object.assign(this, { store, state, transport, details, hasReplied, canSend, clock, random, zoneOf, tickMs });
+    Object.assign(this, { store, state, transport, details, hasReplied, canSend, clock, random, zoneOf, tickMs, leads, nameFor });
+    this.syncedAt = new Map(); // campaign id -> last queue sync
     this.busy = false;
     this.timer = null;
     this.waiting = new Map(); // campaign id -> reason
@@ -175,6 +184,70 @@ class Outreach extends EventEmitter {
     };
   }
 
+  // --- category campaigns ------------------------------------------------------
+  //
+  // One campaign per lead category ('<category id>' or 'none'). Switched ON,
+  // it fills its own queue with the category's eligible leads (confirmed on
+  // WhatsApp, never messaged by any campaign, not opted out) and keeps
+  // adding new ones as they are found and verified.
+
+  categoryCampaign(category, name) {
+    const key = String(category);
+    const found = this.store.campaignForCategory(key);
+    if (found) return found.id;
+    const id = this.store.createCampaign(String(name || 'Category campaign').slice(0, 60), { ...DEFAULT_CONFIG }, this.clock(), key);
+    this.emit('change', { id });
+    return id;
+  }
+
+  setCategoryEnabled(category, name, on, opts = {}) {
+    const id = this.categoryCampaign(category, name);
+    if (!on) {
+      // Stops scheduling; a message already being sent finishes and is recorded.
+      const r = this.stop(id);
+      this.waiting.delete(id);
+      return { ...r, id };
+    }
+    this.syncQueue(id, this.clock(), true);
+    return { ...this.start(id, opts), id };
+  }
+
+  // Adds the category's new eligible leads to the campaign's queue.
+  syncQueue(id, now = this.clock(), force = false) {
+    const st = this.load(id);
+    if (!st?.category) return 0;
+    if (!force && now - (this.syncedAt.get(id) || 0) < SYNC_EVERY) return 0;
+    this.syncedAt.set(id, now);
+    const leads = this.leads();
+    const { eligible } = eligibleContacts({ leads, store: this.store, campaign: st, filters: { categories: [st.category] } });
+    // Oldest leads first (the order they were collected in).
+    const when = new Map(leads.map((l) => [l.id, l.discoveredAt || '']));
+    const list = eligible
+      .filter((l) => !l.inCampaign)
+      .sort((a, b) => String(when.get(a.id)).localeCompare(String(when.get(b.id))) || a.id - b.id)
+      .map((l) => ({ phone: l.phone, leadId: l.id, name: this.nameFor(l) }));
+    if (!list.length) return 0;
+    const r = this.store.addContacts(id, list, { allowPrevious: st.config.allowPrevious }, now);
+    if (r.added) this.emit('change', { id });
+    return r.added;
+  }
+
+  // Leads of each category: Seen (a campaign message was sent), Unseen and
+  // confirmed on WhatsApp (can be messaged), Unseen and not (yet) confirmed.
+  categoryStats() {
+    const out = {};
+    for (const l of this.leads()) {
+      const key = l.categoryId == null ? 'none' : String(l.categoryId);
+      const s = (out[key] ||= { leads: 0, seen: 0, unseenVerified: 0, unseenNotVerified: 0, optedOut: 0 });
+      s.leads++;
+      if (l.campaign === 'seen') s.seen++;
+      else if (l.phone && this.store.isOptedOut(l.phone)) s.optedOut++;
+      else if (isVerified(l)) s.unseenVerified++;
+      else s.unseenNotVerified++;
+    }
+    return out;
+  }
+
   // --- configuration ---------------------------------------------------------
 
   static checkConfig(c) {
@@ -230,9 +303,9 @@ class Outreach extends EventEmitter {
     const st = this.load(id);
     const errors = Outreach.checkConfig(st.config);
     if (errors.length) return { ok: false, error: errors.join(' ') };
-    const other = this.store.campaigns().find((c) => c.id !== id && c.status === 'running');
-    if (other) return { ok: false, error: `“${other.name}” is running. Only one campaign runs at a time: pause it first.` };
-    if (!this.store.contacts(id).some((c) => ['queued', 'active'].includes(c.state))) return { ok: false, error: 'Add verified leads to the campaign first.' };
+    // Several campaigns may be on; the scheduler still sends to one contact
+    // at a time with the gap between contacts shared by all of them.
+    if (!st.category && !this.store.contacts(id).some((c) => ['queued', 'active'].includes(c.state))) return { ok: false, error: 'Add verified leads to the campaign first.' };
     if (!st.config.test && !this.acknowledged() && !acknowledge) return { ok: false, error: 'Confirm that you accept WhatsApp’s rules on automated messages before sending for real.', needsAcknowledgement: true };
     if (!st.config.test && !this.acknowledged()) this.state.set(ACK_KEY, this.clock());
     st.status = 'running';
@@ -306,7 +379,7 @@ class Outreach extends EventEmitter {
     if (!c || !['excluded', 'failed', 'uncertain', 'replied', 'skipped'].includes(c.state)) return { ok: false, error: 'This contact can’t be resumed.' };
     if (this.store.isOptedOut(phone)) return { ok: false, error: 'This contact asked not to be messaged.' };
     if (c.stage === 0 && !this.load(id).config.allowPrevious && this.store.wasContacted(phone, id)) return { ok: false, error: 'Already contacted in another campaign. Allow previously contacted contacts in this campaign’s settings to message them again.' };
-    this.store.setContact(id, phone, { state: c.stage === 0 ? 'queued' : c.stage >= 3 ? 'done' : 'active', note: null }, this.clock());
+    this.store.setContact(id, phone, { state: c.stage === 0 ? 'queued' : c.stage >= 3 ? 'done' : 'active', note: null, attempts: 0, retryAt: null }, this.clock());
     this.emit('change', { id });
     return { ok: true };
   }
@@ -418,9 +491,10 @@ class Outreach extends EventEmitter {
     const contacts = this.store.contacts(st.id);
     const resumed = contacts.filter((c) => c.state === 'active' && c.stage >= 1 && c.stage < 3).sort((a, b) => a.lastSentAt - b.lastSentAt);
     const fresh = contacts.filter((c) => c.state === 'queued' && c.stage === 0);
+    const retries = contacts.filter((c) => c.state === 'failed' && c.attempts < MAX_ATTEMPTS && c.retryAt && c.retryAt <= now && c.stage < 3);
     let quietSeen = false;
     let capped = false;
-    for (const c of [...resumed, ...fresh]) {
+    for (const c of [...resumed, ...retries, ...fresh]) {
       if (this.store.isOptedOut(c.phone)) continue;
       if (quiet(c)) {
         quietSeen = true;
@@ -432,7 +506,8 @@ class Outreach extends EventEmitter {
       }
       return { contact: c, stage: c.stage + 1, day };
     }
-    if (!resumed.length && !fresh.length) return { reason: 'done' };
+    const waitingRetry = contacts.some((c) => c.state === 'failed' && c.attempts < MAX_ATTEMPTS && c.retryAt && c.stage < 3);
+    if (!resumed.length && !fresh.length && !retries.length) return { reason: waitingRetry ? 'retry_later' : 'done' };
     return { reason: capped ? 'daily_cap' : quietSeen ? 'quiet_hours' : 'nothing_due' };
   }
 
@@ -441,47 +516,88 @@ class Outreach extends EventEmitter {
     this.busy = true;
     try {
       const running = this.store.campaigns().filter((c) => c.status === 'running');
-      for (const c of running.slice(1)) this.pause(c.id, 'user'); // never two at once (e.g. an old database)
       if (!running.length) return;
-      const st = this.load(running[0].id);
-      const id = st.id;
-      const test = st.config.test;
       const now = this.clock();
       const today = dayOf(now);
-      if (st.config.endDate && today > st.config.endDate) {
-        st.status = 'stopped';
-        st.pauseReason = 'ended';
-        this.save(st);
-        return this.setWaiting(id, null);
-      }
-      if (st.config.startDate && today < st.config.startDate) return this.setWaiting(id, 'not_started');
-      if (st.current && !this.current(st)) {
-        // The contact in progress left the sequence early (reply, opt-out,
-        // exclusion): the next contact waits the full gap after their last
-        // message.
-        const ended = this.store.contact(id, st.current);
-        st.current = null;
-        st.nextDueAt = Math.max(st.nextDueAt || 0, (ended?.lastSentAt || now) + this.contactGap(st.config));
-        this.save(st);
-      }
-      if (st.nextDueAt && now < st.nextDueAt) return this.setWaiting(id, st.current ? 'next_message' : 'interval');
-      if (!test && !this.transport.ready()) return this.setWaiting(id, 'whatsapp');
-      // Asked only when a message is due (it is a licence-server request).
-      if (!test && !(await this.canSend())) return this.setWaiting(id, 'subscription');
-      const pick = this.next(now, st);
-      if (!pick.contact) {
-        if (pick.reason === 'done') {
+      for (const c of running) if (c.category) this.syncQueue(c.id, now);
+      const active = [];
+      for (const r of running) {
+        const st = this.load(r.id);
+        if (st.config.endDate && today > st.config.endDate) {
           st.status = 'stopped';
-          st.pauseReason = 'finished';
+          st.pauseReason = 'ended';
           this.save(st);
+          this.setWaiting(st.id, null);
+          continue;
         }
-        return this.setWaiting(id, pick.reason);
+        if (st.config.startDate && today < st.config.startDate) {
+          this.setWaiting(st.id, 'not_started');
+          continue;
+        }
+        if (st.current && !this.current(st)) {
+          // The contact in progress left the sequence early (reply, opt-out,
+          // exclusion): the next contact waits the full gap after their last
+          // message.
+          const ended = this.store.contact(st.id, st.current);
+          st.current = null;
+          st.nextDueAt = Math.max(st.nextDueAt || 0, (ended?.lastSentAt || now) + this.contactGap(st.config));
+          this.save(st);
+          this.spaceOthers(st);
+        }
+        active.push(st);
       }
-      await this.sendOne(pick, st);
+      // One contact at a time across all campaigns: a contact in progress
+      // is finished first; otherwise the campaign that has waited longest.
+      const inProgress = active.filter((st) => this.current(st));
+      const order = inProgress.length ? inProgress.slice(0, 1) : active.sort((x, y) => (x.nextDueAt || 0) - (y.nextDueAt || 0) || x.id - y.id);
+      if (inProgress.length) for (const st of active) if (st.id !== inProgress[0].id) this.setWaiting(st.id, 'other_campaign');
+      for (const st of order) {
+        const id = st.id;
+        const test = st.config.test;
+        if (st.nextDueAt && now < st.nextDueAt) {
+          this.setWaiting(id, st.current ? 'next_message' : 'interval');
+          continue;
+        }
+        if (!test && !this.transport.ready()) {
+          this.setWaiting(id, 'whatsapp');
+          continue;
+        }
+        // Asked only when a message is due (it is a licence-server request).
+        if (!test && !(await this.canSend())) {
+          this.setWaiting(id, 'subscription');
+          continue;
+        }
+        const pick = this.next(now, st);
+        if (!pick.contact) {
+          if (pick.reason === 'done' && !st.category) {
+            st.status = 'stopped';
+            st.pauseReason = 'finished';
+            this.save(st);
+          }
+          // A category campaign stays on and waits for new leads.
+          this.setWaiting(id, pick.reason === 'done' ? 'completed' : pick.reason);
+          continue;
+        }
+        await this.sendOne(pick, st);
+        break; // one message per tick
+      }
     } catch (err) {
       this.emit('error', err);
     } finally {
       this.busy = false;
+    }
+  }
+
+  // The gap before the next contact applies to every campaign that is on
+  // (same mode), so several campaigns never send faster than one.
+  spaceOthers(st) {
+    if (!st.nextDueAt) return;
+    for (const c of this.store.campaigns()) {
+      if (c.id === st.id || c.status !== 'running' || c.current) continue;
+      const o = this.load(c.id);
+      if (Boolean(o.config.test) !== Boolean(st.config.test) || (o.nextDueAt || 0) >= st.nextDueAt) continue;
+      o.nextDueAt = st.nextDueAt;
+      this.store.saveCampaign(o, this.clock());
     }
   }
 
@@ -494,8 +610,21 @@ class Outreach extends EventEmitter {
     } else {
       st.current = null;
       st.nextDueAt = at + this.contactGap(st.config);
+      this.spaceOthers(st);
     }
     this.waiting.set(st.id, stage < 3 ? 'next_message' : 'interval'); // shown at once, not at the next tick
+  }
+
+  // A send takes time; the user may have switched the campaign off (or
+  // deleted it) meanwhile. Its status from the database wins.
+  keepLatestStatus(st) {
+    const latest = this.load(st.id);
+    if (!latest) return false;
+    if (latest.status !== 'running') {
+      st.status = latest.status;
+      st.pauseReason = latest.pauseReason;
+    }
+    return true;
   }
 
   async sendOne({ contact, stage, day }, st) {
@@ -529,15 +658,17 @@ class Outreach extends EventEmitter {
     st.current = null;
     st.nextDueAt = now + this.contactGap(cfg);
     this.save(st);
+    this.spaceOthers(st);
     const text = render(cfg.templates[stage - 1], this.values(contact));
     try {
       const res = cfg.test ? { id: `TEST-${sendId}` } : await this.transport.send(contact.phone, text);
       const at = this.clock();
       this.store.markSent(sendId, res.id, at);
-      this.store.setContact(id, contact.phone, { stage, state: stage >= 3 ? 'done' : 'active', lastSentAt: at, note: null }, at);
+      this.store.setContact(id, contact.phone, { stage, state: stage >= 3 ? 'done' : 'active', lastSentAt: at, note: null, attempts: 0, retryAt: null }, at);
       st.failures = 0;
+      const exists = this.keepLatestStatus(st);
       this.scheduleAfter(st, contact.phone, stage, at);
-      this.save(st);
+      if (exists) this.save(st);
       this.emit('sent', { campaignId: id, phone: contact.phone, stage, text, waId: res.id, test: cfg.test, at });
     } catch (err) {
       const msg = errorText(err);
@@ -546,17 +677,22 @@ class Outreach extends EventEmitter {
         this.store.release(sendId);
         st.nextDueAt = now;
         if (stage > 1) st.current = contact.phone; // still this contact's turn
-        this.save(st);
+        if (this.keepLatestStatus(st)) this.save(st);
         return this.setWaiting(id, 'whatsapp');
       }
       if (isTimeout(err)) {
         this.store.markFailed(sendId, `${msg} (it may still have been delivered)`, 'unknown');
         this.store.setContact(id, contact.phone, { state: 'uncertain', note: 'Sending timed out; check the chat before continuing.' }, now);
       } else {
+        // A definite failure: nothing was delivered. The lead stays Unseen
+        // and is retried later (same reservation, so never twice).
         this.store.markFailed(sendId, msg);
-        this.store.setContact(id, contact.phone, { state: 'failed', note: msg }, now);
+        const attempts = (contact.attempts || 0) + 1;
+        const retryAt = attempts < MAX_ATTEMPTS ? now + RETRY_AFTER[attempts - 1] : null;
+        this.store.setContact(id, contact.phone, { state: 'failed', note: retryAt ? `${msg} (attempt ${attempts} of ${MAX_ATTEMPTS}; retried automatically)` : `${msg} (${MAX_ATTEMPTS} attempts; use Retry)`, attempts, retryAt }, now);
       }
       st.failures = (st.failures || 0) + 1;
+      if (!this.keepLatestStatus(st)) return;
       if (isRestriction(err)) {
         st.status = 'paused';
         st.pauseReason = 'restricted';
@@ -586,7 +722,13 @@ class Outreach extends EventEmitter {
   summary(c) {
     const contacts = this.store.contacts(c.id);
     const counts = contacts.reduce((m, x) => ((m[x.state] = (m[x.state] || 0) + 1), m), {});
-    return { id: c.id, name: c.name, status: c.status, pauseReason: c.pauseReason, test: Boolean({ ...DEFAULT_CONFIG, ...c.config }.test), contacts: contacts.length, counts, waiting: c.status === 'running' ? this.waiting.get(c.id) || null : null };
+    const now = this.clock();
+    const work = contacts.some((x) => ['queued', 'active'].includes(x.state) || (x.state === 'failed' && x.attempts < MAX_ATTEMPTS && x.retryAt && x.stage < 3));
+    const waiting = c.status === 'running' ? this.waiting.get(c.id) || null : null;
+    // OFF / Paused / Running / Completed (on, everything sent; new leads
+    // are still picked up).
+    const display = c.status === 'stopped' ? 'off' : c.status === 'paused' ? 'paused' : !work && c.category ? 'completed' : 'running';
+    return { id: c.id, name: c.name, category: c.category, status: c.status, display, pauseReason: c.pauseReason, test: Boolean({ ...DEFAULT_CONFIG, ...c.config }.test), contacts: contacts.length, counts, waiting, retriesDue: contacts.filter((x) => x.state === 'failed' && x.retryAt && x.retryAt <= now).length };
   }
 
   overview() {
@@ -594,6 +736,7 @@ class Outreach extends EventEmitter {
     const day = dayOf(now);
     return {
       campaigns: this.store.campaigns().map((c) => this.summary(c)),
+      categories: this.categoryStats(),
       acknowledged: this.acknowledged(),
       limits: LIMITS,
       today: { day, recipients: this.store.recipientsOn(day, false), testRecipients: this.store.recipientsOn(day, true) },
@@ -608,6 +751,8 @@ class Outreach extends EventEmitter {
     return {
       id: st.id,
       name: st.name,
+      category: st.category,
+      display: this.summary(st).display,
       status: st.status,
       pauseReason: st.pauseReason,
       waiting: st.status === 'running' ? this.waiting.get(id) || null : null,
@@ -623,4 +768,4 @@ class Outreach extends EventEmitter {
   }
 }
 
-module.exports = { Outreach, DEFAULT_CONFIG, LIMITS, STAGE_GAP, timeZoneOf, inQuietHours, hourIn, dayOf, isRestriction };
+module.exports = { Outreach, DEFAULT_CONFIG, LIMITS, STAGE_GAP, MAX_ATTEMPTS, RETRY_AFTER, timeZoneOf, inQuietHours, hourIn, dayOf, isRestriction };

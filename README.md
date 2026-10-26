@@ -243,12 +243,23 @@ What WhatsApp makes available, and what it doesn't:
 
 **Outreach** sends a three-message introduction to leads whose numbers the automatic check confirmed on WhatsApp.
 
-- **Campaigns:** create as many campaigns as you like. Each has its own name, messages, timing, daily limit, sending hours, optional start and end dates, and contact queue.
+- **Category campaigns:** the Outreach tab lists your lead categories (Garments, Real Estate…), each with an **ON/OFF switch**.
+  - Switching a category ON queues its eligible leads automatically: numbers confirmed on WhatsApp, never messaged by a campaign (**Unseen**), not opted out. They are messaged one by one, oldest first, with the usual three messages and timing.
+  - While it's ON, new leads in that category join the queue by themselves once the WhatsApp check confirms their number. There's nothing to select by hand.
+  - Switching OFF stops scheduling straight away. A message already being sent finishes and is recorded. Switching ON again continues where it left off, and nobody gets a message twice.
+  - **Status per category:** **OFF**, **Running**, **Paused** (for example after WhatsApp refused messages) or **Completed** (everyone eligible has been messaged; it stays ON and picks up new leads).
+  - Several categories can be ON at once. They still message **one lead at a time**, with the 45–60 minute gap and the daily limit shared by all of them.
+- **Seen / Unseen in the Leads tab:** a lead is **Seen** once a campaign message to its number was sent. Its delivery state (sent, delivered, read) is in the tooltip. Otherwise it's **Unseen**, including when a send failed.
+  - The **Campaign** filter (All leads, Seen, Unseen) works with the existing category, website, WhatsApp and date filters. A **search** box finds leads by name, business name or phone number.
+- **Failed sends:** a send that definitely failed leaves the lead Unseen and is retried automatically: after 1 hour, then 6 hours, 3 attempts in all. After that, use **Retry**. A send that timed out or was interrupted is never retried automatically, because it may have arrived. The retry reuses the original send record, so it can't produce a duplicate.
+- **Placeholders:** `{business_name}` works the same as `{business}`.
+- **Earlier campaigns:** campaigns where you chose leads by hand appear under *Other campaigns*.
+- **Campaign settings:** each campaign has its own name, messages, timing, daily limit, sending hours, optional start and end dates, and contact queue.
   - **Bulk actions:** select campaigns with the checkboxes (or **Select all**), then **Delete selected** or **Reset selected**. Both ask for confirmation.
   - **Delete** removes the campaign, its queue and its settings.
   - **Reset** stops the campaign and clears its queue and progress but keeps its settings.
   - Neither touches your leads, your app settings, other campaigns or the contact history.
-  - **One campaign runs at a time.** The daily limit and the gap between contacts count across all campaigns.
+  - **One message at a time:** several campaigns can be on, but they never send at once. The daily limit and the gap between contacts count across all campaigns.
 - **Choosing contacts** (*Add verified leads*):
   - **Filters:** one or several categories, the date the lead was collected (from/to, or a single day) and search. All filters work together.
   - **Verified only:** only numbers the automatic WhatsApp check confirmed (green dot). Unchecked, unavailable, failed or manually marked numbers can never be selected, and a number's format is never taken as proof.

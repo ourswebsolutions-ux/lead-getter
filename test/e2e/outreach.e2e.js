@@ -110,65 +110,64 @@ test('WhatsApp chats and outreach: history, live messages, campaign, replies, re
   assert.equal(await win.getByRole('tab', { name: 'Past leads' }).getAttribute('aria-selected'), 'true');
   await ws.getByRole('button', { name: 'Outreach' }).click();
 
-  // --- Outreach: only verified leads can be added; names are safe.
+  // --- Outreach: one campaign per lead category, with an ON/OFF switch.
   const out = win.locator('.outreach');
-  await out.getByText('No campaigns yet').waitFor();
-  await out.getByRole('button', { name: 'New campaign' }).click();
-  await out.getByRole('heading', { name: 'Campaign 1', exact: true }).waitFor();
-  const cid = (await win.evaluate(() => window.leadFinder.outreachOverview())).campaigns[0].id;
+  const catRow = (name) => out.getByRole('list', { name: 'Category campaigns' }).getByRole('listitem').filter({ hasText: name });
+  await catRow('Real Estate').waitFor();
+  assert.match(await catRow('Real Estate').innerText(), /2 ready · 0 seen · 1 not on WhatsApp/);
+  assert.match(await catRow('Real Estate').innerText(), /OFF/);
+  const sw = () => catRow('Real Estate').getByRole('switch', { name: 'Real Estate campaign' });
+  assert.equal(await sw().getAttribute('aria-checked'), 'false');
+  // Its settings (while OFF): no leads to pick by hand; limits are enforced.
+  await catRow('Real Estate').locator('.campaign-item').click();
+  await out.getByRole('heading', { name: 'Real Estate', exact: true }).waitFor();
+  const cid = (await win.evaluate(() => window.leadFinder.outreachOverview())).campaigns.find((c) => c.category).id;
   const stateOf = (id) => win.evaluate((i) => window.leadFinder.outreachState(i), id);
-  await out.getByRole('button', { name: 'Add verified leads' }).click();
-  const picker = win.getByRole('dialog', { name: 'Add verified leads' });
-  await picker.waitFor();
-  await win.waitForFunction(() => /verified contacts? eligible/.test(document.querySelector('.picker-count')?.textContent || ''));
-  const names = await picker.locator('.picker-name').allInnerTexts();
-  assert.deepEqual(names.sort(), ['Best Realty', 'Zahid Properties'], 'only WhatsApp-confirmed numbers');
-  await picker.getByRole('button', { name: /Select all/ }).click();
-  assert.match(await picker.locator('.picker-count').innerText(), /2 verified contacts eligible/);
-  assert.equal(await picker.locator('.picker-list .wa-dot').count(), 2, 'green verified indicator');
-  await picker.getByRole('button', { name: 'Add 2 contacts' }).click();
-  await picker.waitFor({ state: 'detached' });
-  const rows = out.locator('.campaign-contacts tbody tr');
-  await win.waitForFunction(() => document.querySelectorAll('.campaign-contacts tbody tr').length === 2);
-  // Zahid's own WhatsApp name (from his message) or the business word; Best Realty has no safe name.
-  const nameOf = async (phone) => rows.filter({ hasText: phone }).locator('input.name-edit').inputValue();
-  assert.equal(await nameOf('+923001234567'), 'Zahid');
-  assert.equal(await nameOf('+923007654321'), '');
-  // Previews per contact, with the no-name version.
-  await out.getByLabel('Preview for contact').selectOption('+923007654321');
-  await win.waitForFunction(() => document.querySelector('.template-preview')?.textContent.includes('Assalam-o-Alaikum.'));
-  await out.getByLabel('Preview for contact').selectOption('+923001234567');
-  await win.waitForFunction(() => document.querySelector('.template-preview')?.textContent.includes('Assalam-o-Alaikum Zahid bhai.'));
-  await win.waitForFunction(() => document.querySelectorAll('.template-preview')[2]?.textContent.includes('Kya aap Zahid Properties ke naam se real estate'));
-  // Limits are enforced.
+  assert.equal(await out.getByRole('button', { name: 'Add verified leads' }).count(), 0, 'no manual selection');
   await out.getByLabel('Daily limit').fill('20');
   await out.getByRole('button', { name: 'Save settings' }).click();
   await win.locator('.toast.error').filter({ hasText: /between 10 and 15/ }).waitFor();
   await out.getByLabel('Daily limit').fill('12');
-  // Quiet hours (recipient time, Pakistan) placed away from the current hour,
-  // so the test can send whenever it runs.
+  // Sending hours (recipient time, Pakistan) placed away from the current
+  // hour, so the test can send whenever it runs.
   const pkHour = (new Date().getUTCHours() + 5) % 24;
   await out.getByLabel('Sending hours from').selectOption(String((pkHour + 10) % 24));
   await out.getByLabel('Sending hours to').selectOption(String((pkHour + 6) % 24));
   await out.getByRole('button', { name: 'Save settings' }).click();
   await win.locator('.toast').filter({ hasText: 'Campaign settings saved.' }).waitFor();
 
-  // --- Test run: the schedule runs, nothing reaches WhatsApp.
-  // A contact's messages go about a minute apart.
-  await out.getByRole('button', { name: 'Start' }).click();
+  // --- Switch ON (test run): the queue fills by itself; messages go out one
+  // by one (simulated); a lead's messages about a minute apart.
+  await sw().click();
+  await win.waitForFunction(() => document.querySelectorAll('.campaign-contacts tbody tr').length === 2, null, { timeout: 15_000 });
+  const rows = out.locator('.campaign-contacts tbody tr');
+  const nameOf = async (phone) => rows.filter({ hasText: phone }).locator('input.name-edit').inputValue();
+  assert.equal(await nameOf('+923001234567'), 'Zahid');
+  assert.equal(await nameOf('+923007654321'), '');
+  assert.equal(await sw().getAttribute('aria-checked'), 'true');
   await win.waitForFunction(() => document.querySelectorAll('.campaign-sent tbody tr').length === 1, null, { timeout: 15_000 });
   assert.match(await out.locator('.campaign-sent').innerText(), /test run[\s\S]*1 of 3[\s\S]*Sent/i);
   assert.match(await out.locator('.campaign-status').innerText(), /Next message to the same contact in about a minute/);
+  assert.match(await catRow('Real Estate').innerText(), /Running/);
   await win.waitForFunction(() => document.querySelectorAll('.campaign-sent tbody tr').length === 2, null, { timeout: 120_000 });
   const sim = (await stateOf(cid)).sends;
   const simGap = (sim[0].sentAt - sim[1].sentAt) / 1000;
   assert.ok(simGap >= 55 && simGap <= 100, `test run: message 2 ${simGap}s after message 1`);
-  assert.equal(sim[0].phone, sim[1].phone, 'the same contact');
-  assert.equal(sends(log).length, 1, 'only the manual chat reply so far');
-  await out.getByRole('button', { name: 'Stop' }).click();
+  assert.equal(sim[0].phone, sim[1].phone, 'the same lead');
+  assert.equal(sends(log).length, 1, 'nothing reached WhatsApp (only the manual chat reply)');
+  // OFF: scheduling stops.
+  await sw().click();
+  await win.waitForFunction(() => document.querySelector('.campaign-list [role=switch]')?.getAttribute('aria-checked') === 'false');
+  assert.match(await catRow('Real Estate').innerText(), /OFF/);
+  // Previews per lead: names, the no-name version, the business name.
+  await out.getByLabel('Preview for contact').selectOption('+923007654321');
+  await win.waitForFunction(() => document.querySelector('.template-preview')?.textContent.includes('Assalam-o-Alaikum.'));
+  await out.getByLabel('Preview for contact').selectOption('+923001234567');
+  await win.waitForFunction(() => document.querySelector('.template-preview')?.textContent.includes('Assalam-o-Alaikum Zahid bhai.'));
+  await win.waitForFunction(() => document.querySelectorAll('.template-preview')[2]?.textContent.includes('Kya aap Zahid Properties ke naam se real estate'));
 
-  // --- Live: asks for confirmation, then sends message 1 to one contact.
-  // Best Realty is excluded first (per-contact exclusion).
+  // --- Live: asks for confirmation, then message 1 to one lead.
+  // Best Realty is excluded first (per-lead exclusion).
   await rows.filter({ hasText: '+923007654321' }).getByRole('button', { name: 'Exclude' }).click();
   await rows.filter({ hasText: '+923007654321' }).locator('.st-chip').filter({ hasText: 'Excluded' }).waitFor();
   await out.getByRole('button', { name: 'Live' }).click();
@@ -176,7 +175,7 @@ test('WhatsApp chats and outreach: history, live messages, campaign, replies, re
   await win.locator('.toast').filter({ hasText: 'Campaign settings saved.' }).last().waitFor();
   assert.equal(await out.locator('.campaign-sent tbody tr').count(), 0, 'the simulation was cleared');
   await win.waitForFunction(() => document.querySelectorAll('.campaign-contacts .stage-dots span.on').length === 0);
-  await out.getByRole('button', { name: 'Start' }).click();
+  await sw().click();
   const ack = win.getByRole('dialog', { name: 'Start live outreach' });
   await ack.waitFor();
   assert.ok(await ack.getByRole('button', { name: 'Start sending' }).isDisabled());
@@ -191,9 +190,28 @@ test('WhatsApp chats and outreach: history, live messages, campaign, replies, re
   assert.match(facts, /Test Account/);
   const firstState = await stateOf(cid);
   const soon = (firstState.nextDueAt - live[0].at) / 1000;
-  assert.ok(soon >= 55 && soon <= 66, `message 2 to the same contact due ${soon}s later`);
+  assert.ok(soon >= 55 && soon <= 66, `message 2 to the same lead due ${soon}s later`);
   assert.equal(firstState.current, '+923001234567');
   if (shots) await win.screenshot({ path: path.join(shots, 'outreach.png') });
+
+  // --- Leads tab: Zahid is now Seen; filters and search.
+  await ws.getByRole('button', { name: 'Leads' }).click();
+  await win.getByRole('tab', { name: 'Today' }).click();
+  const leadNames = () => win.locator('main.content table tbody tr td.name').allInnerTexts();
+  const campaignFilter = win.getByLabel('Show campaign status');
+  await campaignFilter.selectOption('seen');
+  await win.waitForFunction(() => [...document.querySelectorAll('main.content table tbody tr td.name')].map((t) => t.textContent).join('|') === 'Zahid Properties');
+  assert.match(await win.locator('main.content table tbody tr').first().innerText(), /Seen/);
+  await campaignFilter.selectOption('unseen');
+  await win.waitForFunction(() => document.querySelectorAll('main.content table tbody tr td.name').length === 2);
+  assert.deepEqual((await leadNames()).sort(), ['Best Realty', 'Grey Estate']);
+  await win.getByLabel('Search leads').fill('best');
+  await win.waitForFunction(() => [...document.querySelectorAll('main.content table tbody tr td.name')].map((t) => t.textContent).join('|') === 'Best Realty');
+  await win.getByLabel('Search leads').fill('');
+  await campaignFilter.selectOption('all');
+  await win.waitForFunction(() => document.querySelectorAll('main.content table tbody tr td.name').length === 3);
+  if (shots) await win.screenshot({ path: path.join(shots, 'leads-seen.png') });
+  await ws.getByRole('button', { name: 'Outreach' }).click();
 
   // --- A reply stops the sequence for that contact.
   await app.evaluate(() => globalThis.__fakeWA.incoming('923001234567', 'Walaikum assalam, kaun?', 'Zahid'));
@@ -227,39 +245,24 @@ test('WhatsApp chats and outreach: history, live messages, campaign, replies, re
   assert.equal(sends(log).length, 2, 'nothing sent again after the restart');
   assert.ok(!sends(log).some((x) => x.jid === '923007654321@s.whatsapp.net'), 'the excluded contact was never messaged');
 
-  // --- Acceptance: Zahid (messaged by Campaign 1) is not eligible for
-  // Campaign 2 and appears only under "Previously contacted"; deleting
-  // Campaign 1 changes nothing.
+  // --- Delete the campaign: Zahid stays Seen and never re-enters a queue,
+  // even when the category is switched ON again (a new campaign).
   const out2 = win.locator('.outreach');
-  await out2.getByRole('button', { name: 'New campaign' }).click();
-  await out2.getByRole('heading', { name: 'Campaign 2', exact: true }).waitFor();
-  const checkCampaign2 = async (expectCampaignName) => {
-    await out2.getByRole('button', { name: 'Add verified leads' }).click();
-    const p2 = win.getByRole('dialog', { name: 'Add verified leads' });
-    await p2.waitFor();
-    await win.waitForFunction(() => /verified contacts? eligible/.test(document.querySelector('.picker-count')?.textContent || ''));
-    assert.deepEqual(await p2.getByRole('list', { name: 'Eligible contacts' }).locator('.picker-name').allInnerTexts(), ['Best Realty']);
-    assert.match(await p2.locator('.picker-count').innerText(), /1 verified contact eligible[\s\S]*1 contacted before/);
-    await p2.getByRole('button', { name: /Previously contacted \(1\)/ }).click();
-    const prev = p2.getByRole('list', { name: 'Previously contacted' });
-    assert.match(await prev.innerText(), /Zahid Properties[\s\S]*\+923001234567[\s\S]*(Sent|Delivered|Read)/);
-    assert.match(await prev.innerText(), new RegExp(expectCampaignName));
-    assert.ok(await prev.getByRole('checkbox').isDisabled(), 'not selectable without the override');
-    await p2.getByRole('button', { name: 'Cancel' }).click();
-    await p2.waitFor({ state: 'detached' });
-    assert.match(await out2.getByRole('table', { name: 'Previously contacted' }).innerText(), /Zahid Properties[\s\S]*\+923001234567/);
-  };
-  await checkCampaign2('Campaign 1');
-  // Delete Campaign 1 (checkbox, bulk action, confirmation).
-  await out2.getByRole('checkbox', { name: 'Select Campaign 1' }).check();
+  const row2 = () => out2.getByRole('list', { name: 'Category campaigns' }).getByRole('listitem').filter({ hasText: 'Real Estate' });
+  await out2.getByRole('checkbox', { name: 'Select Real Estate' }).check();
   await out2.getByRole('button', { name: 'Delete selected' }).click();
   const confirmDlg = win.getByRole('alertdialog', { name: 'Delete campaigns?' });
   await confirmDlg.waitFor();
-  assert.match(await confirmDlg.innerText(), /Campaign 1[\s\S]*Previously contacted/);
+  assert.match(await confirmDlg.innerText(), /Real Estate[\s\S]*Previously contacted/);
   await confirmDlg.getByRole('button', { name: 'Delete 1' }).click();
   await win.locator('.toast').filter({ hasText: '1 campaign deleted.' }).waitFor();
-  assert.deepEqual((await win.evaluate(() => window.leadFinder.outreachOverview())).campaigns.map((c) => c.name), ['Campaign 2']);
-  await checkCampaign2('Campaign 1');
+  await win.waitForFunction(() => /1 ready · 1 seen/.test(document.querySelector('.campaign-list')?.textContent || ''));
+  assert.match(await row2().innerText(), /OFF/);
+  await row2().getByRole('switch').click(); // test run by default
+  await win.waitForFunction(() => document.querySelectorAll('.campaign-contacts tbody tr').length === 1, null, { timeout: 15_000 });
+  assert.match(await out2.locator('.campaign-contacts tbody tr').innerText(), /\+923007654321/, 'only Best Realty; Zahid (Seen) is not queued again');
+  assert.match(await out2.getByRole('table', { name: 'Previously contacted' }).innerText(), /Zahid Properties[\s\S]*\+923001234567/);
+  await row2().getByRole('switch').click();
   if (shots) await win.screenshot({ path: path.join(shots, 'campaigns.png') });
   assert.equal(sends(log).length, 2, 'still nothing more sent');
   assert.deepEqual(errors, []);

@@ -142,6 +142,24 @@ class LeadStore {
     this.migrateV3();
     this.migrateV4();
     this.migrateV5();
+    this.migrateV6();
+  }
+
+  // Version 6: category campaigns (a campaign can follow one lead category
+  // and fill its own queue) and automatic retries of failed sends.
+  migrateV6() {
+    if (this.db.prepare('PRAGMA user_version').get().user_version >= 6) return;
+    this.transaction(() => {
+      // Columns are only added if missing, so a partly upgraded database
+      // still upgrades cleanly.
+      const has = (table, col) => this.db.prepare(`SELECT 1 FROM pragma_table_info('${table}') WHERE name = ?`).get(col);
+      if (!has('outreach_campaigns', 'category')) this.db.exec('ALTER TABLE outreach_campaigns ADD COLUMN category TEXT');
+      if (!has('outreach_contacts', 'attempts')) this.db.exec('ALTER TABLE outreach_contacts ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0');
+      if (!has('outreach_contacts', 'retry_at')) this.db.exec('ALTER TABLE outreach_contacts ADD COLUMN retry_at INTEGER');
+      this.db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS outreach_campaigns_category ON outreach_campaigns (category) WHERE category IS NOT NULL;
+        PRAGMA user_version = 6;`);
+    });
   }
 
   // Version 5: several outreach campaigns. The existing campaign (settings,
@@ -488,6 +506,22 @@ class LeadStore {
     }
     if (filter.website === 'without') clauses.push("b.website_status IN ('no_website', 'social_only')");
     else if (filter.website === 'with') clauses.push("b.website_status IN ('has_website', 'possible_website')");
+    // Campaign status: Seen = a campaign message to this number was sent
+    // (WhatsApp accepted it: sent, delivered or read). Everything else,
+    // including failed or uncertain sends, is Unseen.
+    if (filter.campaign === 'seen' || filter.campaign === 'unseen') {
+      clauses.push(`${filter.campaign === 'unseen' ? 'NOT ' : ''}EXISTS (SELECT 1 FROM outreach_sends s
+        WHERE s.phone = b.phone AND s.test = 0 AND s.status IN ('sent', 'delivered', 'read'))`);
+    }
+    // Search: business name, or (by digits) the phone number.
+    const q = typeof filter.search === 'string' ? filter.search.trim().slice(0, 100) : '';
+    if (q) {
+      const like = (v) => `%${v.replace(/[\\%_]/g, '\\$&')}%`;
+      const digits = q.replace(/\D/g, '');
+      clauses.push(`(b.name LIKE ? ESCAPE '\\'${digits.length >= 3 ? " OR b.phone LIKE ? ESCAPE '\\' OR b.phone_raw LIKE ? ESCAPE '\\'" : ''})`);
+      params.push(like(q));
+      if (digits.length >= 3) params.push(like(digits), like(digits));
+    }
     // Only numbers WhatsApp itself confirmed (not earlier manual marks).
     if (filter.whatsapp === 'available') {
       clauses.push(`b.phone_status = 'valid' AND EXISTS (SELECT 1 FROM whatsapp_checks w2
@@ -728,10 +762,16 @@ function toLead(row) {
     category: row.category_name || '',
     discoveredAt: row.discovered_at,
     discoveredDate: row.discovered_date || localDate(row.discovered_at),
+    // Campaign status: 'seen' once a campaign message was sent to this
+    // number; campaignDelivery is the best receipt (sent/delivered/read).
+    campaign: row.camp_rank > 0 ? 'seen' : 'unseen',
+    campaignDelivery: ['', 'sent', 'delivered', 'read'][row.camp_rank || 0] || null,
   };
 }
 
-const LEAD_SELECT = `SELECT b.*, c.name AS category_name, w.status AS wa_status, w.checked_at AS wa_checked_at, w.method AS wa_method, w.detail AS wa_detail
+const LEAD_SELECT = `SELECT b.*, c.name AS category_name, w.status AS wa_status, w.checked_at AS wa_checked_at, w.method AS wa_method, w.detail AS wa_detail,
+    (SELECT MAX(CASE s.status WHEN 'read' THEN 3 WHEN 'delivered' THEN 2 WHEN 'sent' THEN 1 ELSE 0 END)
+       FROM outreach_sends s WHERE s.phone = b.phone AND s.test = 0) AS camp_rank
   FROM businesses b
   LEFT JOIN categories c ON c.id = b.category_id
   LEFT JOIN whatsapp_checks w ON w.phone = b.phone AND b.phone_status = 'valid'`;

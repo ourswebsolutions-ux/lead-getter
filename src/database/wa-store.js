@@ -179,9 +179,16 @@ class OutreachStore {
 
   // --- campaigns ---------------------------------------------------------------
 
-  createCampaign(name, config, now = Date.now()) {
-    const r = this.db.prepare('INSERT INTO outreach_campaigns (name, config, created_at, updated_at) VALUES (?, ?, ?, ?)').run(name, JSON.stringify(config), now, now);
+  // category: a lead category id (as text) or 'none' for uncategorized
+  // leads; at most one campaign per category.
+  createCampaign(name, config, now = Date.now(), category = null) {
+    const r = this.db.prepare('INSERT INTO outreach_campaigns (name, config, category, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run(name, JSON.stringify(config), category, now, now);
     return Number(r.lastInsertRowid);
+  }
+
+  campaignForCategory(category) {
+    const r = this.db.prepare('SELECT * FROM outreach_campaigns WHERE category = ?').get(String(category));
+    return r ? toCampaign(r) : null;
   }
 
   campaign(id) {
@@ -323,7 +330,7 @@ class OutreachStore {
   setContact(campaignId, phone, fields, now = Date.now()) {
     const cols = Object.keys(fields);
     if (!cols.length) return;
-    const map = { state: 'state', name: 'name', stage: 'stage', lastSentAt: 'last_sent_at', note: 'note' };
+    const map = { state: 'state', name: 'name', stage: 'stage', lastSentAt: 'last_sent_at', note: 'note', attempts: 'attempts', retryAt: 'retry_at' };
     const set = cols.map((k) => `${map[k]} = ?`).join(', ');
     this.db.prepare(`UPDATE outreach_contacts SET ${set}, updated_at = ? WHERE campaign_id = ? AND phone = ?`).run(...cols.map((k) => fields[k]), now, campaignId, phone);
   }
@@ -445,11 +452,11 @@ function toCampaign(r) {
   try {
     config = JSON.parse(r.config);
   } catch {}
-  return { id: r.id, name: r.name, config, status: r.status, pauseReason: r.pause_reason, nextDueAt: r.next_due_at, current: r.current_phone, failures: r.failures, createdAt: r.created_at, updatedAt: r.updated_at };
+  return { id: r.id, name: r.name, category: r.category ?? null, config, status: r.status, pauseReason: r.pause_reason, nextDueAt: r.next_due_at, current: r.current_phone, failures: r.failures, createdAt: r.created_at, updatedAt: r.updated_at };
 }
 
 function toContact(r) {
-  return { campaignId: r.campaign_id, phone: r.phone, leadId: r.lead_id, name: r.name, stage: r.stage, state: r.state, lastSentAt: r.last_sent_at, addedAt: r.added_at, updatedAt: r.updated_at, note: r.note };
+  return { campaignId: r.campaign_id, phone: r.phone, leadId: r.lead_id, name: r.name, stage: r.stage, state: r.state, lastSentAt: r.last_sent_at, addedAt: r.added_at, updatedAt: r.updated_at, note: r.note, attempts: r.attempts ?? 0, retryAt: r.retry_at ?? null };
 }
 
 module.exports = { ChatStore, OutreachStore };

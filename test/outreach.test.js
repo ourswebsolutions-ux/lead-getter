@@ -381,7 +381,10 @@ test('failures: timeouts are never retried; restrictions pause the campaign; rep
   await run(e, 4 * 60 * MIN);
   assert.equal(e.c.load().status, 'paused');
   assert.equal(e.c.load().pauseReason, 'errors');
-  assert.equal(e.c.sends({ test: false }).filter((s) => s.status === 'failed').length, 3);
+  // Three failed attempts in a row (a definite failure may be retried on
+  // its own record, so attempts are counted, not records).
+  assert.equal(e.c.contacts().reduce((n, c) => n + (c.attempts || 0), 0), 3);
+  assert.ok(e.c.sends({ test: false }).every((s) => s.status === 'failed'));
 });
 
 test('interrupted sends are marked unknown and never resent', async () => {

@@ -227,6 +227,8 @@ function validateFilter(raw) {
   for (const k of ['date', 'from', 'to', 'before']) {
     if (typeof f[k] === 'string' && DATE_RE.test(f[k])) out[k] = f[k];
   }
+  if (f.campaign === 'seen' || f.campaign === 'unseen') out.campaign = f.campaign;
+  if (typeof f.search === 'string' && f.search.trim()) out.search = f.search.trim().slice(0, 100);
   return out;
 }
 
@@ -507,6 +509,9 @@ function initChatsAndOutreach(cipher) {
     details: (c) => ({ business: c.leadId ? store.leadById(c.leadId)?.name || null : null }),
     hasReplied: (phone, since) => Boolean(since) && chatStore.hasIncomingSince(jidOfPhone(phone), since),
     canSend: async () => (await license.status()).allowed,
+    // Category campaigns fill their queues from the saved leads.
+    leads: () => store.listLeads({}),
+    nameFor: (lead) => require('../whatsapp/templates').pickName({ contactName: chatStore.chat(jidOfPhone(lead.phone))?.name, businessName: lead.name }).name,
   });
   chats.on('update', (u) => send('chats:update', u));
   chats.on('incoming', (m) => outreach.onIncoming({ phone: m.phone, text: m.text }));
@@ -559,6 +564,32 @@ async function outreachAddLeads(id, ids) {
   }
   if (!list.length) return { ok: false, error: 'None of these leads can be added: only numbers confirmed on WhatsApp that weren’t contacted before (or opted out) can be added.' };
   return outreach.addLeads(id, list);
+}
+
+// A lead category as a campaign key: '<id>' or 'none' (uncategorized).
+function categoryKey(raw) {
+  if (raw === 'none') return { key: 'none', name: 'Uncategorized' };
+  const id = Number(raw);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  const cat = store.listCategories().categories.find((c) => c.id === id);
+  return cat ? { key: String(id), name: cat.name } : null;
+}
+
+// The ON/OFF switch of a category campaign. ON in live mode needs an active
+// subscription (and, once, the user's acknowledgement), like Start.
+async function outreachSetCategory(raw, on, opts) {
+  if (!outreach) return unavailable();
+  const cat = categoryKey(raw);
+  if (!cat) return { ok: false, error: 'That category no longer exists.' };
+  if (on) {
+    const existing = outreach.store.campaignForCategory(cat.key);
+    const test = existing ? outreach.load(existing.id).config.test : true;
+    if (!test) {
+      const sub = await requireSubscription();
+      if (!sub.ok) return sub;
+    }
+  }
+  return outreach.setCategoryEnabled(cat.key, cat.name, Boolean(on), { acknowledge: Boolean(opts && opts.acknowledge === true) });
 }
 
 async function outreachStart(id, opts) {
@@ -895,6 +926,12 @@ app.whenReady().then(() => {
     return fn(cid, ...args);
   };
   handle('outreach:overview', () => (outreach ? { ok: true, ...outreach.overview() } : unavailable()));
+  handle('outreach:categoryCampaign', (raw) => {
+    if (!outreach) return unavailable();
+    const cat = categoryKey(raw);
+    return cat ? { ok: true, id: outreach.categoryCampaign(cat.key, cat.name) } : { ok: false, error: 'That category no longer exists.' };
+  });
+  handle('outreach:setCategory', (raw, on, opts) => outreachSetCategory(raw, on, opts));
   handle('outreach:create', (name) => (outreach ? outreach.create(typeof name === 'string' ? name : '') : unavailable()));
   handle('outreach:delete', (ids) => (outreach ? outreach.remove(Array.isArray(ids) ? ids : []) : unavailable()));
   handle('outreach:reset', (ids) => (outreach ? outreach.reset(Array.isArray(ids) ? ids : []) : unavailable()));

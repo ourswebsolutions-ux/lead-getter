@@ -232,7 +232,7 @@ test('retries: a definite failure can be retried once safely; an ambiguous send 
   assert.equal(w.sent.filter((s) => s.phone === w.P.I && s.text.startsWith('Assalam')).length, 0, 'message 1 is never re-sent');
 });
 
-test('one campaign runs at a time; the daily limit counts across campaigns', async () => {
+test('several campaigns may be on; the daily limit counts across all of them', async () => {
   const w = world();
   const c1 = w.o.create('One').id;
   const c2 = w.o.create('Two').id;
@@ -241,7 +241,7 @@ test('one campaign runs at a time; the daily limit counts across campaigns', asy
   w.add(c1, [w.P.A]);
   w.add(c2, [w.P.B]);
   assert.equal(w.o.campaign(c1).start({ acknowledge: true }).ok, true);
-  assert.match(w.o.campaign(c2).start().error, /Only one campaign runs at a time/);
+  assert.equal(w.o.campaign(c2).start().ok, true, 'a second campaign can be on too');
   // Ten recipients already messaged today by other campaigns (simulated).
   for (let i = 0; i < 10; i++) {
     const sid = w.o.store.reserve({ campaignId: c2, phone: `+9230099900${String(i).padStart(2, '0')}`, stage: 1, test: false, day: '2026-10-21', now: START - 5 * 60 * MIN });
@@ -250,6 +250,7 @@ test('one campaign runs at a time; the daily limit counts across campaigns', asy
   await w.run(5 * MIN);
   assert.equal(w.sent.length, 0, 'the cap is shared by all campaigns');
   assert.equal(w.o.campaign(c1).snapshot().waiting, 'daily_cap');
+  assert.equal(w.o.campaign(c2).snapshot().waiting, 'daily_cap');
 });
 
 test('campaign dates: waits before the start date, ends after the end date', async () => {
@@ -308,7 +309,7 @@ test('upgrade from version 4 keeps the existing campaign, its contacts, history 
   db.setState('outreach', { status: 'paused', pauseReason: 'user', nextDueAt: 5000, acknowledgedAt: 123, config: { dailyCap: 14, test: false } });
   db.close();
   const up = new LeadStore(file);
-  assert.equal(up.db.prepare('PRAGMA user_version').get().user_version, 5);
+  assert.equal(up.db.prepare('PRAGMA user_version').get().user_version, 6);
   const store = new OutreachStore(up.db);
   const [c] = store.campaigns();
   assert.equal(c.name, 'Campaign 1');

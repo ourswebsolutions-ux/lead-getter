@@ -201,6 +201,17 @@ const LeadRow = memo(function LeadRow({ lead: l, fresh, selected, pastView, onTo
       </td>
       <td>{websiteChip(l)}</td>
       <td>{l.category ? <span className="cat">{l.category}</span> : <span className="muted">Uncategorized</span>}</td>
+      <td>
+        {l.campaign === 'seen' ? (
+          <span className={`chip camp-seen camp-${l.campaignDelivery}`} title={`Campaign message ${l.campaignDelivery === 'read' ? 'read' : l.campaignDelivery === 'delivered' ? 'delivered' : 'sent'}`}>
+            Seen
+          </span>
+        ) : (
+          <span className="chip camp-unseen" title="No campaign message sent yet">
+            Unseen
+          </span>
+        )}
+      </td>
       <td className="mono date">
         {pastView ? (
           <>
@@ -308,6 +319,9 @@ export default function App({ onLock }) {
   const [websiteFilter, setWebsiteFilter] = useState('without'); // for the next search
   const [siteView, setSiteView] = useState('all'); // table: all | without | with
   const [waOnly, setWaOnly] = useState(false);
+  const [campaignView, setCampaignView] = useState('all'); // all | seen | unseen
+  const [tableSearch, setTableSearch] = useState('');
+  const [searchQuery, setSearchQuery] = useState(''); // debounced
   const [sub, setSub] = useState(null);
   const [plansOpen, setPlansOpen] = useState(null); // null | { notice }
   const [changePin, setChangePin] = useState(false);
@@ -352,6 +366,8 @@ export default function App({ onLock }) {
     const f = { category: catFilter };
     if (siteView !== 'all') f.website = siteView;
     if (waOnly) f.whatsapp = 'available';
+    if (campaignView !== 'all') f.campaign = campaignView;
+    if (searchQuery) f.search = searchQuery;
     if (view === 'today') f.date = today;
     else if (pastMode === 'date' && pastDate) f.date = pastDate;
     else if (pastMode === 'range') {
@@ -359,7 +375,7 @@ export default function App({ onLock }) {
       if (range.to) f.to = range.to;
     } else f.before = today;
     return f;
-  }, [view, today, pastMode, pastDate, range, catFilter, siteView, waOnly]);
+  }, [view, today, pastMode, pastDate, range, catFilter, siteView, waOnly, campaignView, searchQuery]);
   const filterRef = useRef(filter);
   filterRef.current = filter;
   const viewKey = JSON.stringify(filter);
@@ -392,6 +408,26 @@ export default function App({ onLock }) {
     api.listDates({ category: catFilter, before: today }).then(setDates).catch(() => {});
   }, [view, catFilter, today, leads]);
 
+  // Search waits for a short pause in typing.
+  useEffect(() => {
+    const t = setTimeout(() => setSearchQuery(tableSearch.trim()), 250);
+    return () => clearTimeout(t);
+  }, [tableSearch]);
+
+  // A lead becomes Seen when a campaign message to it is sent.
+  useEffect(() => {
+    let t = 0;
+    const off = api.onOutreachEvent((e) => {
+      if (e.type !== 'sent' || e.test) return;
+      clearTimeout(t);
+      t = setTimeout(() => loadLeads(), 400);
+    });
+    return () => {
+      off();
+      clearTimeout(t);
+    };
+  }, [loadLeads]);
+
   useEffect(() => {
     loadCategories();
     api.getStatus().then(setStatus).catch(() => {});
@@ -422,8 +458,10 @@ export default function App({ onLock }) {
       const f = filterRef.current;
       const catOk = f.category === 'all' || (f.category === 'none' ? lead.categoryId == null : lead.categoryId === f.category);
       const siteOk = !f.website || f.website === lead.websiteKind;
+      // A new lead is Unseen; with a search, the table reloads instead.
+      const campOk = !f.campaign || f.campaign === (lead.campaign || 'unseen');
       // New numbers are not checked on WhatsApp yet, so they wait for the check.
-      if (catOk && siteOk && !f.whatsapp && f.date === lead.discoveredDate) {
+      if (catOk && siteOk && campOk && !f.search && !f.whatsapp && f.date === lead.discoveredDate) {
         queue.push(lead);
         if (!frame) frame = requestAnimationFrame(flush);
       }
@@ -720,6 +758,18 @@ export default function App({ onLock }) {
                 <option value="with">With website</option>
               </select>
             </label>
+            <label className="select-wrap">
+              <span>Campaign</span>
+              <select aria-label="Show campaign status" value={campaignView} onChange={(e) => setCampaignView(e.target.value)}>
+                <option value="all">All leads</option>
+                <option value="seen">Seen (message sent)</option>
+                <option value="unseen">Unseen (not messaged)</option>
+              </select>
+            </label>
+            <label className="table-search">
+              <Icon name="search" size={14} />
+              <input type="search" value={tableSearch} placeholder="Name, business or phone" aria-label="Search leads" onChange={(e) => setTableSearch(e.target.value)} />
+            </label>
             <label className="check-wrap" title="Show and export only numbers that WhatsApp confirmed">
               <input type="checkbox" checked={waOnly} onChange={(e) => setWaOnly(e.target.checked)} aria-label="WhatsApp numbers only" />
               <span>WhatsApp only</span>
@@ -797,6 +847,7 @@ export default function App({ onLock }) {
                       <th>Address</th>
                       <th>Website</th>
                       <th>Category</th>
+                      <th>Campaign</th>
                       <th>Discovered</th>
                       <th className="actions-col">
                         <span className="sr-only">Actions</span>

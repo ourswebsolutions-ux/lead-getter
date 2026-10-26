@@ -59,6 +59,8 @@ contextBridge.exposeInMainWorld('leadFinder', {
   onChats: (cb) => subscribe('chats:update', cb),
   // Real-estate outreach campaigns
   outreachOverview: () => ipcRenderer.invoke('outreach:overview'),
+  outreachCategoryCampaign: (category) => ipcRenderer.invoke('outreach:categoryCampaign', String(category ?? '')),
+  outreachSetCategory: (category, on, acknowledge) => ipcRenderer.invoke('outreach:setCategory', String(category ?? ''), on === true, { acknowledge: acknowledge === true }),
   outreachCreate: (name) => ipcRenderer.invoke('outreach:create', String(name ?? '')),
   outreachDelete: (ids) => ipcRenderer.invoke('outreach:delete', Array.isArray(ids) ? ids.map(Number) : []),
   outreachReset: (ids) => ipcRenderer.invoke('outreach:reset', Array.isArray(ids) ? ids.map(Number) : []),
