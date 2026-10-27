@@ -251,7 +251,7 @@ test('upgrading a version 6 database keeps every lead and adds the Facebook fiel
 
 // --- the search flow -------------------------------------------------------------------
 
-const FAST = { listing: [0, 0], scroll: [0, 0], longBreak: [0, 0], afterBlock: 0, blockPoll: 5, netRetries: [1, 1], reconnectDelays: [1], fbScroll: [0, 0], fbBetweenQueries: [0, 0] };
+const FAST = { listing: [0, 0], scroll: [0, 0], longBreak: [0, 0], afterBlock: 0, blockPoll: 5, netRetries: [1, 1], reconnectDelays: [1], fbScroll: [0, 0], fbBetweenQueries: [0, 0], fbLoad: 30, fbStallWait: [0, 0] };
 const tick = () => new Promise((r) => setTimeout(r, 1));
 // Separate pages per worker, as in the app (Maps tabs, Facebook window);
 // every browser call records which page it was made on.
@@ -315,12 +315,16 @@ function mockFacebook({ pagesOfPosts = [], mode = 'list', fail = null, gate = as
       await gate(calls.collect++);
       return pagesOfPosts.slice(0, shown).flat();
     },
-    scrollResults: async (page) => {
-      on(page);
-      shown++;
-      return { end: shown >= pagesOfPosts.length };
-    },
+    // Scrolling reveals the next page of posts; the last page is the end.
+    resultsState: async (page) => (on(page), state()),
+    scrollResults: async (page) => (on(page), shown++, state()),
+    nudge: async (page) => (on(page), shown++, state()),
+    waitForMore: async (page, before) => ({ ...state(), grew: state().count > before.count }),
   };
+  function state() {
+    const posts = pagesOfPosts.slice(0, shown).flat();
+    return { count: posts.length, lastKey: posts.at(-1)?.key || '', height: posts.length, loading: false, end: shown >= pagesOfPosts.length };
+  }
 }
 
 const post = (n, text, extra = {}) => fb.parsePost({ text, author: `Author ${n}`, authorUrl: `https://www.facebook.com/author${n}`, hrefs: [`https://www.facebook.com/author${n}/posts/${n}?__tn__=x`], ...extra });
@@ -396,7 +400,7 @@ test('Facebook Lead Search ON: both sources start together and run side by side'
   assert.deepEqual(all.map((l) => l.phone).sort(), ['+923001111111', '+923001234567', '+923002222222', '+923217654321']);
   assert.ok(!all.some((l) => l.description === 'Need suppliers, budget 25000'), 'no lead without a number');
   assert.equal(on.leads.length, 4, 'each lead reached the table as it was found');
-  assert.deepEqual(stats.facebook, { posts: 3, leads: 2, newLeads: 2 });
+  assert.deepEqual(stats.facebook, { posts: 3, numbers: 2, leads: 2, newLeads: 2 });
   assert.equal(stats.newLeads, 4);
   assert.deepEqual(facebook.calls.openSearch, ['garment shops in Lahore', 'Garments Lahore']);
   // Each worker only touched its own pages.
@@ -407,7 +411,7 @@ test('Facebook Lead Search ON: both sources start together and run side by side'
   assert.equal(last.state, 'done');
   assert.deepEqual([last.workers.maps.state, last.workers.facebook.state], ['completed', 'completed']);
   assert.deepEqual([last.workers.maps.leads, last.workers.facebook.leads], [2, 2]);
-  assert.match(last.message, /^Google Maps: Search finished: no more results\. Facebook: 3 posts read, 2 with a valid number \(2 new leads\)\.$/);
+  assert.match(last.message, /^Google Maps: Search finished: no more results\. Facebook: 3 posts read, 2 valid numbers, 2 new leads\. End of the results for "Garments Lahore"\.$/);
 });
 
 test('the same number found by both sources at the same time is one lead', async () => {

@@ -157,7 +157,9 @@ Pacing is deliberately slow: a few seconds between listings and a longer break e
   - **Independent:** one source failing doesn't stop the other. The search completes when both are done, and counts as failed only if both failed. **Stop Search** stops both.
   - **Chrome recovery:** if Chrome or a tab closes, each worker reopens only its own pages, and a reconnect or Chrome restart runs once for both.
 - **Reading posts:**
-  - It reads the posts in the results, opening Facebook's own *See more* on long posts, and scrolls until Facebook shows no more results, 150 posts per query, or you press **Stop Search**.
+  - It reads the posts on screen (opening Facebook's own *See more* on long posts), then scrolls to the bottom of the results and **waits until Facebook has loaded new posts**, watching for more posts or its loading indicator rather than a fixed delay. Then it reads those and repeats.
+  - It stops at Facebook's *End of results*, after 150 posts per query, when you press **Stop Search**, or when several scrolls in a row load nothing. Each retry nudges the page and waits longer, bringing the Facebook window forward once. The status then says no more posts could be loaded.
+  - Progress shows the posts read, the valid numbers found and the new leads saved.
   - It doesn't open individual posts or pages. The pace is a few seconds per scroll.
   - Posts already saved by an earlier search aren't saved again.
 - **Numbers:**

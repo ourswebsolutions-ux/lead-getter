@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Facebook infinite results (test fixture)</title>
+<style>
+  body { font: 14px sans-serif; margin: 0; }
+  [role="article"] { height: 600px; border-bottom: 1px solid #ccc; padding: 8px; box-sizing: border-box; }
+  #loader { padding: 20px; }
+</style>
+</head>
+<body>
+<!-- Screen-reader text that must not be taken for the end of the results. -->
+<span style="display:none">No more results</span>
+<div role="feed" id="feed"></div>
+<div id="sentinel" style="height: 1px"></div>
+<div id="loader" role="progressbar" hidden>Loading…</div>
+<div id="end" hidden><span>End of results</span></div>
+<script>
+  // Like Facebook's post search: 3 posts at a time; more load only when the
+  // bottom of the list comes into view, after a delay with a loading
+  // indicator. CONFIG: pages in total, stall (stop loading after that many
+  // pages, without an end marker).
+  const CONFIG = window.CONFIG || { pages: 5, stall: 0 };
+  const feed = document.getElementById('feed');
+  const loader = document.getElementById('loader');
+  let page = 0;
+  let loading = false;
+  let done = false;
+  function renderPage() {
+    for (let i = 0; i < 3; i++) {
+      const n = page * 3 + i;
+      const a = document.createElement('div');
+      a.setAttribute('role', 'article');
+      // Every third post has no number.
+      const text = n % 3 === 2 ? `Garment stock available, message us (post ${n})` : `Wholesale garments, call 0300 ${String(1000000 + n)} (post ${n})`;
+      a.innerHTML = `<h3><a href="/seller${n}">Seller ${n}</a></h3><a href="/seller${n}/posts/${n}?__cft__=x">1h</a><div data-ad-preview="message">${text}</div>`;
+      feed.appendChild(a);
+    }
+    page++;
+  }
+  function loadMore() {
+    if (loading || done) return;
+    if (CONFIG.stall && page >= CONFIG.stall) return;
+    loading = true;
+    loader.hidden = false;
+    setTimeout(() => {
+      loader.hidden = true;
+      renderPage();
+      loading = false;
+      if (page >= CONFIG.pages) {
+        done = true;
+        document.getElementById('end').hidden = false;
+      }
+    }, 1200);
+  }
+  renderPage();
+  new IntersectionObserver((entries) => entries.some((e) => e.isIntersecting) && loadMore()).observe(document.getElementById('sentinel'));
+</script>
+</body>
+</html>
