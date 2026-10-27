@@ -17,6 +17,12 @@ if (!targets) {
   process.exit(1);
 }
 
+// The build's activation settings come from tools/activation/.env when it
+// exists (CI writes them from the ACTIVATION_CONFIG secret instead).
+if (!process.env.CI && require('node:fs').existsSync(path.join(root, 'tools', 'activation', '.env'))) {
+  execFileSync(process.execPath, [path.join(root, 'tools', 'activation', 'setup.js')], { cwd: root, stdio: 'inherit' });
+}
+
 // Without the activation settings no plan could be activated in the build.
 try {
   const c = require('../src/main/activation-secret.json');

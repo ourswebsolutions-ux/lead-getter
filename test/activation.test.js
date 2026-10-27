@@ -13,7 +13,7 @@ const { startSmtp } = require('./fake-smtp');
 const MIN = 60_000;
 const DAY = 86_400_000;
 const T0 = Date.parse('2026-11-01T10:00:00Z');
-const config = { secret: crypto.randomBytes(32).toString('base64'), adminEmail: 'admin@example.com', contact: { whatsapp: '923000000000', phone: '+923000000000' } };
+const config = { secret: crypto.randomBytes(32).toString('base64'), adminEmail: 'admin@example.com', smtp: { host: '127.0.0.1', port: 2525, user: 'u', pass: 'p' }, contact: { whatsapp: '923000000000', phone: '+923000000000' } };
 
 // An app on one computer with a clock the test controls, and a mailer that
 // records what it sends (or fails, when mail.fail is set).
@@ -322,4 +322,19 @@ test('real SMTP: delivered to the administrator only; refused login and unreacha
   } finally {
     await server2.close();
   }
+});
+
+test('missing settings are named (as in tools/activation/.env), and requests say which', async () => {
+  const store = new LeadStore(':memory:');
+  const mailer = { send: async () => {} };
+  const none = new Activation({ store, config: {}, mailer: null, machineId: () => 'x' });
+  assert.deepEqual(none.status().missing, ['ADMIN_EMAIL', 'SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'ACTIVATION_SECRET']);
+  const some = new Activation({ store, config: { ...config, smtp: { host: 'smtp.example.com', port: 465, user: 'u' } }, mailer, machineId: () => 'x' });
+  assert.deepEqual(some.status().missing, ['SMTP_PASS']);
+  const r = await some.request('monthly');
+  assert.equal(r.reason, 'unconfigured');
+  assert.match(r.error, /missing SMTP_PASS/);
+  const all = new Activation({ store, config: { ...config, smtp: { host: 'smtp.example.com', port: 465, user: 'u', pass: 'p' } }, mailer, machineId: () => 'x' });
+  assert.equal(all.status().configured, true);
+  assert.deepEqual(all.status().missing, []);
 });

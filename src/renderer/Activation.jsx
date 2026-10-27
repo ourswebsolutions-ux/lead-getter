@@ -198,7 +198,14 @@ export default function Activation({ status: st, notice, onClose, notify }) {
         <div className="sub-stage" key={stage}>
           {stage === 'loading' && <p className="muted">Checking…</p>}
 
-          {stage === 'unconfigured' && <p className="muted">Activation is not set up in this copy of Lead Finder. Please install the latest version.</p>}
+          {stage === 'unconfigured' && (
+            <p className="sub-notice" role="alert">
+              <Icon name="alert" size={14} />
+              <span>
+                Activation can't send codes yet: these settings are missing: <b>{st.missing?.join(', ') || 'email settings'}</b>. Set them in tools/activation/.env (see .env.example) and restart the app. Until then, contact us on WhatsApp{st.contact?.phone ? ` ${st.contact.phone}` : ''}.
+              </span>
+            </p>
+          )}
 
           {stage === 'plan' && (
             <>

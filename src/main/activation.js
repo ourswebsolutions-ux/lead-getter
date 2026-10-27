@@ -103,8 +103,21 @@ class Activation {
     this.busy = null; // 'sending' | 'verifying': one at a time
   }
 
+  // The settings activation needs, by their names in tools/activation/.env.
+  missing() {
+    const smtp = this.config.smtp || {};
+    const out = [];
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(this.config.adminEmail || '')) out.push('ADMIN_EMAIL');
+    if (!smtp.host) out.push('SMTP_HOST');
+    if (!Number(smtp.port)) out.push('SMTP_PORT');
+    if (!smtp.user) out.push('SMTP_USER');
+    if (!smtp.pass) out.push('SMTP_PASS');
+    if (!this.secret) out.push('ACTIVATION_SECRET');
+    return out;
+  }
+
   get configured() {
-    return Boolean(this.secret && this.mailer && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(this.config.adminEmail || ''));
+    return Boolean(this.mailer) && this.missing().length === 0;
   }
 
   // The time used for codes and plans: never earlier than the latest time
@@ -156,7 +169,7 @@ class Activation {
 
   status() {
     const now = this.now();
-    const base = { activationId: this.activationId, configured: this.configured, contact: this.config.contact || null, plans: PLANS, busy: this.busy };
+    const base = { activationId: this.activationId, configured: this.configured, missing: this.missing(), contact: this.config.contact || null, plans: PLANS, busy: this.busy };
     const p = this.pending(now);
     base.pending = p ? { plan: p.plan, planName: PLANS.find((x) => x.id === p.plan).name, expiresAt: new Date(p.expiresAt).toISOString(), triesLeft: MAX_TRIES - p.tries } : null;
     const c = this.current();
@@ -181,7 +194,7 @@ class Activation {
   // any earlier code. { ok, expiresAt } or { ok: false, reason, error }.
   async request(plan) {
     const fail = (reason, error) => ({ ok: false, reason, error });
-    if (!this.configured) return fail('unconfigured', 'Activation is not set up in this copy of Lead Finder (no email settings). Please install the latest version.');
+    if (!this.configured) return fail('unconfigured', `Activation is not set up: missing ${this.missing().join(', ') || 'email settings'}.`);
     const p = PLANS.find((x) => x.id === plan);
     if (!p) return fail('plan', 'Choose a plan first.');
     if (this.busy) return fail('busy', this.busy === 'sending' ? 'An activation request is already being sent.' : 'A code is being checked.');

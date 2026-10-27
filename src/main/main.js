@@ -128,7 +128,9 @@ let activation = null;
 
 // activation-config.json (contact numbers) is in the repository;
 // activation-secret.json (secret, administrator email, SMTP) is not: it is
-// added when the app is built.
+// made from tools/activation/.env when the app is built. Running from source
+// (npm run dev) reads tools/activation/.env itself, so changes there apply
+// on the next start without a build step.
 function activationConfig() {
   const read = (f) => {
     try {
@@ -138,6 +140,15 @@ function activationConfig() {
     }
   };
   let config = { ...read('./activation-config.json'), ...read('./activation-secret.json') };
+  if (!app.isPackaged) {
+    const { loadEnv, appSettings } = require('../../tools/activation/lib');
+    const env = loadEnv();
+    const { settings } = appSettings(env);
+    if (settings.secret) config.secret = settings.secret;
+    if (settings.adminEmail) config.adminEmail = settings.adminEmail;
+    if (settings.smtp.host) config.smtp = settings.smtp;
+    if (env.CONTACT_WHATSAPP || env.CONTACT_PHONE) config.contact = { whatsapp: (env.CONTACT_WHATSAPP || '').replace(/\D/g, ''), phone: (env.CONTACT_PHONE || '').replace(/[^\d+]/g, '') };
+  }
   // Tests use their own settings (and a local mail server); never honoured
   // in a packaged app.
   if (process.env.LEAD_FINDER_ACTIVATION_CONFIG && !app.isPackaged) config = { ...config, ...JSON.parse(process.env.LEAD_FINDER_ACTIVATION_CONFIG) };
