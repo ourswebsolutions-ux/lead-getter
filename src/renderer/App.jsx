@@ -332,6 +332,47 @@ function WorkerRows({ workers }) {
   );
 }
 
+// The table is empty: say why. "No leads found" only when the filters
+// really match nothing; during a search, that it is searching (and where its
+// leads go when the filters or the Past view hide them).
+function EmptyLeads({ view, active, filtered, onShowAll, onShowToday }) {
+  let title;
+  let text;
+  let action = null;
+  if (active && view === 'today' && !filtered) {
+    title = 'Searching for leads…';
+    text = 'New leads appear here as Google Maps and Facebook find them.';
+  } else if (active && view !== 'today') {
+    title = 'Searching for leads…';
+    text = 'Leads from the running search are listed under Today.';
+    action = { label: 'Show Today', onClick: onShowToday };
+  } else if (filtered) {
+    title = 'No leads found';
+    text = active ? 'Searching. No lead found so far matches the current filters; new leads that match appear here.' : 'No leads match the current filters.';
+    action = { label: 'Show all leads', onClick: onShowAll };
+  } else if (view === 'today') {
+    title = 'No leads yet today';
+    text = 'Enter a keyword and category, then start a search. Qualified businesses appear here as Chrome finds them.';
+  } else {
+    title = 'Nothing here';
+    text = 'No past leads match these filters. Try another date or category.';
+  }
+  return (
+    <div className="empty" role="status">
+      <span className="empty-icon">
+        <Icon name={active ? 'search' : view === 'today' ? 'inbox' : 'calendar'} size={22} />
+      </span>
+      <h3>{title}</h3>
+      <p>{text}</p>
+      {action && (
+        <button type="button" className="btn btn-sm" onClick={action.onClick}>
+          {action.label}
+        </button>
+      )}
+    </div>
+  );
+}
+
 // --- App -------------------------------------------------------------------------
 
 const WEBSITE_LABELS = { without: 'Without website', with: 'With website', all: 'All businesses' };
@@ -446,22 +487,62 @@ export default function App({ onLock }) {
 
   const loadCategories = useCallback(() => api.listCategories().then(setCatData).catch(() => {}), []);
 
+  // Live leads (found by a search, or changed by a WhatsApp check): the
+  // database says which of them match the current filter, with the same
+  // rules as a full load, and those rows are added or updated in place;
+  // rows that no longer match leave. Arrivals are batched with a timer (a
+  // window behind Chrome gets no animation frames, but timers still run).
+  const live = useRef({ pending: new Set(), duringLoad: null, timer: 0 });
+  const applyLive = useCallback(async (ids) => {
+    const f = filterRef.current;
+    const rows = await api.matchLeads(f, ids).catch(() => null);
+    if (!rows || filterRef.current !== f) return; // a full load for the new filter covers them
+    const matched = new Set(rows.map((r) => r.id));
+    const asked = new Set(ids);
+    // Rows come newest first; upsertMany puts the last new row on top.
+    setLeads((list) => upsertMany(list.filter((l) => !asked.has(l.id) || matched.has(l.id)), [...rows].reverse()));
+  }, []);
+  const queueLive = useCallback(
+    (ids) => {
+      const l = live.current;
+      for (const id of ids) {
+        l.pending.add(id);
+        l.duringLoad?.add(id);
+      }
+      if (!l.timer) {
+        l.timer = setTimeout(() => {
+          l.timer = 0;
+          const batch = [...l.pending];
+          l.pending.clear();
+          if (batch.length) applyLive(batch);
+        }, 150);
+      }
+    },
+    [applyLive],
+  );
+
   const loadLeads = useCallback(() => {
     const f = filterRef.current;
     const slow = setTimeout(() => setLoading(true), 120);
+    // Leads that arrive while this load is on its way are applied again
+    // after it, so its (older) result never hides them.
+    const arrived = new Set();
+    live.current.duringLoad = arrived;
     return api
       .listLeads(f)
       .then((rows) => {
         if (filterRef.current !== f) return;
         setLeads(rows);
         setSelected((sel) => new Set([...sel].filter((id) => rows.some((r) => r.id === id))));
+        if (arrived.size) queueLive([...arrived]);
       })
       .catch((e) => notify({ type: 'error', text: `Could not load leads: ${e.message}` }))
       .finally(() => {
+        if (live.current.duringLoad === arrived) live.current.duringLoad = null;
         clearTimeout(slow);
         setLoading(false);
       });
-  }, [notify]);
+  }, [notify, queueLive]);
 
   useEffect(() => {
     loadLeads();
@@ -503,34 +584,15 @@ export default function App({ onLock }) {
     api.subscriptionStatus().then(setSub).catch(() => {});
     const offSub = api.onSubscription(setSub);
     const offWa = api.onWhatsAppState(setWa);
-    // Background check results update the matching rows in place.
-    const offWaLeads = api.onWhatsAppLeads(({ phone, leads: updated }) =>
-      setLeads((list) => list.map((l) => (l.phone === phone ? updated.find((u) => u.id === l.id) || l : l))),
-    );
-    // Live leads are applied once per frame and category counts refreshed
-    // at most twice a second, so bursts never stall the table.
-    let queue = [];
-    let frame = 0;
+    // Background WhatsApp checks: the leads with that number are applied
+    // like new ones (with "WhatsApp only", a confirmed number now shows).
+    const offWaLeads = api.onWhatsAppLeads(({ leads: updated }) => queueLive(updated.map((u) => u.id)));
+    // Leads found by Google Maps and Facebook (both may be searching at
+    // once); category counts are refreshed at most twice a second.
     let catTimer = 0;
-    const flush = () => {
-      frame = 0;
-      const batch = queue;
-      queue = [];
-      if (batch.length) setLeads((list) => upsertMany(list, batch));
-    };
     const offLead = api.onLead((lead) => {
       freshIds.current.add(lead.id);
-      const f = filterRef.current;
-      const catOk = f.category === 'all' || (f.category === 'none' ? lead.categoryId == null : lead.categoryId === f.category);
-      const siteOk = !f.website || f.website === lead.websiteKind;
-      // A new lead is Unseen; with a search, the table reloads instead.
-      const campOk = !f.campaign || f.campaign === (lead.campaign || 'unseen');
-      const sourceOk = !f.source || (lead.sources || ['maps']).includes(f.source);
-      // New numbers are not checked on WhatsApp yet, so they wait for the check.
-      if (catOk && siteOk && campOk && sourceOk && !f.search && !f.whatsapp && f.date === lead.discoveredDate) {
-        queue.push(lead);
-        if (!frame) frame = requestAnimationFrame(flush);
-      }
+      queueLive([lead.id]);
       if (!catTimer) catTimer = setTimeout(() => ((catTimer = 0), loadCategories()), 500);
     });
     // The computer's date can change while the app is open.
@@ -543,10 +605,11 @@ export default function App({ onLock }) {
       offWaLeads();
       offLead();
       clearInterval(timer);
-      cancelAnimationFrame(frame);
       clearTimeout(catTimer);
+      clearTimeout(live.current.timer);
+      live.current.timer = 0;
     };
-  }, [loadCategories]);
+  }, [loadCategories, queueLive]);
 
   useEffect(() => {
     if (!ACTIVE.has(status.state)) loadCategories();
@@ -629,6 +692,18 @@ export default function App({ onLock }) {
       return next;
     });
   }, []);
+
+  // Filters that can hide leads (besides the date view).
+  const narrowed = catFilter !== 'all' || siteView !== 'all' || waOnly || campaignView !== 'all' || sourceView !== 'all' || Boolean(searchQuery);
+  const showAll = () => {
+    setCatFilter('all');
+    setSiteView('all');
+    setWaOnly(false);
+    setCampaignView('all');
+    setSourceView('all');
+    setTableSearch('');
+    setSearchQuery('');
+  };
 
   const allSelected = leads.length > 0 && leads.every((l) => selected.has(l.id));
   const title = view === 'today' ? `Today's leads` : 'Past leads';
@@ -1001,19 +1076,7 @@ export default function App({ onLock }) {
                   ))}
                 </div>
               ) : (
-                <div className="empty">
-                  <span className="empty-icon">
-                    <Icon name={view === 'today' ? 'inbox' : 'calendar'} size={22} />
-                  </span>
-                  <h3>{view === 'today' ? 'No leads yet today' : 'Nothing here'}</h3>
-                  <p>
-                    {view === 'today'
-                      ? active
-                        ? 'Searching. Businesses without a website appear here the moment they are found.'
-                        : 'Enter a keyword and category, then start a search. Qualified businesses appear here as Chrome finds them.'
-                      : 'No past leads match these filters. Try another date or category.'}
-                  </p>
-                </div>
+                <EmptyLeads view={view} active={active} filtered={narrowed} onShowAll={showAll} onShowToday={() => setView('today')} />
               )}
             </div>
           </div>

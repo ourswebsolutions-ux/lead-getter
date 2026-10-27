@@ -12,6 +12,7 @@ function subscribe(channel, callback) {
 
 contextBridge.exposeInMainWorld('leadFinder', {
   listLeads: (filter) => ipcRenderer.invoke('leads:list', filter),
+  matchLeads: (filter, ids) => ipcRenderer.invoke('leads:match', filter, ids),
   listDates: (filter) => ipcRenderer.invoke('leads:dates', filter),
   deleteLeads: (ids) => ipcRenderer.invoke('leads:delete', Array.isArray(ids) ? ids : []),
   deleteFiltered: (filter) => ipcRenderer.invoke('leads:deleteFiltered', filter),

@@ -210,6 +210,11 @@ Lead Finder never fetches a business's website itself, so a site that is tempora
 
 ## Categories, Today and Past leads
 
+New leads appear in the table as soon as they're saved, from Google Maps and Facebook alike, including while the window is behind Chrome.
+- **Matching the filters:** for each new lead the app asks the database whether it matches the current filters (category, website, Seen/Unseen, source, search, WhatsApp only, date), using the same rules as loading the table. So a lead appears exactly when it matches, and nothing needs clicking.
+- **Nothing reset:** filters, selection, search and paging stay as they are. A number found again updates its row instead of adding a second one.
+- **Empty table:** while a search runs it says *Searching for leads…*. *No leads found* (with **Show all leads**) appears only when the current filters really match nothing.
+
 - **Category** (next to the keyword): every search is filed under a category, for example keyword `Software House in Lahore`, category `Software House`. Typing shows saved categories as suggestions; click one, or use the arrow keys and Enter, to pick it. New names are saved automatically when the search starts. Capitalisation is normalised (`software house` becomes `Software House`), and names that differ only in case or spacing are treated as the same category. A category is required to start a search.
 - **Today / Past leads:** switch between them with the control at the top of the leads panel.
 - **Today's leads** is the default view: only leads discovered on the computer's current local date. Older leads are hidden, not deleted, and the view rolls over at midnight.

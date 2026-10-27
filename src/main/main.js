@@ -948,6 +948,11 @@ app.whenReady().then(() => {
   handle('subscription:pickScreenshot', () => pickScreenshot());
   handle('subscription:apply', (form) => applySubscription(form));
   handle('leads:list', (filter) => store.listLeads(validateFilter(filter)));
+  // Which of these leads match the table's filter (same rules as leads:list).
+  handle('leads:match', (filter, ids) => {
+    const list = Array.isArray(ids) ? [...new Set(ids.filter((id) => Number.isInteger(id) && id > 0))].slice(0, 1000) : [];
+    return list.length ? store.listLeads({ ...validateFilter(filter), ids: list }) : [];
+  });
   handle('leads:dates', (filter) => store.listDates(validateFilter(filter)));
   handle('leads:delete', (ids) => deleteLeads(ids));
   handle('leads:deleteFiltered', (filter) => deleteFiltered(filter));

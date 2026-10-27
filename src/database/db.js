@@ -564,6 +564,12 @@ class LeadStore {
       params.push(like(q), like(q));
       if (digits.length >= 3) params.push(like(digits), like(digits));
     }
+    // Only these leads (the table checking which new leads match its filter).
+    if (Array.isArray(filter.ids)) {
+      const ids = filter.ids.filter(Number.isInteger).slice(0, 1000);
+      clauses.push(ids.length ? `b.id IN (${ids.map(() => '?').join(', ')})` : '0');
+      params.push(...ids);
+    }
     // Only numbers WhatsApp itself confirmed (not earlier manual marks).
     if (filter.whatsapp === 'available') {
       clauses.push(`b.phone_status = 'valid' AND EXISTS (SELECT 1 FROM whatsapp_checks w2

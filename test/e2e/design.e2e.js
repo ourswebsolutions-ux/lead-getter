@@ -140,23 +140,22 @@ test('phones, WhatsApp indicator, themes, motion and window sizes', async (t) =>
 
   // --- Live updates stay fast: 250 leads streamed in like a search does.
   await win.getByRole('tab', { name: 'Today' }).click();
-  const timing = await app.evaluate(async ({ BrowserWindow }) => {
-    const wc = BrowserWindow.getAllWindows()[0].webContents;
-    const today = (() => {
-      const d = new Date();
-      const p = (n) => String(n).padStart(2, '0');
-      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-    })();
-    const t0 = Date.now();
-    for (let i = 0; i < 250; i++) {
-      wc.send('leads:added', {
-        id: 10_000 + i, placeKey: `live-${i}`, name: `Live Lead ${i}`, phone: '+923001234567', phoneRaw: '03001234567', phoneStatus: 'valid',
-        whatsapp: 'not_checked', address: 'Lahore, Pakistan', mapsUrl: 'https://www.google.com/maps/place/x', websiteStatus: 'No website found',
-        categoryId: null, category: '', discoveredAt: new Date().toISOString(), discoveredDate: today,
-      });
-    }
-    return Date.now() - t0;
-  });
+  // Saved to the app's database and announced, as the search workers do.
+  const timing = await app.evaluate(
+    async ({ BrowserWindow }, a) => {
+      const { LeadStore } = process.mainModule.require(a.dbModule);
+      const s = new LeadStore(a.dbFile);
+      const wc = BrowserWindow.getAllWindows()[0].webContents;
+      const t0 = Date.now();
+      for (let i = 0; i < 250; i++) {
+        const { lead } = s.save({ placeKey: `0x${i + 1}:0xabc`, mapsUrl: `https://www.google.com/maps/place/Live${i}`, name: `Live Lead ${i}`, phoneRaw: '03001234567', address: 'Lahore, Pakistan', websiteStatus: 'no_website' });
+        wc.send('leads:added', lead);
+      }
+      s.close();
+      return Date.now() - t0;
+    },
+    { dbModule: path.join(root, 'src', 'database', 'db.js'), dbFile: path.join(userData, 'leads.db') },
+  );
   const frame = await win.evaluate(
     () =>
       new Promise((resolve) => {

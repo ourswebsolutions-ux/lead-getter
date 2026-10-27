@@ -9,7 +9,7 @@
     "start": "vite build && node scripts/dev.js --prod",
     "test": "node --test test/*.test.js",
     "test:integration": "node test/integration/real-chrome.js",
-    "test:e2e": "vite build && node --test --test-timeout=200000 test/e2e/app.e2e.js test/e2e/design.e2e.js test/e2e/premium.e2e.js test/e2e/whatsapp.e2e.js test/e2e/outreach.e2e.js test/e2e/many-leads.e2e.js test/e2e/facebook.e2e.js",
+    "test:e2e": "vite build && node --test --test-timeout=200000 test/e2e/app.e2e.js test/e2e/design.e2e.js test/e2e/premium.e2e.js test/e2e/whatsapp.e2e.js test/e2e/outreach.e2e.js test/e2e/many-leads.e2e.js test/e2e/facebook.e2e.js test/e2e/live-leads.e2e.js",
     "server": "cd server && npm start",
     "release": "node scripts/release.js",
     "check:licence": "node scripts/check-licence-server.js"
