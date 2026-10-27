@@ -13,9 +13,11 @@ const fbDefault = require('./facebook');
 const { SearchSession, StopRequested, FatalSearchError, LimitReached, DEFAULT_PACING } = require('./search-session');
 
 const FB_PACING = {
-  fbScroll: [2500, 5000], // pause after scrolling the results
+  fbScroll: [1500, 3000], // pause between scrolls when new posts loaded
+  fbLoad: 10_000, // wait for new results after a scroll (longer while Facebook shows it is loading)
+  fbStallRetries: 4, // scrolls in a row that load nothing before a query is done
+  fbStallWait: [2500, 5000], // extra pause before each retry
   fbBetweenQueries: [4000, 8000],
-  fbIdleScrolls: 4, // scrolls without new posts before a query is done
   fbMaxPosts: 150, // posts read per query, at most
 };
 
@@ -44,7 +46,8 @@ class FacebookSession extends SearchSession {
     this.doneQueries = new Set();
     this.loadedQueries = 0;
     this.seenPosts = new Set();
-    this.stats.facebook = { posts: 0, leads: 0, newLeads: 0 };
+    // posts read, valid numbers found in them, leads saved (new or not)
+    this.stats.facebook = { posts: 0, numbers: 0, leads: 0, newLeads: 0 };
   }
 
   status(state, message, phase = 'search') {
@@ -67,7 +70,13 @@ class FacebookSession extends SearchSession {
 
   summary() {
     const f = this.stats.facebook;
-    return `${f.posts} post${f.posts === 1 ? '' : 's'} read, ${f.leads} with a valid number (${f.newLeads} new lead${f.newLeads === 1 ? '' : 's'}).`;
+    const n = (k, one, many = `${one}s`) => `${f[k]} ${f[k] === 1 ? one : many}`;
+    return `${n('posts', 'post')} read, ${n('numbers', 'valid number')}, ${n('newLeads', 'new lead')}.${this.ending ? ` ${this.ending}` : ''}`;
+  }
+
+  progress(note = '') {
+    const f = this.stats.facebook;
+    this.status('running', `Facebook: ${f.posts} posts read · ${f.numbers} valid numbers · ${f.newLeads} new leads${note ? ` · ${note}` : ''}`);
   }
 
   // Each query once; after a reconnect, finished queries are skipped and
@@ -98,25 +107,49 @@ class FacebookSession extends SearchSession {
     if (result.mode === 'empty') return this.status('running', `Facebook: no posts found for "${query}"`);
 
     this.setStep('analyzing');
+    // Read what is on screen, then scroll for more and wait until Facebook
+    // has actually loaded new results; repeat until the limit, Facebook's
+    // "End of results", or several scrolls in a row that load nothing.
     let read = 0;
-    let idle = 0;
+    let stalls = 0;
     for (;;) {
       if (this.credits?.exhausted('facebook')) throw new LimitReached(this.credits.message('facebook'));
       const state = await this.op(() => this.fb.detectState(page));
       if (state) throw new FacebookUnavailable(state);
       await this.op(() => this.fb.expandSeeMore(page));
       const posts = await this.op(() => this.fb.collectPosts(page));
+      // Posts stay on the page as it grows: each is read once (by its address).
       const fresh = posts.filter((p) => p.key && !this.seenPosts.has(p.key));
       for (const post of fresh) {
         this.seenPosts.add(post.key);
         await this.processPost(post);
-        if (++read >= this.pacing.fbMaxPosts) return;
+        if (++read >= this.pacing.fbMaxPosts) {
+          this.ending = `Stopped at ${this.pacing.fbMaxPosts} posts for "${query}".`;
+          return;
+        }
       }
-      if (fresh.length) idle = 0;
-      else if (++idle >= this.pacing.fbIdleScrolls) return;
-      const scroll = await this.op(() => this.fb.scrollResults(page));
-      if (scroll.end && !fresh.length) return;
-      await this.pause(this.pacing.fbScroll);
+      const before = await this.op(() => this.fb.resultsState(page));
+      if (before.end) {
+        this.ending = `End of the results for "${query}".`;
+        return;
+      }
+      this.progress('loading more posts');
+      await this.op(() => (stalls ? this.fb.nudge(page) : this.fb.scrollResults(page)));
+      const after = await this.op(() => this.fb.waitForMore(page, before, { timeout: this.pacing.fbLoad }));
+      if (after.grew || after.end) {
+        stalls = 0;
+        await this.pause(this.pacing.fbScroll);
+        continue;
+      }
+      if (++stalls > this.pacing.fbStallRetries) {
+        this.ending = `No more posts loaded for "${query}" after ${this.pacing.fbStallRetries} tries.`;
+        this.progress('no more posts loaded');
+        return;
+      }
+      this.progress(`waiting for more posts (try ${stalls} of ${this.pacing.fbStallRetries})`);
+      // Facebook may only load while its window is visible: shown once.
+      if (stalls === 2) await this.op(() => page.bringToFront()).catch(() => {});
+      await this.pause(this.pacing.fbStallWait);
     }
   }
 
@@ -133,6 +166,7 @@ class FacebookSession extends SearchSession {
     if (this.store.hasFacebookPost(post.url)) return this.status('running', `Facebook: already saved a post by ${who}`);
     const phones = this.fb.extractPhones(post.text, post.links, this.country);
     if (!phones.length) return this.status('running', `Facebook: no phone number in a post by ${who}`);
+    this.stats.facebook.numbers += phones.length;
     let added = 0;
     for (const ph of phones) {
       // A new lead uses one of today's leads first.

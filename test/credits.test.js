@@ -16,7 +16,7 @@ const { SearchSession } = require('../src/browser/search-session');
 const { FacebookSession } = require('../src/browser/facebook-session');
 const { runSources } = require('../src/browser/search-sources');
 
-const FAST = { listing: [0, 0], scroll: [0, 0], longBreak: [0, 0], afterBlock: 0, blockPoll: 5, netRetries: [1, 1], reconnectDelays: [1], fbScroll: [0, 0], fbBetweenQueries: [0, 0] };
+const FAST = { listing: [0, 0], scroll: [0, 0], longBreak: [0, 0], afterBlock: 0, blockPoll: 5, netRetries: [1, 1], reconnectDelays: [1], fbScroll: [0, 0], fbBetweenQueries: [0, 0], fbLoad: 30, fbStallWait: [0, 0] };
 const tick = () => new Promise((r) => setTimeout(r, 1));
 const page = (name) => ({ name, bringToFront: async () => {}, url: () => '', evaluate: async () => true });
 
@@ -58,7 +58,10 @@ function mockFacebook(posts) {
     detectState: async () => null,
     expandSeeMore: async () => 0,
     collectPosts: async () => (await tick(), posts),
+    resultsState: async () => ({ count: posts.length, lastKey: '', height: 1, loading: false, end: true }),
     scrollResults: async () => ({ end: true }),
+    nudge: async () => ({ end: true }),
+    waitForMore: async (_p, before) => ({ ...before, grew: false }),
   };
 }
 

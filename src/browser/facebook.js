@@ -235,15 +235,83 @@ async function expandSeeMore(page) {
   return n;
 }
 
-// Scrolls the results one screen. Returns { end } when Facebook says there
-// are no more results.
+// Runs inside the page; self-contained so it can be serialised. What the
+// results look like now: how many posts, the last one (to notice new posts
+// even if Facebook drops old ones from the page), the page height, whether
+// Facebook shows a loading indicator, and whether it shows its own
+// "End of results" marker (a visible element, not just text somewhere).
+function resultsStateInPage() {
+  const sel = '[role="article"], div[aria-posinset]';
+  const posts = [...document.querySelectorAll(sel)].filter((el) => !el.parentElement?.closest(sel));
+  const last = posts.at(-1);
+  const lastKey = last ? (last.querySelector('a[href*="/posts/"], a[href*="permalink"], a[href*="story_fbid"]')?.getAttribute('href') || '') + (last.innerText || '').slice(0, 80) : '';
+  const shown = (el) => el.offsetParent !== null || getComputedStyle(el).position === 'fixed';
+  const loading = [...document.querySelectorAll('[role="progressbar"], [aria-busy="true"]')].some(shown);
+  let end = false;
+  for (const el of document.querySelectorAll('span, div, h2, h3')) {
+    if (el.childElementCount === 0 && /^(end of results|no more results|you('|’)ve reached the end of the results)\.?$/i.test((el.textContent || '').trim()) && shown(el)) {
+      end = true;
+      break;
+    }
+  }
+  const scroller = document.scrollingElement || document.documentElement;
+  return { count: posts.length, lastKey, height: scroller.scrollHeight, loading, end };
+}
+
+async function resultsState(page) {
+  return page.evaluate(resultsStateInPage);
+}
+
+// Asks Facebook for the next results: the last post into view, then the
+// page (or the box the results scroll in) to its bottom, where Facebook's
+// infinite scroll loads more. Returns the state after scrolling.
 async function scrollResults(page) {
-  return page.evaluate(() => {
-    const before = window.scrollY;
-    window.scrollBy({ top: Math.max(400, window.innerHeight * 0.9) });
-    const text = (document.body?.innerText || '').slice(-3000);
-    return { end: /end of results|no more results|we didn(’|')t find any more/i.test(text), moved: window.scrollY !== before };
+  await page.evaluate(() => {
+    const sel = '[role="article"], div[aria-posinset]';
+    const posts = [...document.querySelectorAll(sel)].filter((el) => !el.parentElement?.closest(sel));
+    const last = posts.at(-1);
+    last?.scrollIntoView({ block: 'end' });
+    let box = last?.parentElement;
+    while (box && box !== document.body && box !== document.documentElement) {
+      if (box.scrollHeight > box.clientHeight + 4 && /auto|scroll/.test(getComputedStyle(box).overflowY)) {
+        box.scrollTop = box.scrollHeight;
+        break;
+      }
+      box = box.parentElement;
+    }
+    window.scrollTo(0, (document.scrollingElement || document.documentElement).scrollHeight);
   });
+  return resultsState(page);
+}
+
+// Waits until the results change after a scroll: more posts, a different
+// last post, or the page grew. While Facebook shows its loading indicator
+// the wait is extended (up to twice). Returns { ...state, grew }.
+async function waitForMore(page, before, { timeout = 10_000, poll = 400 } = {}) {
+  let deadline = Date.now() + timeout;
+  let extended = false;
+  for (;;) {
+    const st = await resultsState(page).catch(() => null);
+    if (st) {
+      const grew = st.count > before.count || (st.lastKey && st.lastKey !== before.lastKey) || st.height > before.height + 40;
+      if (grew || st.end) return { ...st, grew: Boolean(grew) };
+      if (Date.now() >= deadline) {
+        if (st.loading && !extended) {
+          extended = true;
+          deadline = Date.now() + timeout;
+        } else return { ...st, grew: false };
+      }
+    } else if (Date.now() >= deadline) return { ...before, grew: false };
+    await page.waitForTimeout(poll);
+  }
+}
+
+// When nothing loads: a screen up and back down again, which makes
+// Facebook's infinite scroll notice the bottom once more.
+async function nudge(page) {
+  await page.evaluate(() => window.scrollBy(0, -Math.max(400, window.innerHeight)));
+  await page.waitForTimeout(500);
+  return scrollResults(page);
 }
 
 module.exports = {
@@ -260,5 +328,9 @@ module.exports = {
   collectPosts,
   parsePost,
   expandSeeMore,
+  resultsStateInPage,
+  resultsState,
   scrollResults,
+  waitForMore,
+  nudge,
 };
