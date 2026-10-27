@@ -1,6 +1,6 @@
 {
   "name": "lead-finder",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "Finds Google Maps businesses with or without websites using your own Chrome.",
   "main": "src/main/main.js",
   "scripts": {
