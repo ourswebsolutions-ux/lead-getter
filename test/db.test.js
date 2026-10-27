@@ -52,3 +52,24 @@ test('leads persist after the database is closed and reopened', () => {
   assert.match(leads[0].websiteStatus, /social page only: facebook\.com\/x/);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('version 8 removes the old subscription device key and nothing else', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lf-v8-'));
+  const file = path.join(dir, 'leads.db');
+  let s = new LeadStore(file);
+  s.save({ placeKey: '0x8:0x8', mapsUrl: 'https://www.google.com/maps/place/K', name: 'Kept Lead', phoneRaw: '+923001234567', address: 'Lahore, Pakistan', websiteStatus: 'no_website' });
+  s.setState('lastSearch', { keyword: 'kept' });
+  s.setState('outreach.ack', 123);
+  s.db.prepare("INSERT INTO outreach_sends (campaign_id, campaign_name, phone, stage, test, day, status, created_at, sent_at) VALUES (1, 'C', '+923001234567', 0, 0, '2026-10-25', 'read', 1, 1)").run();
+  // As an earlier version left it: the licence device key, version 7.
+  s.setState('device_key', { publicKey: 'x', privateKey: 'y', encrypted: false });
+  s.db.exec('PRAGMA user_version = 7');
+  s.close();
+  s = new LeadStore(file);
+  assert.equal(s.db.prepare('PRAGMA user_version').get().user_version, 8);
+  assert.equal(s.getState('device_key'), null, 'the subscription key is gone');
+  assert.deepEqual([s.getState('lastSearch'), s.getState('outreach.ack')], [{ keyword: 'kept' }, 123], 'other settings stay');
+  assert.deepEqual(s.listLeads().map((l) => [l.name, l.campaign]), [['Kept Lead', 'seen']], 'leads and campaign history stay');
+  s.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});

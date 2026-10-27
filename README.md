@@ -4,7 +4,7 @@ A desktop app that searches Google Maps in **your own, already-open Google Chrom
 
 ## Download
 
-Installers are attached to each [GitHub Release](https://github.com/ourswebsolutions-ux/lead-getter/releases): Windows `.exe`, Linux `.deb` and `.AppImage`, macOS `.dmg`. The installed app needs no Node.js or dev tools. Subscriptions and free searches are checked with the licence server set in `src/main/license-config.json`: `https://subscription.axorawebsolutions.com/lead-getter` in production. See [server/README.md](server/README.md#deployment).
+Installers are attached to each [GitHub Release](https://github.com/ourswebsolutions-ux/lead-getter/releases): Windows `.exe`, Linux `.deb` and `.AppImage`, macOS `.dmg`. The installed app needs no Node.js or dev tools.
 
 The installers are not code-signed yet. Windows SmartScreen says "Windows protected your PC": choose **More info → Run anyway**. On macOS, right-click the app and choose **Open** the first time.
 
@@ -16,14 +16,14 @@ The installers are not code-signed yet. Windows SmartScreen says "Windows protec
 ## Development
 
 ```bash
-npm install && (cd server && npm install)
-npm run dev          # everything: licence server → UI dev server → app
+npm install
+npm run dev          # UI dev server → app
 npm start            # same, with the built UI instead of the dev server
-npm test             # unit tests (subscription tests use a temporary local licence server)
+npm test             # unit tests
 npm run test:e2e     # drives the real Electron app (temporary data)
 ```
 
-`npm run dev` starts the licence server from `server/` (it needs `server/.env`, see [server/README.md](server/README.md)), waits until it answers `/health`, then starts the UI and the app pointed at it. It reuses a licence server that is already running, refuses to start twice, says which port is taken if another program holds 8787 or 5199, restarts the server if it crashes, and stops everything on Ctrl+C or when you close the app. Without `server/.env` the app still starts, but subscriptions and free searches are unavailable.
+`npm run dev` starts the UI and the app pointed at it. It refuses to start twice, says if another program holds port 5199, and stops everything on Ctrl+C or when you close the app.
 
 ## Building installers
 
@@ -36,8 +36,6 @@ npm run release      # installers for this OS in release/
 | Linux | `lead-finder_<version>_amd64.deb`, `Lead-Finder-<version>-linux-x86_64.AppImage` |
 | Windows | `Lead-Finder-Setup-<version>.exe` |
 | macOS | `Lead-Finder-<version>-mac-<arch>.dmg` |
-
-The app finds the licence server through `src/main/license-config.json`. The licence server itself is never bundled into the app, because it holds the secrets that approve subscriptions. Start it with `npm run server` (or `npm run dev`).
 
 ### Publishing a release
 
@@ -117,34 +115,11 @@ A business keeps the leads it has already become. One skipped earlier only becau
 - **Security menu:** the lock button in the header offers **Change PIN** (needs the current PIN) and **Lock now**.
 - **Limits:** the lock protects the app. Someone with access to your computer account could still open `leads.db` directly with other tools.
 
-## Subscriptions and daily leads
+## Free to use
 
-Every installation starts on **Free**. Paid plans come with a daily allowance of **qualified leads**:
+Lead Finder has no subscriptions, plans, activation codes or lead limits. Every feature works without signing up: Google Maps and Facebook lead search, the Leads table and export, WhatsApp checks, chats and campaigns. It doesn't contact any subscription or licence server.
 
-| Plan | Price | Qualified leads per day |
-|---|---:|---|
-| Free | PKR 0 | 5 from Google Maps + 5 from Facebook |
-| Monthly | PKR 3,000 | 100, Google Maps and Facebook together |
-| Six Months | PKR 10,000 | 250, Google Maps and Facebook together |
-| One-Time | PKR 20,000 | Unlimited, never expires |
-
-Monthly and Six Months run one and six calendar months from activation. When a plan ends, the installation is back on Free.
-
-- **Activating a plan:**
-  1. Click the plan pill in the header, choose a plan and click **Get activation code**.
-  2. The server creates an **Activation ID** and a **4-digit code** and emails both to the administrator only (`SUBSCRIPTION_ADMIN_EMAIL`). Nothing goes to the customer, and no email address is asked for.
-  3. Once paid, the administrator gives the customer the code (WhatsApp, phone, …).
-  4. Typing (or pasting) it and clicking **Activate** starts the plan at once.
-  - **Code rules:** a code works once, lasts 24 hours, and allows 5 wrong tries. After that, **New code** emails a fresh one to the administrator (once a minute, up to 5 a day). Only a hash of the code is stored.
-- **Daily leads:** a lead counts when it qualifies and is saved as a **new** lead.
-  - Leads already saved, a number found by both Google Maps and Facebook, retries and restarts are never charged twice.
-  - Before saving a new lead, the app asks the subscription server, which counts it and refuses once the day's allowance is used. Two searches at once can't go over the limit.
-  - When a source's allowance is used up, that source stops (on Free, the other one goes on), the leads found so far stay, and the search status says when it resets.
-  - Allowances reset at midnight in the server's timezone (`CREDITS_TIMEZONE`, default Asia/Karachi).
-  - The plan pill shows the leads left today; the Subscription panel shows today's usage per source (Free) or in total (paid).
-- **Enforcement:** the server decides. Every status is signed by the server, and every lead is counted there. Editing local files or the computer's clock changes nothing. A suspended subscription saves no leads at all. CSV export and the WhatsApp features stay with the paid plans.
-- **Before the website is updated:** if the subscription server still answers the earlier way (signed status version 1), the app uses the earlier rules. An active subscription searches without a daily limit; otherwise there are 3 free searches per computer, and nothing is charged per lead. The panel says activation codes come with the server update. The same app switches to codes and daily leads at its next status check once the server is updated.
-- **Server:** production runs the Lead Finder API on the subscription website (`https://subscription.axorawebsolutions.com/lead-getter`). `server/` is the same API for development and tests (`npm run dev` starts it). See [server/README.md](server/README.md).
+Updating from a version that had subscriptions removes what that system stored on the computer: its device key and its `licence.log`. Leads, settings, chats and campaign history stay as they were.
 
 ## How a search works
 
@@ -360,7 +335,7 @@ What WhatsApp makes available, and what it doesn't:
   - Only one copy of Lead Finder runs at a time.
 - **WhatsApp refusals:** rate limits, restrictions or a logged-out session pause the whole campaign (*possible restriction*) until you resume it. Three failures in a row also pause it.
 - **Delivery:** sent, delivered and read states come from WhatsApp's receipts.
-- **Conditions:** sending needs an active subscription and a connected WhatsApp, and the app has to be unlocked with your PIN. The campaign waits otherwise.
+- **Conditions:** sending needs a connected WhatsApp, and the app has to be unlocked with your PIN. The campaign waits otherwise.
 - **Storage:** campaign data is in `outreach_campaigns`, `outreach_contacts`, `outreach_sends` (the permanent send history) and `outreach_optouts`. Updating from an earlier version moves the existing campaign into *Campaign 1*, with its progress and history.
 
 ### Security
@@ -385,16 +360,6 @@ If Chrome, or Lead Finder's tab, closes while a search is running, the search pa
 - **Background:** a slow ambient glow (GPU-only CSS) and faint connected nodes along the window edges (Canvas 2D). It runs at 24 fps during a search and 12 fps when idle, pauses when the window is hidden or unfocused, never takes mouse input, and is static under reduced motion. Measured renderer CPU: about 1.3% idle and 2% while searching.
 - **Manage categories:** the pencil button next to the category filter renames or deletes saved categories. Renaming onto an existing name offers to **merge** the two. Deleting a category keeps its leads as *Uncategorized*. Leads are never deleted by category changes.
 - **Reduced motion:** with the system's reduce-motion setting on, animations, confetti and the moving background are switched off.
-
-## Subscription server error (401) in the installed app
-
-`npm run dev` runs the licence server on your computer and points the app at it. Installed apps use the production address in `src/main/license-config.json`: `https://subscription.axorawebsolutions.com/lead-getter`.
-
-If the licence server isn't deployed there, the subscription website answers instead with its admin login (HTTP 401). The app then says the licence server isn't installed at that address.
-
-- **What was asked and answered:** each install records it in `licence.log` in its data folder, for example `~/.config/Lead Finder/licence.log` on Linux.
-- **Check the server:** `npm run check:licence`.
-- **Deploy it:** [server/README.md → Deployment](server/README.md#deployment).
 
 ## CAPTCHAs, limits, and errors
 
@@ -433,7 +398,6 @@ src/browser/    chrome.js (discovery + CDP attach), maps.js (Maps page ops),
 src/database/   SQLite store (node:sqlite, built into Electron)
 src/export/     CSV generation
 test/           Unit tests, Electron E2E test, real-Chrome integration script
-server/         Licence server (subscriptions, approval email, local SQLite)
 scripts/        dev.js (npm run dev), release.js (npm run release)
 build/          App icon
 ```

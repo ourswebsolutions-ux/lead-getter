@@ -21,7 +21,6 @@ const WAITING = {
   interval: 'Waiting before the next contact (45–60 minutes after the last one)',
   next_message: 'Next message to the same contact in about a minute',
   whatsapp: 'Waiting for WhatsApp to connect',
-  subscription: 'Waiting for an active subscription',
   daily_cap: 'Daily limit reached: continues tomorrow',
   quiet_hours: 'Outside sending hours for the remaining contacts',
   not_started: 'Waiting for the start date',

@@ -4,8 +4,6 @@
 //   Linux: .deb and .AppImage   Windows: .exe (NSIS)   macOS: .dmg
 // Installers can only be built for the OS they run on (CI builds all three;
 // see .github/workflows/release.yml). Extra arguments go to electron-builder.
-//
-// The app finds the licence server through src/main/license-config.json.
 
 const { execFileSync } = require('node:child_process');
 const path = require('node:path');

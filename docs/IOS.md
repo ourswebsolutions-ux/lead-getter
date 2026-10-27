@@ -18,24 +18,19 @@ It would be a separate app, not a port.
 
 1. **A different data source for leads.** Use the official [Google Places API](https://developers.google.com/maps/documentation/places/web-service) ("Text Search" plus "Place Details": name, phone, website, address).
    - This needs a Google Cloud billing account. Calls are paid per request.
-   - The API key must sit behind a server (it could extend the licence server), never inside the app.
+   - The API key must sit behind a server of your own, never inside the app.
    - The website rules in `src/browser/website.js` can be reused on the server: the `website` field becomes the qualification input.
 2. **A native or cross-platform client.**
    - Options are SwiftUI, React Native or Capacitor. React Native or Capacitor would let some of the React UI be reused.
    - It would cover search, the lead list, categories, Today/Past, CSV export through the iOS share sheet, and the PIN lock (via Face ID / Keychain).
    - Local storage would be SQLite or Core Data.
-3. **Subscriptions through Apple In-App Purchase.**
-   - Apple requires IAP for digital subscriptions unlocked inside an iOS app (Guideline 3.1.1).
-   - The current flow (manual payment by NayaPay, JazzCash or Easypaisa, with email approval) is not allowed for unlocking features on iOS.
-   - The licence server would need to verify App Store receipts through App Store Server API notifications.
-4. **WhatsApp.** Drop the Baileys integration. Use `https://wa.me/<number>` links, which open WhatsApp for the user to send a message themselves, or the official WhatsApp Business Platform (Cloud API, needs a Meta business account).
+3. **WhatsApp.** Drop the Baileys integration. Use `https://wa.me/<number>` links, which open WhatsApp for the user to send a message themselves, or the official WhatsApp Business Platform (Cloud API, needs a Meta business account).
 
 ## Distribution requirements
 
 - An Apple Developer Program membership ($99/year) and a Mac with Xcode to build and sign.
 - An App Store Connect listing, privacy "nutrition label", privacy policy URL, and App Review.
   - Before public release, testers can install through TestFlight.
-- IAP products configured in App Store Connect. Apple takes 15–30% of subscription revenue.
 - No sideloading for the general public. EU alternative marketplaces still need Apple notarization and a developer account.
 
 ## Recommendation

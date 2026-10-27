@@ -11,8 +11,6 @@ const { SearchSession, WEBSITE_FILTERS } = require('../browser/search-session');
 const { FacebookSession } = require('../browser/facebook-session');
 const { runSources } = require('../browser/search-sources');
 const { AppLock } = require('./applock');
-const { LicenseClient } = require('./license');
-const { CreditGate } = require('./credits');
 const { Updater, fileLog } = require('./updater');
 
 const DEV_URL = process.env.VITE_DEV_SERVER_URL || '';
@@ -118,73 +116,8 @@ function handle(channel, fn) {
   });
 }
 
-// --- subscription ------------------------------------------------------------
-
+// The 4-digit app lock.
 let appLock = null;
-let license = null;
-
-function licenseConfig() {
-  let file = {};
-  try {
-    file = require('./license-config.json');
-  } catch {}
-  return {
-    serverUrl: process.env.LEAD_FINDER_LICENSE_URL || file.serverUrl,
-    publicKey: process.env.LEAD_FINDER_LICENSE_PUBKEY || file.publicKey,
-  };
-}
-
-// Asks the licence server (signed, fresh) whether paid features may be used.
-async function requireSubscription() {
-  const st = await license.status();
-  sendSubscription(st);
-  return st.allowed ? { ok: true } : { ok: false, subscription: st.reason, error: st.message };
-}
-
-// Searching: today's allowance (from the server's signed status) has
-// leads left for at least one source, and the subscription isn't suspended.
-async function requireSearchAccess() {
-  const st = await license.status();
-  sendSubscription(st);
-  if (st.canSearch) return { ok: true, status: st };
-  // Used up today: say exactly what, and when it resets.
-  const error = st.reason === 'exhausted' && !st.legacy ? new CreditGate({ license, credits: st.credits }).message() : st.message;
-  return { ok: false, subscription: st.reason, error };
-}
-
-function sendSubscription(st) {
-  send('subscription:status', publicStatus(st));
-}
-
-function publicStatus(st) {
-  return st && { allowed: st.allowed, canSearch: st.canSearch, sources: st.sources || [], reason: st.reason, message: st.message, plan: st.plan, credits: st.credits, activation: st.activation, subscription: st.subscription, legacy: Boolean(st.legacy), trial: st.trial || null, deviceId: st.deviceId, serverTime: st.serverTime };
-}
-
-const PAID_PLANS = ['monthly', 'six_months', 'lifetime'];
-
-// Activation: an activation code for a plan (sent to the administrator), the
-// 4-digit code, a new code. Each answers { ok, error?, reason?, retryAt? }
-// and then sends the fresh status (the activation comes from the server).
-async function activationCall(fn) {
-  try {
-    const out = await fn();
-    sendSubscription(await license.status());
-    return { ok: true, ...out };
-  } catch (err) {
-    if (err.code === 'server') license.status().then(sendSubscription, () => {});
-    return { ok: false, error: err.message, reason: err.details?.reason || null, attemptsLeft: err.details?.attemptsLeft ?? null, retryAt: err.details?.retryAt || null };
-  }
-}
-
-function requestActivation(plan) {
-  if (!PAID_PLANS.includes(plan)) return { ok: false, error: 'Choose a plan.' };
-  return activationCall(() => license.requestActivation(plan));
-}
-
-function verifyActivationCode(code) {
-  if (typeof code !== 'string' || !/^\d{4}$/.test(code)) return { ok: false, error: 'Enter the 4-digit code.' };
-  return activationCall(() => license.verifyCode(code));
-}
 
 function validateKeyword(value) {
   if (typeof value !== 'string') return { error: 'Enter a search keyword.' };
@@ -284,16 +217,6 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
   if (cat.error) return { ok: false, error: cat.error };
   const websiteFilter = WEBSITE_FILTERS.has(rawWebsite) ? rawWebsite : 'without';
   if (search) return { ok: false, error: 'A search is already running.' };
-  const access = await requireSearchAccess();
-  if (!access.ok) return access;
-  if (search) return { ok: false, error: 'A search is already running.' };
-  // Sources with leads left today (on Free each has its own five).
-  const sources = access.status.sources;
-  const withMaps = sources.includes('maps');
-  if (!withMaps && !(facebookSearchOn() && sources.includes('facebook'))) {
-    const gate = new CreditGate({ license, credits: access.status.credits });
-    return { ok: false, subscription: 'exhausted', error: `${gate.message('maps')}${sources.includes('facebook') ? ' Turn on Facebook Lead Search to use your Facebook leads.' : ''}` };
-  }
   // Saved (or matched to an existing spelling) before the search starts.
   let category;
   try {
@@ -303,12 +226,8 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
   }
 
   // Facebook Lead Search (the switch above the Leads table), as it is when
-  // the search starts, if Facebook has leads left today.
-  const withFacebook = facebookSearchOn() && sources.includes('facebook');
-  // Charges each new lead with the subscription server; the app's plan pill
-  // follows every answer.
-  // (A server without the allowance yet charges nothing: no gate.)
-  const credits = access.status.legacy ? null : new CreditGate({ license, credits: access.status.credits, onChange: (c) => license.last && sendSubscription({ ...license.last, credits: c }) });
+  // the search starts.
+  const withFacebook = facebookSearchOn();
   const controller = new AbortController();
   search = { controller };
   // Remembered so a search cut short by a crash can be resumed.
@@ -317,40 +236,15 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
   let expectedProfilePath = null;
   const startedAt = new Date().toISOString();
   let stats = null;
-  sendStatus({ state: 'connecting', phase: 'connection', step: 'connecting', keyword, category: category.name, sources: [...(withMaps ? ['maps'] : []), ...(withFacebook ? ['facebook'] : [])], source: withMaps ? 'maps' : 'facebook', facebook: null, workers: null, processed: 0, leads: 0, newLeads: 0, skipped: 0, message: 'Connecting to Chrome' });
+  sendStatus({ state: 'connecting', phase: 'connection', step: 'connecting', keyword, category: category.name, sources: withFacebook ? ['maps', 'facebook'] : ['maps'], source: 'maps', facebook: null, workers: null, processed: 0, leads: 0, newLeads: 0, skipped: 0, message: 'Connecting to Chrome' });
 
   search.promise = (async () => {
     try {
       expectedProfilePath = (await connectChrome(controller.signal)).path;
-      // A server without the allowance yet: a free search is used once
-      // Chrome is ready (the server refuses when none are left).
-      if (access.status.legacy && !access.status.allowed) {
-        try {
-          await license.consumeTrial();
-          sendSubscription(await license.status());
-        } catch (err) {
-          sendSubscription(await license.status());
-          sendStatus({ state: 'error', phase: 'search', message: err.message });
-          return;
-        }
-      }
       if (controller.signal.aborted) {
         sendStatus({ state: 'stopped', message: 'Search stopped' });
         return;
       }
-      // Re-checked during long searches so an expiry takes effect.
-      const recheck = setInterval(async () => {
-        const st = await license.status().catch(() => null);
-        sendSubscription(st);
-        // A subscription suspended mid-search stops it (an expired one falls
-        // back to Free, which the next charged lead enforces; an unanswered
-        // check changes nothing).
-        if (st && st.reason === 'suspended') {
-          sendStatus({ state: 'stopping', message: st.message });
-          controller.abort();
-        }
-      }, 30 * 60 * 1000);
-      controller.signal.addEventListener('abort', () => clearInterval(recheck), { once: true });
       const pages = {
         main: () => tab('main'),
         check: () => tab('check'),
@@ -395,14 +289,13 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
       });
       stats = await runSources({
         withFacebook,
-        withMaps,
         signal: controller.signal,
         send: (event, payload) => {
           if (event === 'status') return sendStatus(payload);
           send('leads:added', payload);
           verifier?.poke(); // check the new number on WhatsApp in the background
         },
-        createMaps: (emit) => new SearchSession({ keyword, categoryId: category.id, websiteFilter, store, signal: controller.signal, pages, recovery: recoveryFor(MAPS_TABS), credits, emit }),
+        createMaps: (emit) => new SearchSession({ keyword, categoryId: category.id, websiteFilter, store, signal: controller.signal, pages, recovery: recoveryFor(MAPS_TABS), emit }),
         createFacebook: (emit) =>
           new FacebookSession({
             keyword,
@@ -414,7 +307,6 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
             signal: controller.signal,
             pages,
             recovery: recoveryFor(FACEBOOK_TABS),
-            credits,
             emit,
           }),
       });
@@ -499,8 +391,6 @@ function safeFilePart(text) {
 
 // scope 'all' exports every lead; otherwise only leads matching the filter.
 async function exportCsv(scope, rawFilter) {
-  const sub = await requireSubscription();
-  if (!sub.ok) return sub;
   const filter = scope === 'all' ? {} : validateFilter(rawFilter);
   const leads = store.listLeads(filter);
   if (!leads.length) return { ok: false, error: 'There are no leads matching this selection to export.' };
@@ -559,7 +449,6 @@ function initChatsAndOutreach(cipher) {
     transport: { ready: () => wa.state === 'open', send: async (phone, text) => ({ id: await wa.send(phone, text) }) },
     details: (c) => ({ business: c.leadId ? store.leadById(c.leadId)?.name || null : null }),
     hasReplied: (phone, since) => Boolean(since) && chatStore.hasIncomingSince(jidOfPhone(phone), since),
-    canSend: async () => (await license.status()).allowed,
     // Category campaigns fill their queues from the saved leads.
     leads: (filter = {}) => store.listLeads(filter),
     nameFor: (lead) => require('../whatsapp/templates').pickName({ contactName: chatStore.chat(jidOfPhone(lead.phone))?.name, businessName: lead.name }).name,
@@ -626,8 +515,8 @@ function categoryKey(raw) {
   return cat ? { key: String(id), name: cat.name } : null;
 }
 
-// The ON/OFF switch of a category campaign. ON in live mode needs an active
-// subscription (and, once, the user's acknowledgement), like Start.
+// The ON/OFF switch of a category campaign. ON in live mode needs the
+// user's acknowledgement once, like Start.
 async function outreachSetCategory(raw, on, opts) {
   if (!outreach) return unavailable();
   const cat = categoryKey(raw);
@@ -635,10 +524,6 @@ async function outreachSetCategory(raw, on, opts) {
   if (on) {
     const existing = outreach.store.campaignForCategory(cat.key);
     const test = existing ? outreach.load(existing.id).config.test : true;
-    if (!test) {
-      const sub = await requireSubscription();
-      if (!sub.ok) return sub;
-    }
   }
   return outreach.setCategoryEnabled(cat.key, cat.name, Boolean(on), { acknowledge: Boolean(opts && opts.acknowledge === true) });
 }
@@ -647,10 +532,6 @@ async function outreachStart(id, opts) {
   if (!outreach) return unavailable();
   const c = outreach.load(id);
   if (!c) return { ok: false, error: 'That campaign no longer exists.' };
-  if (!c.config.test) {
-    const sub = await requireSubscription();
-    if (!sub.ok) return sub;
-  }
   return outreach.start(id, { acknowledge: Boolean(opts && opts.acknowledge === true) });
 }
 
@@ -658,10 +539,6 @@ async function outreachResume(id) {
   if (!outreach) return unavailable();
   const c = outreach.load(id);
   if (!c) return { ok: false, error: 'That campaign no longer exists.' };
-  if (!c.config.test) {
-    const sub = await requireSubscription();
-    if (!sub.ok) return sub;
-  }
   return outreach.resume(id);
 }
 
@@ -721,13 +598,11 @@ function initWhatsApp() {
   // A device linked earlier reconnects automatically.
   if (fake) return wa.connect();
   wa.hasSession()
-    .then(async (has) => has && (await license.status()).allowed && wa.connect())
+    .then((has) => has && wa.connect())
     .catch(() => {});
 }
 
 async function waConnect() {
-  const sub = await requireSubscription();
-  if (!sub.ok) return sub;
   if (!wa) return { ok: false, error: waInitError || 'WhatsApp is not available.' };
   await wa.connect();
   return { ok: true };
@@ -750,8 +625,6 @@ async function waLogout() {
 }
 
 async function waRecheck(phone) {
-  const sub = await requireSubscription();
-  if (!sub.ok) return sub;
   if (!wa || typeof phone !== 'string' || !E164.test(phone)) return { ok: false, error: 'Invalid number.' };
   try {
     const status = await wa.check(phone);
@@ -766,8 +639,6 @@ async function waRecheck(phone) {
 
 // One message to one lead, only after the user pressed Send.
 async function waSend(leadId, rawText) {
-  const sub = await requireSubscription();
-  if (!sub.ok) return sub;
   if (!Number.isInteger(leadId) || leadId <= 0) return { ok: false, error: 'Invalid lead.' };
   const text = typeof rawText === 'string' ? rawText.trim() : '';
   if (!text) return { ok: false, error: 'Write a message first.' };
@@ -896,15 +767,8 @@ app.whenReady().then(() => {
   try {
     store = new LeadStore(path.join(app.getPath('userData'), 'leads.db'));
     appLock = new AppLock({ store, cipher: keychainCipher() });
-    // Failed licence-server requests are recorded in licence.log (address,
-    // status, a short piece of the answer; never keys or signatures).
-    const licenceLog = fileLog(path.join(app.getPath('userData'), 'licence.log'));
-    const licCfg = licenseConfig();
-    // Which licence server this run uses, and why (the dev launcher sets
-    // LEAD_FINDER_LICENSE_URL to the local server; installers use
-    // license-config.json). An address only, nothing secret.
-    licenceLog({ event: 'config', serverUrl: licCfg.serverUrl, source: process.env.LEAD_FINDER_LICENSE_URL ? 'LEAD_FINDER_LICENSE_URL' : 'license-config.json', packaged: app.isPackaged, version: app.getVersion() });
-    license = new LicenseClient({ store, cipher: keychainCipher(), config: licCfg, log: licenceLog });
+    // The subscription system's request log, from earlier versions.
+    require('node:fs').rmSync(path.join(app.getPath('userData'), 'licence.log'), { force: true });
     const last = store.getState('lastSearch');
     if (last && ['running', 'connecting', 'paused', 'stopping'].includes(last.state)) interrupted = last;
   } catch (err) {
@@ -939,15 +803,6 @@ app.whenReady().then(() => {
     appLock.lock();
     return { ok: true };
   });
-  handle('subscription:status', async () => {
-    const st = await license.status();
-    sendSubscription(st); // keep the header in step with every check
-    return publicStatus(st);
-  });
-  handle('subscription:plans', () => license.plans().catch((err) => ({ error: err.message })));
-  handle('subscription:request', (plan) => requestActivation(plan));
-  handle('subscription:verify', (code) => verifyActivationCode(code));
-  handle('subscription:resend', () => activationCall(() => license.resendCode()));
   handle('leads:list', (filter) => store.listLeads(validateFilter(filter)));
   // Which of these leads match the table's filter (same rules as leads:list).
   handle('leads:match', (filter, ids) => {
@@ -974,8 +829,6 @@ app.whenReady().then(() => {
   handle('chats:send', async (jid, text) => {
     if (!chats) return unavailable();
     if (!isJid(jid)) return { ok: false, error: 'Invalid chat.' };
-    const sub = await requireSubscription();
-    if (!sub.ok) return sub;
     return chats.send(jid, text);
   });
   // Outreach campaign
@@ -1057,27 +910,7 @@ function smokeTest(reportFile) {
         baileys: typeof (await import('baileys')).default === 'function',
         sqlite: store.db != null,
       };
-      report.licenseServer = licenseConfig().serverUrl;
-      // The licence server this installed app talks to, and what it answers.
-      // With LEAD_FINDER_SMOKE_REQUIRE_LICENCE=1 the plans and a verified
-      // signed status are required (release checks against a test server).
-      let shipped = {};
-      try {
-        shipped = require('./license-config.json');
-      } catch {}
-      const lic = { serverUrl: report.licenseServer, shippedServerUrl: shipped.serverUrl || null, source: process.env.LEAD_FINDER_LICENSE_URL ? 'LEAD_FINDER_LICENSE_URL' : 'license-config.json' };
-      try {
-        lic.plans = (await license.plans()).plans.map((p) => p.id);
-      } catch (err) {
-        lic.plansError = err.message;
-        lic.plansErrorCode = err.code;
-      }
-      const st = await license.status();
-      lic.status = st.reason;
-      lic.statusMessage = st.message;
-      report.licence = lic;
-      const licenceOk = Array.isArray(lic.plans) && lic.plans.length === 3 && !['offline', 'misconfigured', 'invalid', 'unconfigured'].includes(st.reason);
-      const ok = report.lockScreen && Object.values(report.modules).every(Boolean) && (process.env.LEAD_FINDER_SMOKE_REQUIRE_LICENCE !== '1' || licenceOk);
+      const ok = report.lockScreen && Object.values(report.modules).every(Boolean);
       finish(ok, ok ? undefined : 'checks failed');
     } catch (err) {
       finish(false, err.message);

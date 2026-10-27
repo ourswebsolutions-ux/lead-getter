@@ -12,7 +12,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { _electron } = require('playwright-core');
 const { LeadStore } = require('../../src/database/db');
-const { unlock, startLicenseServer, deviceIdOf } = require('./helpers');
+const { unlock } = require('./helpers');
 
 const root = path.join(__dirname, '..', '..');
 const dbModule = path.join(root, 'src', 'database', 'db.js');
@@ -33,9 +33,7 @@ test('leads from both sources appear in the table as they are found', async (t) 
   fs.mkdirSync(userData);
   const dbFile = path.join(userData, 'leads.db');
   seed(dbFile);
-  const lic = await startLicenseServer();
-  t.after(() => lic.close());
-  const env = { ...process.env, ...lic.env, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome'), LEAD_FINDER_NO_UPDATES: '1' };
+  const env = { ...process.env, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome'), LEAD_FINDER_NO_UPDATES: '1' };
   delete env.ELECTRON_RUN_AS_NODE;
   const app = await _electron.launch({ args: [root], cwd: root, env });
   t.after(async () => {
@@ -44,7 +42,6 @@ test('leads from both sources appear in the table as they are found', async (t) 
   });
   const win = await app.firstWindow();
   await unlock(win);
-  await lic.activate(await deviceIdOf(win));
   const errors = [];
   win.on('pageerror', (e) => errors.push(e.message));
   await win.getByRole('heading', { name: /Today's leads/ }).waitFor();

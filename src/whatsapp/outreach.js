@@ -100,12 +100,11 @@ class Outreach extends EventEmitter {
   // transport: { ready() -> bool, send(phone, text) -> Promise<{ id }> };
   // details(contact) -> { business } (the lead's business name);
   // hasReplied(phone, sinceMs) -> bool (safety net for missed reply events);
-  // canSend() -> Promise<bool> (subscription).
   // leads(filter) -> LeadStore.listLeads(filter) rows (for category campaigns);
   // nameFor(lead) -> the name to use for a lead added automatically.
-  constructor({ store, state, transport, details = () => ({}), hasReplied = () => false, canSend = async () => true, clock = () => Date.now(), random = Math.random, zoneOf = timeZoneOf, tickMs = 30_000, leads = () => [], nameFor = (lead) => extractName(lead.name) }) {
+  constructor({ store, state, transport, details = () => ({}), hasReplied = () => false, clock = () => Date.now(), random = Math.random, zoneOf = timeZoneOf, tickMs = 30_000, leads = () => [], nameFor = (lead) => extractName(lead.name) }) {
     super();
-    Object.assign(this, { store, state, transport, details, hasReplied, canSend, clock, random, zoneOf, tickMs, leads, nameFor });
+    Object.assign(this, { store, state, transport, details, hasReplied, clock, random, zoneOf, tickMs, leads, nameFor });
     this.syncedAt = new Map(); // campaign id -> last queue sync
     this.busy = false;
     this.timer = null;
@@ -560,11 +559,6 @@ class Outreach extends EventEmitter {
         }
         if (!test && !this.transport.ready()) {
           this.setWaiting(id, 'whatsapp');
-          continue;
-        }
-        // Asked only when a message is due (it is a licence-server request).
-        if (!test && !(await this.canSend())) {
-          this.setWaiting(id, 'subscription');
           continue;
         }
         const pick = this.next(now, st);

@@ -26,13 +26,6 @@ contextBridge.exposeInMainWorld('leadFinder', {
   lockUnlock: (pin) => ipcRenderer.invoke('lock:unlock', String(pin ?? '')),
   lockChange: (current, next, confirm) => ipcRenderer.invoke('lock:change', String(current ?? ''), String(next ?? ''), String(confirm ?? '')),
   lockNow: () => ipcRenderer.invoke('lock:lock'),
-  // Subscription
-  subscriptionStatus: () => ipcRenderer.invoke('subscription:status'),
-  subscriptionPlans: () => ipcRenderer.invoke('subscription:plans'),
-  requestActivation: (plan) => ipcRenderer.invoke('subscription:request', String(plan ?? '')),
-  verifyActivationCode: (code) => ipcRenderer.invoke('subscription:verify', String(code ?? '')),
-  resendActivationCode: () => ipcRenderer.invoke('subscription:resend'),
-  onSubscription: (cb) => subscribe('subscription:status', cb),
   stopSearch: () => ipcRenderer.invoke('search:stop'),
   facebookSearch: () => ipcRenderer.invoke('facebook:get'),
   setFacebookSearch: (on) => ipcRenderer.invoke('facebook:set', Boolean(on)),

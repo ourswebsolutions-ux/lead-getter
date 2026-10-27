@@ -49,26 +49,14 @@ jobs:
 
       - name: Unit tests (no network)
         shell: bash
-        run: node --test test/category-campaigns.test.js test/facebook.test.js test/facebook-scroll.test.js test/parallel-pages.test.js test/credits.test.js test/license-errors.test.js test/chats.test.js test/outreach.test.js test/campaigns.test.js test/updater.test.js test/subscription.test.js test/applock.test.js test/categories.test.js test/csv.test.js test/db.test.js test/phone.test.js test/session.test.js test/website.test.js test/whatsapp.test.js test/chrome.test.js test/maps-dom.test.js
+        run: node --test test/category-campaigns.test.js test/facebook.test.js test/facebook-scroll.test.js test/parallel-pages.test.js test/chats.test.js test/outreach.test.js test/campaigns.test.js test/updater.test.js test/applock.test.js test/categories.test.js test/csv.test.js test/db.test.js test/phone.test.js test/session.test.js test/website.test.js test/whatsapp.test.js test/chrome.test.js test/maps-dom.test.js
 
       - name: Build installers
         run: npm run release -- ${{ matrix.args }}
 
-      # Each installed app is started twice, with no Node or dev tools around
-      # it (see smokeTest in main.js):
-      #   shipped: as installed; it must use the licence address in
-      #     src/main/license-config.json (what that answers is printed);
-      #   server: pointed at the real licence server code served under
-      #     /lead-getter like production (throwaway key, scripts/
-      #     ci-licence-server.js); plans and a signed status must work.
-      - name: Start a licence server for the checks
-        shell: bash
-        run: |
-          node scripts/ci-licence-server.js "$RUNNER_TEMP/lic" 8799 > "$RUNNER_TEMP/lic.log" 2>&1 &
-          for i in $(seq 30); do [ -f "$RUNNER_TEMP/lic/pubkey.txt" ] && break; sleep 1; done
-          cat "$RUNNER_TEMP/lic.log"
-          echo "LIC_PUBKEY=$(cat "$RUNNER_TEMP/lic/pubkey.txt")" >> "$GITHUB_ENV"
-
+      # Each installed app is started once, with no Node or dev tools around
+      # it (see smokeTest in main.js): it must start, show its lock screen
+      # and load its modules.
       - name: Installed app checks (Linux .deb and AppImage)
         if: runner.os == 'Linux'
         shell: bash
@@ -77,14 +65,9 @@ jobs:
           sudo apt-get install -y -qq ./release/lead-finder_*_amd64.deb
           for bin in "/opt/Lead Finder/lead-finder" "$(ls release/*.AppImage)"; do
             extra=""; case "$bin" in *.AppImage) extra="--appimage-extract-and-run";; esac
-            echo "::group::$bin (as shipped)"
+            echo "::group::$bin"
             LEAD_FINDER_USER_DATA="$RUNNER_TEMP/ud-$RANDOM" LEAD_FINDER_SMOKE_TEST="$RUNNER_TEMP/s1.json" xvfb-run -a "$bin" $extra --no-sandbox || true
-            node scripts/ci-check-smoke.js "$RUNNER_TEMP/s1.json" shipped
-            echo "::endgroup::"; echo "::group::$bin (licence server)"
-            LEAD_FINDER_USER_DATA="$RUNNER_TEMP/ud-$RANDOM" LEAD_FINDER_SMOKE_TEST="$RUNNER_TEMP/s2.json" \
-              LEAD_FINDER_LICENSE_URL=http://127.0.0.1:8799/lead-getter LEAD_FINDER_LICENSE_PUBKEY="$LIC_PUBKEY" LEAD_FINDER_SMOKE_REQUIRE_LICENCE=1 \
-              xvfb-run -a "$bin" $extra --no-sandbox || true
-            node scripts/ci-check-smoke.js "$RUNNER_TEMP/s2.json" server
+            node scripts/ci-check-smoke.js "$RUNNER_TEMP/s1.json"
             echo "::endgroup::"; rm -f "$RUNNER_TEMP"/s?.json
           done
 
@@ -100,16 +83,8 @@ jobs:
           $env:LEAD_FINDER_USER_DATA = "$env:RUNNER_TEMP\ud1"
           $env:LEAD_FINDER_SMOKE_TEST = "$env:RUNNER_TEMP\s1.json"
           Start-Process $exe.FullName -Wait
-          node scripts/ci-check-smoke.js "$env:RUNNER_TEMP\s1.json" shipped
-          if ($LASTEXITCODE -ne 0) { throw 'installed app (as shipped) failed' }
-          $env:LEAD_FINDER_USER_DATA = "$env:RUNNER_TEMP\ud2"
-          $env:LEAD_FINDER_SMOKE_TEST = "$env:RUNNER_TEMP\s2.json"
-          $env:LEAD_FINDER_LICENSE_URL = 'http://127.0.0.1:8799/lead-getter'
-          $env:LEAD_FINDER_LICENSE_PUBKEY = $env:LIC_PUBKEY
-          $env:LEAD_FINDER_SMOKE_REQUIRE_LICENCE = '1'
-          Start-Process $exe.FullName -Wait
-          node scripts/ci-check-smoke.js "$env:RUNNER_TEMP\s2.json" server
-          if ($LASTEXITCODE -ne 0) { throw 'installed app (licence server) failed' }
+          node scripts/ci-check-smoke.js "$env:RUNNER_TEMP\s1.json"
+          if ($LASTEXITCODE -ne 0) { throw 'installed app failed' }
 
       - name: Installed app checks (macOS app)
         if: runner.os == 'macOS'
@@ -119,10 +94,7 @@ jobs:
           hdiutil attach "$dmg" -nobrowse -mountpoint /tmp/lf
           app="/tmp/lf/Lead Finder.app/Contents/MacOS/Lead Finder"
           LEAD_FINDER_USER_DATA="$RUNNER_TEMP/ud1" LEAD_FINDER_SMOKE_TEST="$RUNNER_TEMP/s1.json" "$app" || true
-          node scripts/ci-check-smoke.js "$RUNNER_TEMP/s1.json" shipped
-          LEAD_FINDER_USER_DATA="$RUNNER_TEMP/ud2" LEAD_FINDER_SMOKE_TEST="$RUNNER_TEMP/s2.json" \
-            LEAD_FINDER_LICENSE_URL=http://127.0.0.1:8799/lead-getter LEAD_FINDER_LICENSE_PUBKEY="$LIC_PUBKEY" LEAD_FINDER_SMOKE_REQUIRE_LICENCE=1 "$app" || true
-          node scripts/ci-check-smoke.js "$RUNNER_TEMP/s2.json" server
+          node scripts/ci-check-smoke.js "$RUNNER_TEMP/s1.json"
           hdiutil detach /tmp/lf
 
       - uses: actions/upload-artifact@v4
@@ -149,12 +121,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      # Installers talk to the licence server in src/main/license-config.json.
-      # Publishing while it isn't answering there would ship apps that can't
-      # check subscriptions (it must answer as the licence server and sign
-      # with the key the app trusts).
-      - name: Check the production licence server
-        run: node scripts/check-licence-server.js
       - uses: actions/download-artifact@v4
         with:
           path: dist-installers

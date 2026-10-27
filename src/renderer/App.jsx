@@ -9,7 +9,6 @@ import ChatsView from './ChatsView.jsx';
 import OutreachView from './OutreachView.jsx';
 import Composer from './Composer.jsx';
 import { currentTheme, setTheme } from './theme.js';
-import Subscription, { planPill, statusLine } from './Subscription.jsx';
 import { ChangePin } from './LockScreen.jsx';
 
 const ROWS_PER_PAGE = 500;
@@ -423,9 +422,6 @@ export default function App({ onLock }) {
   const [facebookOn, setFacebookOn] = useState(false); // Facebook Lead Search (stored in the app)
   const [tableSearch, setTableSearch] = useState('');
   const [searchQuery, setSearchQuery] = useState(''); // debounced
-  const [sub, setSub] = useState(null);
-  const [plansOpen, setPlansOpen] = useState(null); // null | { notice }
-  const refreshSub = useCallback(() => api.subscriptionStatus().then(setSub).catch(() => {}), []);
   const [changePin, setChangePin] = useState(false);
   // Leads | Chats | Outreach. Views stay mounted once opened, so switching
   // keeps each one's place (scroll, open chat, unsaved templates).
@@ -582,8 +578,6 @@ export default function App({ onLock }) {
     const offStatus = api.onStatus(setStatus);
     const offSummary = api.onSummary(setSummary);
     api.whatsappState().then(setWa).catch(() => {});
-    api.subscriptionStatus().then(setSub).catch(() => {});
-    const offSub = api.onSubscription(setSub);
     const offWa = api.onWhatsAppState(setWa);
     // Background WhatsApp checks: the leads with that number are applied
     // like new ones (with "WhatsApp only", a confirmed number now shows).
@@ -602,7 +596,6 @@ export default function App({ onLock }) {
       offStatus();
       offSummary();
       offWa();
-      offSub();
       offWaLeads();
       offLead();
       clearInterval(timer);
@@ -632,9 +625,7 @@ export default function App({ onLock }) {
   async function runSearch(kw, cat) {
     const res = await api.startSearch(kw, cat, websiteFilter);
     if (!res.ok) {
-      // No active subscription: show the plans with the exact reason.
-      if (res.subscription) setPlansOpen({ notice: res.error });
-      else notify({ type: 'error', text: res.error });
+      notify({ type: 'error', text: res.error });
       return;
     }
     setCategory(res.category.name); // the saved spelling
@@ -660,8 +651,7 @@ export default function App({ onLock }) {
   async function exportCsv(scope) {
     try {
       const res = await api.exportCsv(scope, filter);
-      if (res.subscription) setPlansOpen({ notice: res.error });
-      else if (res.ok) notify({ type: 'ok', text: `Exported ${res.count} leads to ${res.filePath}` });
+      if (res.ok) notify({ type: 'ok', text: `Exported ${res.count} leads to ${res.filePath}` });
       else if (!res.canceled) notify({ type: 'error', text: res.error });
     } catch (err) {
       notify({ type: 'error', text: `Export failed: ${err.message}` });
@@ -738,16 +728,6 @@ export default function App({ onLock }) {
           <span className="conn-dot" />
           {status.profile ? <span>Chrome · {status.profile}</span> : <span>Chrome not connected</span>}
         </div>
-        {(() => {
-          const pill = planPill(sub);
-          return (
-            <button type="button" className={`plan-pill tone-${pill.tone}`} title={statusLine(sub)} onClick={() => setPlansOpen({ notice: null })}>
-              <Icon name="crown" size={14} />
-              <span>{pill.text}</span>
-              {pill.attention && <span className="pill-dot" aria-label="Activation code waiting" />}
-            </button>
-          );
-        })()}
         <WhatsAppPanel wa={wa} />
         <ThemeToggle />
         <LockMenu onLock={onLock} onChangePin={() => setChangePin(true)} />
@@ -1087,15 +1067,6 @@ export default function App({ onLock }) {
 
       {active && <AgentCard status={status} />}
       {summary && !active && <Celebration summary={summary} onClose={() => setSummary(null)} />}
-      {plansOpen && (
-        <Subscription
-          status={sub}
-          notice={plansOpen.notice}
-          notify={notify}
-          onRefresh={refreshSub}
-          onClose={() => (setPlansOpen(null), refreshSub())}
-        />
-      )}
       {changePin && <ChangePin notify={notify} onClose={() => setChangePin(false)} />}
       {composeLead && <Composer lead={composeLead} connected={wa?.state === 'open'} notify={notify} onClose={() => setComposeLead(null)} />}
 

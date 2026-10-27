@@ -10,7 +10,7 @@
 // part (Google Maps results are already saved).
 
 const fbDefault = require('./facebook');
-const { SearchSession, StopRequested, FatalSearchError, LimitReached, DEFAULT_PACING } = require('./search-session');
+const { SearchSession, StopRequested, FatalSearchError, DEFAULT_PACING } = require('./search-session');
 
 const FB_PACING = {
   fbScroll: [1500, 3000], // pause between scrolls when new posts loaded
@@ -61,7 +61,6 @@ class FacebookSession extends SearchSession {
       return { state: 'done', message: this.summary() };
     } catch (err) {
       if (err instanceof StopRequested) return { state: 'stopped', message: 'Search stopped' };
-      if (err instanceof LimitReached) return { state: 'done', limit: true, message: `${err.message} ${this.summary()}` };
       if (err instanceof FacebookUnavailable) return { state: 'unavailable', kind: err.kind, message: `${err.message} ${this.summary()}` };
       const detail = String(err?.message || err).split('\n')[0];
       return { state: 'error', message: `The Facebook search did not finish (${detail}). ${this.summary()}` };
@@ -113,7 +112,6 @@ class FacebookSession extends SearchSession {
     let read = 0;
     let stalls = 0;
     for (;;) {
-      if (this.credits?.exhausted('facebook')) throw new LimitReached(this.credits.message('facebook'));
       const state = await this.op(() => this.fb.detectState(page));
       if (state) throw new FacebookUnavailable(state);
       await this.op(() => this.fb.expandSeeMore(page));
@@ -169,8 +167,6 @@ class FacebookSession extends SearchSession {
     this.stats.facebook.numbers += phones.length;
     let added = 0;
     for (const ph of phones) {
-      // A new lead uses one of today's leads first.
-      await this.charge('facebook', this.credits ? this.store.creditKeyForFacebook(ph.phone) : null);
       const saved = this.saveFacebook({
         phone: ph.phone,
         country: ph.country,

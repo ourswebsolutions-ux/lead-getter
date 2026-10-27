@@ -11,7 +11,7 @@ const net = require('node:net');
 const { spawn } = require('node:child_process');
 const { _electron, chromium } = require('playwright-core');
 const { LeadStore } = require('../../src/database/db');
-const { unlock, startLicenseServer, deviceIdOf } = require('./helpers');
+const { unlock } = require('./helpers');
 
 const root = path.join(__dirname, '..', '..');
 const shots = process.env.LEAD_FINDER_SCREENSHOTS;
@@ -38,9 +38,7 @@ test('WhatsApp: real QR linking, statuses, composer and send guards', async (t) 
   const userData = path.join(tmp, 'app');
   fs.mkdirSync(userData);
   seed(path.join(userData, 'leads.db'));
-  const lic = await startLicenseServer();
-  t.after(() => lic.close());
-  const env = { ...process.env, ...lic.env, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome') };
+  const env = { ...process.env, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome') };
   delete env.ELECTRON_RUN_AS_NODE;
   const app = await _electron.launch(process.env.LEAD_FINDER_EXE ? { executablePath: process.env.LEAD_FINDER_EXE, args: [], env } : { args: [root], cwd: root, env });
   t.after(async () => {
@@ -49,7 +47,6 @@ test('WhatsApp: real QR linking, statuses, composer and send guards', async (t) 
   });
   const win = await app.firstWindow();
   await unlock(win);
-  await lic.activate(await deviceIdOf(win));
   const errors = [];
   win.on('pageerror', (e) => errors.push(e.message));
   await win.getByRole('heading', { name: /Today's leads/ }).waitFor();
@@ -135,9 +132,7 @@ test('WhatsApp linking with the real keychain reaches a real QR code', async (t)
   fs.mkdirSync(userData);
   seed(path.join(userData, 'leads.db'));
   const port = await freePort();
-  const lic = await startLicenseServer();
-  t.after(() => lic.close());
-  const env = { ...process.env, ...lic.env, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome') };
+  const env = { ...process.env, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome') };
   delete env.ELECTRON_RUN_AS_NODE;
   const exe = process.env.LEAD_FINDER_EXE;
   const proc = exe
@@ -160,7 +155,6 @@ test('WhatsApp linking with the real keychain reaches a real QR code', async (t)
     if (!win) await new Promise((r) => setTimeout(r, 250));
   }
   await unlock(win);
-  await lic.activate(await deviceIdOf(win));
   await win.getByRole('heading', { name: /Today's leads/ }).waitFor();
   const snap = await win.evaluate(() => window.leadFinder.whatsappState());
   assert.equal(snap.secure, true, 'real OS keychain in a normal launch');
