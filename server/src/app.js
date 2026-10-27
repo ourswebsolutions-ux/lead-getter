@@ -1,56 +1,56 @@
 'use strict';
 
-// HTTP API and admin pages for Lead Finder subscriptions.
+// HTTP API for Lead Finder subscriptions. This standalone server is for
+// development, tests and CI; production serves the same API from the
+// subscription website (subscription.axorawebsolutions.com/lead-getter).
 //
-//   GET  /api/plans                     public plan list
-//   POST /api/applications              (device-signed) apply with payment screenshot
-//   GET  /api/license?nonce=…           (device-signed) signed subscription status
-//   GET  /admin/applications/:id/:action?token=…   confirmation page (approve|cancel)
-//   POST /admin/applications/:id/:action           performs it (single use)
-//   GET  /admin/applications/:id/screenshot?token=…
-//   GET  /verify-email?token=…
+//   GET  /api/plans                      plans and payment accounts (public)
+//   GET  /api/license?nonce=…            (device-signed) signed status: plan, today's
+//                                        allowance, activation request
+//   POST /api/activation                 (device-signed) { plan } an Activation ID and a
+//                                        4-digit code for that plan, emailed to the administrator
+//   POST /api/activation/verify          (device-signed) { code } activates the plan
+//   POST /api/activation/resend          (device-signed) a new code (to the administrator)
+//   POST /api/credits/reserve            (device-signed) { source, key } charge one new
+//                                        qualified lead to today's allowance
+//   GET  /health
 //
-// With the Axora subscription website configured (`axora`), it decides who
-// has a paid subscription: status is read from it on every check, and the
-// email Approve button activates the device there.
-//
-// Data: local SQLite (store) and an uploads folder (screenshots).
+// Activation: the app asks for a plan; the server makes an Activation ID
+// and a 4-digit code and emails both to the administrator (SUBSCRIPTION_
+// ADMIN_EMAIL) only. Once paid, the administrator gives the customer the
+// code (WhatsApp, phone, …); entering it in the app activates that plan.
 
 const http = require('node:http');
 const crypto = require('node:crypto');
-const { PLANS, PAYMENT_METHODS, TRIAL_SEARCHES, addMonths } = require('./plans');
+const { PLANS, PAID_PLAN_IDS, PAYMENT_METHODS } = require('./plans');
+const credits = require('./credits');
+const { MAX_OTP_ATTEMPTS } = require('./store');
 const c = require('./crypto');
 const pages = require('./pages');
 
-const MAX_BODY = 8 * 1024 * 1024;
-const MAX_SCREENSHOT = 5 * 1024 * 1024;
+const MAX_BODY = 64 * 1024;
 const CLOCK_SKEW_MS = 5 * 60 * 1000;
-const ACTION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const EMAIL_TTL_MS = 3 * 24 * 60 * 60 * 1000;
-const REISSUE_GAP_MS = 10 * 60 * 1000;
-// New applications are always allowed (even with one pending); this only
-// stops a flood of emails to the administrator.
-const MAX_APPLICATIONS_PER_DAY = 10;
-// Same rule as the subscription website's POST /users, so an email accepted
-// here is never rejected there.
-const EMAIL_RE = /^[^\s@<>()",;:]{1,64}@[^\s@<>()",;:]{1,189}\.[a-z]{2,24}$/i;
-
-const IMAGE_TYPES = [
-  { type: 'image/png', ext: 'png', test: (b) => b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) },
-  { type: 'image/jpeg', ext: 'jpg', test: (b) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
-  { type: 'image/webp', ext: 'webp', test: (b) => b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP' },
-];
+// The administrator passes the code on by hand, so it lasts a day.
+const OTP_TTL_MS = 24 * 60 * 60 * 1000;
+const OTP_RESEND_MS = 60 * 1000;
+const OTP_MAX_PER_DAY = 5;
+const MAX_REQUESTS_PER_DAY = 5;
 
 class HttpError extends Error {
-  constructor(status, message) {
+  constructor(status, message, extra) {
     super(message);
     this.status = status;
+    this.extra = extra;
   }
 }
 
-function createApp({ config, store, storage, mailer, axora = null, now = () => new Date(), logger = console }) {
+function createApp({ config, store, mailer, now = () => new Date(), logger = console }) {
   const privateKey = crypto.createPrivateKey(config.licensePrivateKey);
+  const otpKey = c.otpKey(config.licensePrivateKey);
+  const timezone = config.timezone || credits.DEFAULT_TIMEZONE;
+  const plans = config.plans || PLANS;
   const nowIso = () => now().toISOString();
+  const later = (ms) => new Date(now().getTime() + ms).toISOString();
   const link = (p) => `${config.publicBaseUrl.replace(/\/$/, '')}${p}`;
   // When served under a path (PUBLIC_BASE_URL https://host/lead-getter), the
   // prefix is removed here, whether or not the host's proxy already did.
@@ -77,7 +77,16 @@ function createApp({ config, store, storage, mailer, axora = null, now = () => n
     });
   }
 
-  // Verifies a device-signed request; returns the device id.
+  function parseJson(body) {
+    if (!body.length) return {};
+    try {
+      const data = JSON.parse(body.toString('utf8'));
+      if (data && typeof data === 'object' && !Array.isArray(data)) return data;
+    } catch {}
+    throw new HttpError(400, 'Invalid JSON');
+  }
+
+  // Verifies a device-signed request: { deviceId, machineId }.
   async function authenticate(req, url, body) {
     const key = req.headers['x-lf-key'];
     const ts = Number(req.headers['x-lf-ts']);
@@ -102,21 +111,12 @@ function createApp({ config, store, storage, mailer, axora = null, now = () => n
     } catch {
       throw new HttpError(401, 'Device key mismatch');
     }
-    req.machineId = machine || `device:${deviceId}`;
-    return deviceId;
-  }
-
-  // Free searches are counted per computer (machine id), so reinstalling or
-  // clearing the app's data does not start a new trial.
-  async function trialFor(machineId) {
-    const used = await store.trialUsed(machineId);
-    return { limit: TRIAL_SEARCHES, used: Math.min(used, TRIAL_SEARCHES), remaining: Math.max(0, TRIAL_SEARCHES - used) };
+    return { deviceId, machineId: machine || `device:${deviceId}` };
   }
 
   function json(res, status, data) {
-    const body = JSON.stringify(data);
     res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
-    res.end(body);
+    res.end(JSON.stringify(data));
   }
 
   function html(res, status, body) {
@@ -126,307 +126,208 @@ function createApp({ config, store, storage, mailer, axora = null, now = () => n
       'x-content-type-options': 'nosniff',
       'x-frame-options': 'DENY',
       'referrer-policy': 'no-referrer',
-      'content-security-policy': "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+      'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
     });
     res.end(body);
   }
 
-  // A new random token; only its hash is stored.
-  function makeToken(action, ttl) {
-    const token = c.randomToken();
-    return { token, hash: c.hashToken(token), action, expiresAt: new Date(now().getTime() + ttl).toISOString() };
-  }
-
-  // A valid, unused, unexpired token for this application and action.
-  async function checkToken(token, applicationId, action) {
-    if (!token || typeof token !== 'string' || token.length > 100) return { error: 'This link is invalid.' };
-    const row = await store.token(c.hashToken(token));
-    if (!row || row.application_id !== applicationId || row.action !== action) return { error: 'This link is invalid.' };
-    if (row.used_at) return { error: 'This link has already been used.', used: true };
-    if (row.expires_at < nowIso()) return { error: 'This link has expired.', expired: true };
-    return { row };
-  }
-
-  // The website's effectiveStatus, as this API's subscription states.
-  const WEBSITE_STATE = { active: 'active', expired: 'expired', suspended: 'suspended', inactive: 'inactive' };
-
-  // The device's account on the subscription website, as
-  // { subscription, registration }. With register, a Device ID the website
-  // doesn't know is added there (as an inactive user) under the customer's
-  // email from their latest application. Existing users, and an email that
-  // belongs to another device, are never changed. If the website can't be
-  // reached or refuses the token, nothing happens and the next check retries.
-  const logged = new Map(); // deviceId -> last logged registration state
-  const note = (deviceId, state, text) => {
-    if (logged.get(deviceId) === state) return;
-    logged.set(deviceId, state);
-    logger.error(`[subscription website] ${text}`);
-  };
-
-  async function websiteAccount(deviceId, { register = false } = {}) {
-    const fromSite = (s) => ({ state: WEBSITE_STATE[s.effectiveStatus] || 'inactive', expiresAt: s.expiresAt });
+  function audit(actor, action, target, details) {
     try {
-      const found = await axora.subscription(deviceId);
-      if (found) return { subscription: fromSite(found), registration: { state: 'registered' } };
-      const email = await store.latestEmail(deviceId);
-      if (!register || !email) return { subscription: { state: 'none' }, registration: { state: email ? 'not_registered' : 'no_email' } };
-      const r = await axora.register(deviceId, email);
-      if (r.state === 'registered') {
-        note(deviceId, 'registered', `registered Device ID ${deviceId} (${email}) as an inactive user`);
-        return { subscription: fromSite(r.user.subscription), registration: { state: 'registered' } };
-      }
-      if (r.state === 'exists') {
-        const again = await axora.subscription(deviceId);
-        return { subscription: again ? fromSite(again) : { state: 'none' }, registration: { state: 'registered' } };
-      }
-      note(deviceId, r.state, `could not register Device ID ${deviceId}: ${r.state === 'email_in_use' ? `${email} already belongs to another Device ID (left unchanged)` : r.message}`);
-      return { subscription: { state: 'none' }, registration: { state: r.state } };
+      store.audit({ at: nowIso(), actor, action, target, details });
     } catch (err) {
-      note(deviceId, 'unavailable', err.message);
-      return { subscription: { state: 'unavailable' }, registration: { state: 'unavailable' } };
+      logger.error(`[audit] ${err.message}`);
     }
   }
 
-  async function subscriptionFor(deviceId) {
-    if (axora) return (await websiteAccount(deviceId)).subscription;
-    const lic = await store.license(deviceId);
-    if (!lic) return { state: 'none' };
-    const active = !lic.expiresAt || lic.expiresAt > nowIso();
-    return { state: active ? 'active' : 'expired', plan: lic.plan, activatedAt: lic.activatedAt, expiresAt: lic.expiresAt || null };
+  // --- status ---------------------------------------------------------------
+
+  // Today's allowance for the device (or computer, on Free).
+  function creditState(deviceId, machineId) {
+    const t = now();
+    const sub = store.subscription(deviceId, t.toISOString());
+    const ent = credits.entitlementFor(sub, plans);
+    const account = credits.accountFor(ent, { deviceId, machineId });
+    const day = credits.dayKey(t, timezone);
+    const view = () =>
+      credits.snapshot(ent, { day, timezone, resetsAt: credits.nextDayStart(t, timezone), usage: store.usageToday(account, day), discovered: ent.scope === 'unlimited' ? store.discovered(account) : null });
+    return { sub, ent, account, day, view };
   }
 
-  async function sendAdminEmail(app, approve, cancel, attachment) {
-    const approveUrl = link(`/admin/applications/${app.id}/approve?token=${approve}`);
-    const cancelUrl = link(`/admin/applications/${app.id}/cancel?token=${cancel}`);
-    await mailer.send({
-      to: config.adminEmail,
-      subject: `Subscription request ${app.id}: ${app.plan.name} (${app.plan.priceLabel})`,
-      html: pages.adminEmail(app, approveUrl, cancelUrl),
-      text: pages.adminEmailText(app, approveUrl, cancelUrl),
-      attachments: attachment ? [attachment] : [],
-    });
+  // What the app shows of a request (never the code).
+  function activationView(r) {
+    if (!r) return null;
+    return {
+      id: r.id,
+      status: r.status,
+      plan: r.plan,
+      createdAt: r.created_at,
+      code: {
+        sentAt: r.otp_sent_at,
+        expiresAt: r.otp_expires_at,
+        attemptsLeft: r.otp_hash ? Math.max(0, MAX_OTP_ATTEMPTS - r.otp_attempts) : 0,
+        resendAt: r.otp_sent_at ? new Date(Date.parse(r.otp_sent_at) + OTP_RESEND_MS).toISOString() : null,
+      },
+    };
   }
 
-  // --- API ---------------------------------------------------------------------
-
-  async function apply(req, res, url) {
-    const body = await readBody(req);
-    const deviceId = await authenticate(req, url, body);
-    let data;
-    try {
-      data = JSON.parse(body.toString('utf8'));
-    } catch {
-      throw new HttpError(400, 'Invalid JSON');
-    }
-    const plan = PLANS[data.plan];
-    if (!plan) throw new HttpError(400, 'Choose a subscription plan.');
-    const message = typeof data.message === 'string' ? data.message.trim() : '';
-    if (message.length > 1000) throw new HttpError(400, 'The message is too long (1000 characters maximum).');
-    // The email identifies the customer on the subscription website.
-    const email = typeof data.email === 'string' ? data.email.trim().toLowerCase() : '';
-    if (!email) throw new HttpError(400, 'Enter your email address.');
-    if (!EMAIL_RE.test(email) || email.length > 254) throw new HttpError(400, 'The email address is not valid.');
-    const shot = Buffer.from(typeof data.screenshot?.data === 'string' ? data.screenshot.data : '', 'base64');
-    if (!shot.length) throw new HttpError(400, 'Attach the payment screenshot.');
-    if (shot.length > MAX_SCREENSHOT) throw new HttpError(400, 'The screenshot is larger than 5 MB.');
-    const kind = IMAGE_TYPES.find((t) => t.test(shot));
-    if (!kind) throw new HttpError(400, 'The screenshot must be a PNG, JPEG or WebP image.');
-
-    const since = new Date(now().getTime() - 24 * 60 * 60 * 1000).toISOString();
-    if ((await store.countApplicationsSince(deviceId, since)) >= MAX_APPLICATIONS_PER_DAY) {
-      throw new HttpError(429, 'Too many applications today. Please try again tomorrow.');
-    }
-
-    const id = `LF-${crypto.randomBytes(5).toString('hex').toUpperCase()}`;
-    const objectPath = `applications/${id}/${crypto.randomBytes(8).toString('hex')}.${kind.ext}`;
-    await storage.upload(objectPath, shot, kind.type);
-    const approve = makeToken('approve', ACTION_TTL_MS);
-    const cancel = makeToken('cancel', ACTION_TTL_MS);
-    const verify = email ? makeToken('verify_email', EMAIL_TTL_MS) : null;
-    try {
-      await store.createApplication(
-        { id, deviceId, plan: plan.id, message, email, screenshotPath: objectPath, screenshotType: kind.type, screenshotSize: shot.length, screenshotSha256: c.sha256(shot).toString('hex'), createdAt: nowIso() },
-        [approve, cancel, ...(verify ? [verify] : [])],
-      );
-    } catch (err) {
-      await storage.remove([objectPath]).catch(() => {});
-      throw err;
-    }
-
-    // Registers a new device on the subscription website (inactive) now, so
-    // the administrator can find it there; retried on later checks if needed.
-    const account = axora ? await websiteAccount(deviceId, { register: true }) : null;
-    const app = { id, plan, message, email, deviceId, createdAt: nowIso(), current: account ? account.subscription : await subscriptionFor(deviceId), website: account?.registration.state };
-    try {
-      await sendAdminEmail(app, approve.token, cancel.token, { filename: `payment-${id}.${kind.ext}`, content: shot, contentType: kind.type });
-    } catch (err) {
-      // Without the email nobody can approve it: remove the application
-      // (it was never seen by anyone) and its upload, so the user retries.
-      await store.discardUnsentApplication(id);
-      await storage.remove([objectPath]).catch(() => {});
-      logger.error(`[mail] admin email for ${id} failed: ${err.code || ''} ${String(err.message).split('\n')[0]}`);
-      throw new HttpError(502, 'The application could not be sent for approval (email failed). Please try again later.');
-    }
-    if (verify) {
-      const v = link(`/verify-email?token=${verify.token}`);
-      mailer
-        .send({ to: email, subject: 'Confirm your email for Lead Finder', html: pages.verifyEmail(v), text: `Confirm your email for Lead Finder: ${v}` })
-        .catch((err) => logger.error(`[mail] verification email for ${id} failed: ${err.code || ''}`));
-    }
-    json(res, 201, { applicationId: id, status: 'pending', plan: plan.id, emailVerificationSent: Boolean(verify) });
+  function planView(sub, ent) {
+    const p = plans[ent.planId] || plans.free;
+    return { id: p.id, name: p.name, state: ent.state === 'active' && p.id === 'free' ? 'free' : ent.state, expiresAt: sub.state === 'active' || sub.state === 'expired' || sub.state === 'suspended' ? sub.expiresAt || null : null, activatedAt: sub.activatedAt || null, expiredPlan: sub.state === 'expired' ? sub.plan : null };
   }
 
   async function license(req, res, url) {
     const body = await readBody(req);
-    const deviceId = await authenticate(req, url, body);
+    const { deviceId, machineId } = await authenticate(req, url, body);
     const nonce = url.searchParams.get('nonce') || '';
     if (!/^[A-Za-z0-9_-]{16,64}$/.test(nonce)) throw new HttpError(400, 'Missing nonce');
-    const [account, application, pendingApplications, trial] = await Promise.all([
-      axora ? websiteAccount(deviceId, { register: true }) : subscriptionFor(deviceId).then((subscription) => ({ subscription })),
-      store.latestApplication(deviceId),
-      store.pendingCount(deviceId),
-      trialFor(req.machineId),
-    ]);
-    const payload = { v: 1, deviceId, nonce, serverTime: nowIso(), subscription: account.subscription, registration: account.registration, application, pendingApplications, trial };
+    const cs = creditState(deviceId, machineId);
+    const payload = {
+      v: 2,
+      deviceId,
+      nonce,
+      serverTime: nowIso(),
+      plan: planView(cs.sub, cs.ent),
+      credits: cs.view(),
+      activation: activationView(store.openActivation(deviceId, nowIso())),
+      subscription: { state: cs.sub.state, plan: cs.sub.plan || null, expiresAt: cs.sub.expiresAt || null },
+    };
     json(res, 200, { token: c.signToken(payload, privateKey) });
   }
 
-  // Uses one free search, atomically; refused once all are used.
-  async function consumeTrial(req, res, url) {
+  // --- activation ---------------------------------------------------------------
+
+  // Emails the Activation ID and its code to the administrator (only).
+  function sendCode(r, code, { renewed = false } = {}) {
+    const row = { ...r, current: store.subscription(r.device_id, nowIso()) };
+    const p = plans[r.plan];
+    return mailer.send({
+      to: config.adminEmail,
+      subject: `Lead Finder activation ${r.id}: ${p.name}${renewed ? ' (new code)' : ''}`,
+      html: pages.adminCodeEmail(row, plans, code),
+      text: pages.adminCodeText(row, plans, code),
+    });
+  }
+
+  async function requestActivation(req, res, url) {
     const body = await readBody(req);
-    const deviceId = await authenticate(req, url, body);
-    if ((await subscriptionFor(deviceId)).state === 'active') return json(res, 200, { consumed: false, subscribed: true, trial: await trialFor(req.machineId) });
-    if (!(await store.consumeTrial(req.machineId, TRIAL_SEARCHES, nowIso()))) {
-      throw new HttpError(402, `Your ${TRIAL_SEARCHES} free searches have been used. Choose a plan to keep searching.`);
+    const { deviceId, machineId } = await authenticate(req, url, body);
+    const data = parseJson(body);
+    if (!PAID_PLAN_IDS.includes(data.plan)) throw new HttpError(400, 'Choose a plan.');
+    const open = store.openActivation(deviceId, nowIso());
+    if (open?.plan === data.plan) return json(res, 200, { activation: activationView(open) });
+    if (store.countActivationsSince(deviceId, new Date(now().getTime() - 86_400_000).toISOString()) >= MAX_REQUESTS_PER_DAY) {
+      throw new HttpError(429, 'Too many activation requests today. Please try again tomorrow.');
     }
-    json(res, 200, { consumed: true, trial: await trialFor(req.machineId) });
-  }
-
-  // --- admin actions ------------------------------------------------------------
-
-  async function appRow(id) {
-    return /^LF-[0-9A-F]{10}$/.test(id) ? store.application(id) : null;
-  }
-
-  async function adminPage(req, res, url, id, action) {
-    const app = await appRow(id);
-    const t = app ? await checkToken(url.searchParams.get('token'), id, action) : { error: 'This link is invalid.' };
-    // An expired link of a still-pending application: email fresh links
-    // (to the administrator only, at most every 10 minutes).
-    if (t.expired && app.status === 'pending') {
-      const last = await store.lastTokenIssued(id);
-      if (!last || now().getTime() - Date.parse(last) > REISSUE_GAP_MS) {
-        const approve = makeToken('approve', ACTION_TTL_MS);
-        const cancel = makeToken('cancel', ACTION_TTL_MS);
-        await store.addTokens(id, [approve, cancel], nowIso());
-        const plan = PLANS[app.plan];
-        await sendAdminEmail({ id, plan, message: app.message, email: app.email, deviceId: app.device_id, createdAt: app.created_at, current: await subscriptionFor(app.device_id) }, approve.token, cancel.token);
-      }
-      return html(res, 410, pages.result('Link expired', `This link has expired, but application ${id} is still pending. Fresh Approve and Cancel links have been emailed to you.`));
-    }
-    if (t.error) return html(res, t.used ? 409 : 400, pages.result('Link not usable', `${t.error}${app && app.status !== 'pending' ? ` The application is ${app.status}.` : ''}`));
-    if (app.status !== 'pending') return html(res, 409, pages.result('Already processed', `Application ${id} is already ${app.status}.`));
-    html(res, 200, pages.confirm({ ...app, planInfo: PLANS[app.plan], current: await subscriptionFor(app.device_id) }, action, url.searchParams.get('token')));
-  }
-
-  async function adminAction(req, res, id, action) {
-    const body = (await readBody(req)).toString('utf8');
-    const token = new URLSearchParams(body).get('token');
-    const app = await appRow(id);
-    if (!app) return html(res, 404, pages.result('Not found', 'This application does not exist.'));
-    if (!token || token.length > 100) return html(res, 400, pages.result('Link not usable', 'This link is invalid.'));
-    const decidedAt = now();
-    // A renewal before expiry continues from the current end date.
-    const licenceFor = (row, cur) => {
-      const plan = PLANS[row.plan];
-      const start = cur && cur.expiresAt && cur.expiresAt > decidedAt.toISOString() ? new Date(cur.expiresAt) : decidedAt;
-      const keepLifetime = cur && !cur.expiresAt;
-      return { plan: keepLifetime ? cur.plan : plan.id, expiresAt: keepLifetime || plan.months === null ? null : addMonths(start, plan.months).toISOString() };
-    };
-    // With the subscription website, approval is recorded there first; if
-    // that fails, nothing changes here and the link stays usable.
-    let website = null;
-    if (axora && action === 'approve' && app.status === 'pending' && !(await checkToken(token, id, action)).error) {
-      const fail = (status, title, text) => html(res, status, pages.result(title, text));
-      if (!app.email) return fail(409, 'Email address needed', `Application ${id} has no email address, which the subscription website requires. Add Device ID ${app.device_id} on the subscription website and activate it there, then cancel this application.`);
+    const id = c.activationId();
+    const code = c.newOtp();
+    const { row, created } = store.createActivation({ id, deviceId, machineId, plan: data.plan, otpHash: c.otpHash(otpKey, id, code), otpExpiresAt: later(OTP_TTL_MS), now: nowIso() });
+    if (created) {
       try {
-        const cur = await axora.subscription(app.device_id);
-        website = licenceFor(app, cur?.effectiveStatus === 'active' ? { plan: app.plan, expiresAt: cur.expiresAt } : null);
-        const out = await axora.activate(app.device_id, app.email, website.expiresAt);
-        if (out?.error) return fail(409, 'Not activated', `The subscription website refused it (${out.error.code}: ${out.error.message}). Nothing was changed; fix it on the website, then use this link again.`);
+        await sendCode(row, code);
       } catch (err) {
-        logger.error(`[subscription website] ${err.message}`);
-        return fail(503, 'Subscription website unavailable', 'The subscription website could not be reached, so nothing was changed. Use this link again later.');
+        // Nobody has the code: the request is closed so it can be asked again.
+        store.cancelActivation(row.id);
+        logger.error(`[mail] activation ${row.id} email failed: ${err.code || ''} ${String(err.message).split('\n')[0]}`);
+        throw new HttpError(502, 'The activation request could not be sent (email failed). Please try again later.');
       }
+      audit(`device:${deviceId}`, 'activation.requested', row.id, { plan: row.plan });
     }
-    const r = await store.decide({ id, tokenHash: c.hashToken(token), action, now: decidedAt.toISOString(), licenceFor: website ? () => website : licenceFor });
-    if (r.error) {
-      const text = { invalid: 'This link is invalid.', used: 'This link has already been used.', expired: 'This link has expired.', processed: `Application ${id} was already ${r.status}.` }[r.error];
-      return html(res, r.error === 'used' || r.error === 'processed' ? 409 : 400, pages.result(r.error === 'processed' ? 'Already processed' : 'Link not usable', text));
-    }
-    const plan = PLANS[app.plan];
-    const outcome =
-      action === 'approve'
-        ? { title: 'Subscription approved', text: `${plan.name} activated for application ${id}. ${r.licence.expiresAt ? `It expires on ${new Date(r.licence.expiresAt).toUTCString()}.` : 'It never expires.'}` }
-        : { title: 'Application cancelled', text: `Application ${id} was cancelled. The subscription was not activated.` };
-    if (app.email && app.email_verified) {
-      const subject = action === 'approve' ? 'Your Lead Finder subscription is active' : 'Your Lead Finder subscription application was not approved';
-      const text =
-        action === 'approve'
-          ? `Your ${plan.name} subscription (application ${id}) is now active.${r.licence.expiresAt ? ` It is valid until ${new Date(r.licence.expiresAt).toUTCString()}.` : ' It never expires.'}`
-          : `Your application ${id} was cancelled and no subscription was activated. You can submit a new application in Lead Finder.`;
-      mailer.send({ to: app.email, subject, text, html: pages.userNotice(subject, text) }).catch((err) => logger.error(`[mail] user notice for ${id} failed: ${err.code || ''}`));
-    }
-    html(res, 200, pages.result(outcome.title, outcome.text));
+    json(res, created ? 201 : 200, { activation: activationView(store.activation(row.id)) });
   }
 
-  async function screenshot(req, res, url, id) {
-    const app = await appRow(id);
-    const token = url.searchParams.get('token');
-    let ok = false;
-    if (app) for (const a of ['approve', 'cancel']) if (!(await checkToken(token, id, a)).error) ok = true;
-    if (!ok) return html(res, 403, pages.result('Not available', 'This link is invalid or has been used.'));
-    if (!app.screenshot_path) return html(res, 410, pages.result('Screenshot removed', 'The screenshot is no longer available.'));
-    const data = await storage.download(app.screenshot_path);
-    res.writeHead(200, { 'content-type': app.screenshot_type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
-    res.end(data);
+  async function verify(req, res, url) {
+    const body = await readBody(req);
+    const { deviceId } = await authenticate(req, url, body);
+    const code = String(parseJson(body).code ?? '').trim();
+    if (!/^\d{4}$/.test(code)) throw new HttpError(400, 'Enter the 4-digit code.');
+    const open = store.openActivation(deviceId, nowIso());
+    if (!open) {
+      const last = store.latestActivation(deviceId);
+      if (last?.status === 'activated') throw new HttpError(409, 'This code has already been used.', { reason: 'used' });
+      if (last?.status === 'expired') throw new HttpError(410, 'This code has expired. Request a new code.', { reason: 'expired' });
+      throw new HttpError(409, 'Request an activation code first.', { reason: 'not_open' });
+    }
+    const claimed = store.claimOtpAttempt(open.id, deviceId);
+    if (!claimed) throw new HttpError(429, 'Too many incorrect codes. Request a new code.', { reason: 'locked' });
+    const out = store.activateWithOtp({ id: open.id, deviceId, otpHash: c.otpHash(otpKey, open.id, code), matches: c.sameHash, now: nowIso() });
+    if (out.error === 'invalid') {
+      const left = MAX_OTP_ATTEMPTS - claimed.otp_attempts;
+      audit(`device:${deviceId}`, 'activation.code_incorrect', open.id, { attemptsLeft: left });
+      throw new HttpError(400, left > 0 ? `Incorrect code. ${left} attempt${left === 1 ? '' : 's'} left.` : 'Incorrect code. Request a new code.', { reason: left > 0 ? 'invalid' : 'locked', attemptsLeft: left });
+    }
+    if (out.error === 'expired') throw new HttpError(410, 'This code has expired. Request a new code.', { reason: 'expired' });
+    if (out.error) throw new HttpError(409, 'Request an activation code first.', { reason: 'not_open' });
+    audit(`device:${deviceId}`, 'activation.activated', open.id, { plan: out.subscription.plan, expiresAt: out.subscription.expiresAt });
+    json(res, 200, { activated: true, plan: out.subscription.plan, expiresAt: out.subscription.expiresAt || null });
   }
 
-  async function verifyEmail(req, res, url) {
-    const token = url.searchParams.get('token');
-    const ok = token && token.length <= 100 ? await store.verifyEmail(c.hashToken(token), nowIso()) : false;
-    if (!ok) return html(res, 400, pages.result('Link not usable', 'This confirmation link is invalid, expired or already used.'));
-    html(res, 200, pages.result('Email confirmed', 'Thank you. You will be notified by email when your subscription is approved or cancelled.'));
+  async function resend(req, res, url) {
+    const body = await readBody(req);
+    const { deviceId } = await authenticate(req, url, body);
+    const open = store.openActivation(deviceId, nowIso());
+    if (!open) throw new HttpError(409, 'Request an activation code first.');
+    const code = c.newOtp();
+    const out = store.replaceOtp({ id: open.id, otpHash: c.otpHash(otpKey, open.id, code), otpExpiresAt: later(OTP_TTL_MS), now: nowIso(), cooldownMs: OTP_RESEND_MS, maxPerDay: OTP_MAX_PER_DAY });
+    if (out.error === 'cooldown') throw new HttpError(429, 'Please wait a minute before requesting another code.', { retryAt: out.retryAt });
+    if (out.error === 'limit') throw new HttpError(429, 'Too many codes today. Please try again tomorrow.');
+    if (out.error) throw new HttpError(409, 'Request an activation code first.');
+    try {
+      await sendCode(out.row, code, { renewed: true });
+    } catch (err) {
+      logger.error(`[mail] code for ${open.id} failed: ${err.code || ''}`);
+      throw new HttpError(502, 'The code could not be sent. Please try again later.');
+    }
+    audit(`device:${deviceId}`, 'activation.code_renewed', open.id, null);
+    json(res, 200, { activation: activationView(out.row) });
+  }
+
+  // --- daily allowance ----------------------------------------------------------
+
+  // Charges one new qualified lead. `key` identifies the lead (a hash: the
+  // server never sees the number), so finding it again, retrying, or the
+  // other source finding it costs nothing. The allowance comes from the
+  // server's own record of the plan; nothing the app sends changes it.
+  async function reserve(req, res, url) {
+    const body = await readBody(req);
+    const { deviceId, machineId } = await authenticate(req, url, body);
+    const data = parseJson(body);
+    if (!credits.SOURCES.includes(data.source)) throw new HttpError(400, 'Unknown lead source');
+    if (!credits.KEY_RE.test(String(data.key))) throw new HttpError(400, 'Invalid lead key');
+    const cs = creditState(deviceId, machineId);
+    if (cs.ent.scope === 'blocked') return json(res, 200, { granted: false, reason: 'suspended', credits: cs.view() });
+    const bucket = credits.bucketFor(cs.ent, data.source);
+    const limit = cs.ent.scope === 'unlimited' ? null : cs.ent.limits[bucket];
+    const r = store.reserveCredit({ account: cs.account, key: data.key, day: cs.day, bucket, limit, source: data.source, deviceId, now: nowIso() });
+    json(res, 200, { granted: r.granted, duplicate: r.duplicate, reason: r.granted ? null : 'exhausted', credits: cs.view() });
   }
 
   // --- router -------------------------------------------------------------------------
 
   async function route(req, res) {
     const url = new URL(localPath(req.url), 'http://local');
-    const m = url.pathname.match(/^\/admin\/applications\/([^/]+)\/(approve|cancel|screenshot)$/);
-    if (req.method === 'GET' && url.pathname === '/api/plans') {
-      return json(res, 200, { plans: Object.values(PLANS), paymentMethods: PAYMENT_METHODS, paymentInstructions: config.paymentInstructions || '', trialSearches: TRIAL_SEARCHES });
+    const p = url.pathname;
+    if (req.method === 'GET' && p === '/api/plans') {
+      return json(res, 200, { plans: PAID_PLAN_IDS.map((id) => plans[id]), freePlan: plans.free, paymentMethods: PAYMENT_METHODS, paymentInstructions: config.paymentInstructions || '', timezone });
     }
-    if (req.method === 'POST' && url.pathname === '/api/applications') return apply(req, res, url);
-    if (req.method === 'GET' && url.pathname === '/api/license') return license(req, res, url);
-    if (req.method === 'POST' && url.pathname === '/api/trial/consume') return consumeTrial(req, res, url);
-    if (m && m[2] === 'screenshot' && req.method === 'GET') return screenshot(req, res, url, m[1]);
-    if (m && req.method === 'GET') return adminPage(req, res, url, m[1], m[2]);
-    if (m && req.method === 'POST') return adminAction(req, res, m[1], m[2]);
-    if (req.method === 'GET' && url.pathname === '/verify-email') return verifyEmail(req, res, url);
-    if (req.method === 'GET' && url.pathname === '/health') return json(res, 200, { ok: true });
+    if (req.method === 'GET' && p === '/api/license') return license(req, res, url);
+    if (req.method === 'POST' && p === '/api/activation') return requestActivation(req, res, url);
+    if (req.method === 'POST' && p === '/api/activation/verify') return verify(req, res, url);
+    if (req.method === 'POST' && p === '/api/activation/resend') return resend(req, res, url);
+    if (req.method === 'POST' && p === '/api/credits/reserve') return reserve(req, res, url);
+    if (req.method === 'GET' && p === '/health') return json(res, 200, { ok: true });
     throw new HttpError(404, 'Not found');
   }
 
-  return http.createServer((req, res) => {
+  const server = http.createServer((req, res) => {
     route(req, res).catch((err) => {
       const status = err instanceof HttpError ? err.status : 500;
       if (status === 500) logger.error(`[error] ${req.method} ${req.url.split('?')[0]}: ${String(err.message).split('\n')[0]}`);
       if (res.headersSent) return res.end();
-      if (localPath(req.url).startsWith('/api/')) json(res, status, { error: status === 500 ? 'Server error' : err.message });
+      if (localPath(req.url).startsWith('/api/')) json(res, status, { error: status === 500 ? 'Server error' : err.message, ...(err.extra || {}) });
       else html(res, status, pages.result('Error', status === 500 ? 'Something went wrong.' : err.message));
     });
   });
+  return server;
 }
 
-module.exports = { createApp, HttpError };
+module.exports = { createApp, HttpError, OTP_TTL_MS, OTP_RESEND_MS, OTP_MAX_PER_DAY };

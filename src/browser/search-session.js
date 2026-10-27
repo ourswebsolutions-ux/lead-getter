@@ -36,6 +36,10 @@ class StopRequested extends Error {
 
 class FatalSearchError extends Error {}
 
+// Today's allowance for this source is used up (or the subscription is
+// suspended): the source stops, its saved leads stay.
+class LimitReached extends Error {}
+
 // Chrome (or Lead Finder's tab) went away. Recoverable: the session
 // reconnects and continues, a limited number of times.
 class BrowserClosed extends FatalSearchError {
@@ -67,13 +71,15 @@ function isNetworkError(err) {
 }
 
 class SearchSession {
-  constructor({ keyword, categoryId = null, websiteFilter = 'without', store, pages, emit, signal, recovery = null, maps = mapsDefault, webCheck = checkWebPresence, pacing = {}, random = Math.random }) {
+  // credits: the daily allowance (main/credits.js CreditGate); null = none.
+  constructor({ keyword, categoryId = null, websiteFilter = 'without', store, pages, emit, signal, recovery = null, credits = null, maps = mapsDefault, webCheck = checkWebPresence, pacing = {}, random = Math.random }) {
     this.keyword = keyword;
     this.categoryId = categoryId;
     this.websiteFilter = WEBSITE_FILTERS.has(websiteFilter) ? websiteFilter : 'without';
     this.store = store;
     this.pages = pages; // { main(), check(), detail(), open(), adopt(role, page) }
     this.recovery = recovery; // { canRestart(), restart() } or null
+    this.credits = credits;
     this.emit = emit; // (event, payload)
     this.signal = signal;
     this.maps = maps;
@@ -252,6 +258,8 @@ class SearchSession {
     } catch (err) {
       if (err instanceof StopRequested) {
         this.status('stopped', 'Search stopped');
+      } else if (err instanceof LimitReached) {
+        this.status('done', err.message);
       } else if (err instanceof FatalSearchError) {
         this.status('error', err.message, err.phase);
       } else {
@@ -418,6 +426,7 @@ class SearchSession {
       return;
     }
 
+    if (this.credits?.exhausted('maps')) throw new LimitReached(this.credits.message('maps'));
     await this.guard(page);
     if (this.opened > 0 && this.opened % this.pacing.breakEvery === 0) {
       this.status('running', 'Taking a short break to keep the pace gentle');
@@ -447,7 +456,7 @@ class SearchSession {
 
     const verdict = await this.qualify(details, page);
     this.setStep('analyzing');
-    const saved = this.save({
+    const result = {
       placeKey: key,
       mapsUrl: this.maps.cleanMapsUrl(link.url || details.url),
       name: details.name,
@@ -459,7 +468,10 @@ class SearchSession {
       isLead: isLeadFor(this.websiteFilter, verdict.status),
       keyword: this.keyword,
       categoryId: this.categoryId,
-    });
+    };
+    // A new qualified lead uses one of today's leads first.
+    await this.charge('maps', this.credits ? this.store.creditKeyForMaps(result) : null);
+    const saved = this.save(result);
 
     this.stats.processed++;
     if (saved.lead) {
@@ -471,6 +483,29 @@ class SearchSession {
       this.status('running', `Not a lead: ${details.name} (${describeVerdict(verdict.status)})`);
     }
     await this.pause(this.pacing.listing);
+  }
+
+  // Charges a new lead to today's allowance before it is saved. Network
+  // problems are retried like page loads; a refusal stops this source.
+  async charge(source, key) {
+    if (!this.credits || !key) return;
+    for (let attempt = 0; ; attempt++) {
+      let r;
+      try {
+        r = await this.op(() => this.credits.reserve(source, key));
+      } catch (err) {
+        if (err instanceof StopRequested || err instanceof FatalSearchError) throw err;
+        if (attempt < this.pacing.netRetries.length) {
+          const wait = this.pacing.netRetries[attempt];
+          this.status('running', `Could not reach the subscription server. Retrying in ${Math.round(wait / 1000)}s`);
+          await this.delay(wait);
+          continue;
+        }
+        throw new FatalSearchError(`The lead could not be recorded with the subscription server (${String(err?.message || err).split('\n')[0]}). The search was stopped; your saved leads are kept.`);
+      }
+      if (r?.granted) return;
+      throw new LimitReached(this.credits.message(source, r?.reason));
+    }
   }
 
   // Applies the qualification rules. Only 'no_website' and 'social_only'
@@ -560,4 +595,4 @@ function describeVerdict(status) {
   );
 }
 
-module.exports = { isLeadFor, WEBSITE_FILTERS, SearchSession, StopRequested, FatalSearchError, BrowserClosed, PageReplaced, DEFAULT_PACING };
+module.exports = { isLeadFor, WEBSITE_FILTERS, SearchSession, StopRequested, FatalSearchError, LimitReached, BrowserClosed, PageReplaced, DEFAULT_PACING };

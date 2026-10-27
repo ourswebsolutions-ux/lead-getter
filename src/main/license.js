@@ -30,27 +30,23 @@ function readMachineId() {
 }
 
 class LicenseError extends Error {
-  constructor(code, message, status) {
+  constructor(code, message, status, details = null) {
     super(message);
     this.code = code;
     this.status = status;
+    // The server's answer (e.g. { reason, attemptsLeft, retryAt }).
+    this.details = details;
   }
 }
 
 const REASON_TEXT = {
-  none: 'You do not have a subscription yet. Choose a plan to start finding leads.',
-  trial_used: 'Your 3 free searches have been used. Choose a plan to keep finding leads.',
-  pending: 'Your subscription application is awaiting approval. You can search as soon as it is approved.',
-  cancelled: 'Your last subscription application was cancelled. You can apply again.',
-  expired: 'Your subscription has expired. Renew it to continue finding leads.',
+  expired: 'Your plan has expired. You are back on the Free plan.',
+  suspended: 'Your subscription is suspended. Contact Axora Web Solutions to restore it.',
+  exhausted: 'Today’s qualified leads are used up.',
   offline: 'Your subscription could not be verified. Check the internet connection and try again.',
   misconfigured: 'The subscription server address in this copy of Lead Finder does not answer as the licence server, so subscriptions can’t be checked.',
   unconfigured: 'Subscriptions are not configured in this copy of Lead Finder.',
   invalid: 'The subscription server gave an invalid answer, so access could not be confirmed.',
-  suspended: 'Your subscription has been suspended, so paid lead searches are blocked. Contact Axora Web Solutions to have it restored.',
-  inactive: 'Your account is registered but its subscription has not been activated yet. Paid lead searches start as soon as it is activated.',
-  email_in_use: 'The email in your application is already linked to another Lead Getter device on the subscription website, so this device could not be registered. Nothing was changed. Contact Axora Web Solutions to have it moved, or apply again with your own email.',
-  unavailable: 'Your subscription could not be confirmed right now (the subscription service did not answer), so paid searches are paused. Try again in a few minutes.',
 };
 
 class LicenseClient {
@@ -159,7 +155,7 @@ class LicenseClient {
     }
     // The server's own message when it has one ("Server error" is its
     // generic answer to unexpected failures).
-    if (data.error && data.error !== 'Server error') return new LicenseError('server', data.error, res.status);
+    if (data.error && data.error !== 'Server error') return new LicenseError('server', data.error, res.status, data);
     if (res.status >= 500) return new LicenseError('server', `The subscription server had a problem (HTTP ${res.status}). Please try again later.`, res.status);
     return new LicenseError('server', `The subscription server refused the request (HTTP ${res.status}).`, res.status);
   }
@@ -194,8 +190,12 @@ class LicenseClient {
   }
 
   // Current status, freshly signed by the server. Never cached as authority.
+  // Everything comes from the server's signed answer: the plan, today's
+  // allowance and the activation request. Nothing stored locally counts.
+  //   allowed    a paid plan is active (campaigns and WhatsApp features)
+  //   canSearch  leads can be saved today from at least one source
   async status() {
-    const out = { checkedAt: this.clock(), deviceId: null, allowed: false, canSearch: false, reason: 'unconfigured', message: REASON_TEXT.unconfigured, subscription: null, application: null, trial: null, serverTime: null };
+    const out = { checkedAt: this.clock(), deviceId: null, allowed: false, canSearch: false, reason: 'unconfigured', message: REASON_TEXT.unconfigured, plan: null, credits: null, activation: null, subscription: null, serverTime: null };
     if (!this.configured) return (this.last = out);
     out.deviceId = this.deviceId;
     const nonce = crypto.randomBytes(18).toString('base64url');
@@ -207,51 +207,47 @@ class LicenseClient {
       return (this.last = { ...out, reason, message: err.message || REASON_TEXT[reason] });
     }
     const p = verifyToken(token, this.serverKey);
-    if (!p || p.deviceId !== out.deviceId || p.nonce !== nonce) return (this.last = { ...out, reason: 'invalid', message: REASON_TEXT.invalid });
-    const sub = p.subscription || { state: 'none' };
-    const app = p.application || null;
-    const trial = p.trial || { limit: 0, used: 0, remaining: 0 };
-    let reason = 'active';
-    if (sub.state !== 'active') {
-      // A suspension, an expiry or an unconfirmed status is always explained,
-      // even while free searches remain (they stay usable).
-      if (sub.state === 'suspended' || sub.state === 'unavailable') reason = sub.state;
-      else if (p.registration?.state === 'email_in_use') reason = 'email_in_use';
-      else if (sub.state === 'expired') reason = app?.status === 'pending' ? 'pending' : 'expired';
-      else if (trial.remaining > 0) reason = 'trial';
-      else if (app?.status === 'pending') reason = 'pending';
-      else if (sub.state === 'inactive') reason = 'inactive';
-      else if (app?.status === 'cancelled') reason = 'cancelled';
-      else reason = 'trial_used';
-    }
-    // Days left measured against the server's clock, not this computer's.
-    const daysLeft = sub.state === 'active' && sub.expiresAt ? Math.max(0, Math.ceil((Date.parse(sub.expiresAt) - Date.parse(p.serverTime)) / 86_400_000)) : null;
-    let message = reason === 'active' ? '' : reason === 'trial' ? `Free trial: ${trial.remaining} of ${trial.limit} free searches left.` : REASON_TEXT[reason];
-    if (reason === 'pending' && sub.state === 'expired') message = 'Your subscription has expired. Your new application is awaiting approval; you can search again as soon as it is approved.';
-    if (reason !== 'active' && reason !== 'trial' && trial.remaining > 0) message += ` You can still use ${trial.remaining} free search${trial.remaining === 1 ? '' : 'es'}.`;
+    if (!p || p.deviceId !== out.deviceId || p.nonce !== nonce || !p.plan || !p.credits) return (this.last = { ...out, reason: 'invalid', message: REASON_TEXT.invalid });
+    const credits = p.credits;
+    const plan = { ...p.plan, daysLeft: p.plan.expiresAt && p.plan.state === 'active' ? Math.max(0, Math.ceil((Date.parse(p.plan.expiresAt) - Date.parse(p.serverTime)) / 86_400_000)) : null };
+    const left = (c) => c.limit === null || c.remaining > 0;
+    const sources = credits.scope === 'blocked' ? [] : credits.scope === 'per_source' ? ['maps', 'facebook'].filter((s) => left(credits[s])) : left(credits.total) ? ['maps', 'facebook'] : [];
+    const reason = plan.state === 'suspended' ? 'suspended' : !sources.length ? 'exhausted' : plan.state === 'active' && plan.id !== 'free' ? 'active' : plan.state === 'expired' ? 'expired' : 'free';
     return (this.last = {
       ...out,
-      allowed: reason === 'active',
-      canSearch: reason === 'active' || trial.remaining > 0,
+      allowed: plan.state === 'active' && plan.id !== 'free',
+      canSearch: sources.length > 0,
+      // Sources that can still save leads today.
+      sources,
       reason,
-      message,
-      subscription: { ...sub, daysLeft },
-      application: app,
-      registration: p.registration || null,
-      pendingApplications: p.pendingApplications || 0,
-      trial,
+      message: REASON_TEXT[reason] || '',
+      plan,
+      credits,
+      activation: p.activation || null,
+      subscription: { state: plan.state, plan: plan.id, expiresAt: plan.expiresAt, daysLeft: plan.daysLeft },
       serverTime: p.serverTime,
     });
   }
 
-  // Counts one free search on the server (refused when none are left).
-  async consumeTrial() {
-    return this.request('POST', '/api/trial/consume', {});
+  // An Activation ID and code for `plan`; the code goes to the
+  // administrator, who gives it to the customer. -> { activation }
+  requestActivation(plan) {
+    return this.request('POST', '/api/activation', { plan });
   }
 
-  async apply({ plan, message, email, screenshot }) {
-    // Submitting waits for the approval email to be sent, so allow longer.
-    return this.request('POST', '/api/applications', { plan, message, email: email || undefined, screenshot: { type: screenshot.type, data: screenshot.data.toString('base64') } }, 90_000);
+  verifyCode(code) {
+    return this.request('POST', '/api/activation/verify', { code });
+  }
+
+  resendCode() {
+    return this.request('POST', '/api/activation/resend', {});
+  }
+
+  // Charges one new qualified lead from `source` ('maps' | 'facebook') to
+  // today's allowance. `key` is a hash identifying the lead, so the same
+  // lead is never charged twice. -> { granted, duplicate, reason, credits }
+  reserveCredit(source, key) {
+    return this.request('POST', '/api/credits/reserve', { source, key });
   }
 }
 
@@ -265,14 +261,4 @@ function verifyToken(token, publicKey) {
   }
 }
 
-// Validates a screenshot chosen by the user: real PNG/JPEG/WebP, <= 5 MB.
-function readScreenshot(buf) {
-  if (!buf?.length) throw new Error('The file is empty.');
-  if (buf.length > 5 * 1024 * 1024) throw new Error('The screenshot is larger than 5 MB.');
-  if (buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';
-  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
-  if (buf.subarray(0, 4).toString('latin1') === 'RIFF' && buf.subarray(8, 12).toString('latin1') === 'WEBP') return 'image/webp';
-  throw new Error('Choose a PNG, JPEG or WebP image.');
-}
-
-module.exports = { readMachineId, LicenseClient, LicenseError, REASON_TEXT, readScreenshot, verifyToken };
+module.exports = { readMachineId, LicenseClient, LicenseError, REASON_TEXT, verifyToken };

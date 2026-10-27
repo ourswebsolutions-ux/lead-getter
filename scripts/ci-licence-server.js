@@ -13,7 +13,6 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { createApp } = require('../server/src/app');
 const { Store } = require('../server/src/store');
-const { Uploads } = require('../server/src/uploads');
 
 const dir = path.resolve(process.argv[2] || 'ci-licence');
 const port = Number(process.argv[3] || 8799);
@@ -22,7 +21,7 @@ const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
 const url = `http://127.0.0.1:${port}/lead-getter`;
 const config = { publicBaseUrl: url, adminEmail: 'ci@example.invalid', paymentInstructions: '', licensePrivateKey: privateKey.export({ format: 'pem', type: 'pkcs8' }) };
 const mailer = { send: async () => ({}), verify: async () => true }; // no email in CI
-const server = createApp({ config, store: new Store(path.join(dir, 'subscriptions.db')), storage: new Uploads(path.join(dir, 'uploads')), mailer, logger: { error: (m) => console.error(m) } });
+const server = createApp({ config, store: new Store(path.join(dir, 'subscriptions.db')), mailer, logger: { error: (m) => console.error(m) } });
 server.listen(port, '127.0.0.1', () => {
   fs.writeFileSync(path.join(dir, 'pubkey.txt'), publicKey.export({ format: 'der', type: 'spki' }).toString('base64'));
   fs.writeFileSync(path.join(dir, 'url.txt'), url);

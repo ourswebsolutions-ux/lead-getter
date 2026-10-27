@@ -1,17 +1,16 @@
 'use strict';
-// App lock, subscription gating and application flow, website filter and
-// "WhatsApp only" export, in the real Electron app against a real licence
-// server (test keys; outgoing mail captured).
+// App lock, the Free plan, activation (email, administrator's approval,
+// 4-digit code) and the daily allowance, website filter and "WhatsApp only"
+// export, in the real Electron app against a real licence server (test keys;
+// outgoing mail captured).
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { _electron } = require('playwright-core');
 const { LeadStore } = require('../../src/database/db');
 const { startLicenseServer, deviceIdOf } = require('./helpers');
-const { readMachineId } = require('../../src/main/license');
 
 const root = path.join(__dirname, '..', '..');
 const shots = process.env.LEAD_FINDER_SCREENSHOTS;
@@ -48,6 +47,9 @@ test('app lock, subscription flow and gating, website filter, WhatsApp-only expo
   const env = { ...process.env, ...lic.env, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome') };
   delete env.ELECTRON_RUN_AS_NODE;
   let { app, win } = await launch(env);
+  const pageErrors = [];
+  const watch = (w) => w.on('pageerror', (e) => pageErrors.push(e.message));
+  watch(win);
   t.after(async () => {
     await app.close().catch(() => {});
     await lic.close();
@@ -75,6 +77,7 @@ test('app lock, subscription flow and gating, website filter, WhatsApp-only expo
   // Restarting asks for the PIN again; wrong PIN is refused.
   await app.close();
   ({ app, win } = await launch(env));
+  watch(win);
   await win.getByRole('dialog', { name: 'Enter your PIN' }).waitFor();
   if (shots) await win.screenshot({ path: path.join(shots, 'access-lock.png') });
   await typePin(win, '1111');
@@ -107,158 +110,133 @@ test('app lock, subscription flow and gating, website filter, WhatsApp-only expo
   await typePin(win, '9753');
   await win.getByRole('heading', { name: 'Lead Finder' }).waitFor();
 
-  // ================= 2. Subscription gating and application =================
+  // ================= 2. Free plan, activation by email and code, daily allowance =================
   const startSearch = async () => {
     await win.getByLabel('Search keyword').fill('Real Estate Lahore');
     await win.getByRole('combobox', { name: 'Category', exact: true }).fill('Real Estate');
     await win.getByLabel('Search keyword').click();
     await win.getByRole('button', { name: 'Start Search' }).click();
   };
-  const plans = win.getByRole('dialog', { name: 'Subscription plans' });
-  const closePlans = async () => {
-    await plans.getByRole('button', { name: 'Close' }).click();
-    await plans.waitFor({ state: 'detached' });
+  const panel = win.getByRole('dialog', { name: 'Subscription' });
+  const closePanel = async () => {
+    await panel.getByRole('button', { name: 'Close' }).click();
+    await panel.waitFor({ state: 'detached' });
   };
+  const refresh = () => win.evaluate(() => window.leadFinder.subscriptionStatus());
+  const pill = win.locator('.plan-pill');
 
-  // Free trial: a new computer has 3 free searches.
-  await win.getByRole('button', { name: 'Free: 3 searches left' }).waitFor();
+  // A new installation is on Free: 5 Google Maps + 5 Facebook leads a day.
+  await win.getByRole('button', { name: 'Free · 10 left' }).waitFor();
   await startSearch();
   await win.locator('.state-error').waitFor({ timeout: 20_000 });
-  assert.match(await win.locator('.progress .msg').textContent(), /Google Chrome is not installed/, 'trial search allowed');
-  assert.equal((await win.evaluate(() => window.leadFinder.subscriptionStatus())).trial.remaining, 3, 'a search that never reached Chrome uses no free search');
-  // All free searches used (counted on the server for this computer).
-  const machine = crypto.createHash('sha256').update(`lead-finder:${readMachineId()}`).digest('hex');
-  lic.sql('INSERT INTO trials (machine_id, used, updated_at) VALUES (?, 3, ?) ON CONFLICT (machine_id) DO UPDATE SET used = 3', [machine, new Date().toISOString()]);
-  await startSearch();
-  await plans.waitFor();
-  assert.match(await plans.innerText(), /Your 3 free searches have been used/);
-  const cards = await plans.locator('.plan-card').allInnerTexts();
+  assert.match(await win.locator('.progress .msg').textContent(), /Google Chrome is not installed/, 'Free can search');
+  // Paid features stay paid.
+  assert.equal((await win.evaluate(() => window.leadFinder.exportCsv('all', {}))).subscription, 'free');
+  assert.equal((await win.evaluate(() => window.leadFinder.whatsappConnect())).subscription, 'free');
+
+  // The panel: plan, today's leads as meters, the paid plans and where to pay.
+  await pill.click();
+  await panel.waitFor();
+  assert.equal(await panel.locator('.sub-title h2').textContent(), 'Free');
+  const meters = async () => (await panel.locator('.meter-row').allInnerTexts()).map((x) => x.replace(/\s+/g, ' ').trim());
+  assert.deepEqual(await meters(), ['Google Maps 0 / 5', 'Facebook 0 / 5']);
   assert.deepEqual(
-    cards.map((c) => c.replace(/\s+/g, ' ').trim()),
-    ['Monthly PKR 3,000 1 month Apply for Subscription', 'Six Months PKR 10,000 6 months Apply for Subscription', 'Lifetime PKR 20,000 One-time payment, never expires Apply for Subscription'],
+    (await panel.locator('.plan-opt').allInnerTexts()).map((x) => x.replace(/\s+/g, ' ').trim()),
+    ['Monthly 100 leads a day PKR 3,000', 'Six Months 250 leads a day PKR 10,000', 'One-Time Unlimited PKR 20,000'],
   );
-  if (shots) await win.screenshot({ path: path.join(shots, 'access-plans.png') });
-  await closePlans();
-  assert.equal((await win.evaluate(() => window.leadFinder.exportCsv('all', {}))).subscription, 'trial_used');
-  assert.equal((await win.evaluate(() => window.leadFinder.whatsappConnect())).subscription, 'trial_used');
+  assert.match(await panel.locator('.pay-line').innerText(), /Pay to\s+03245237429\s+NayaPay · JazzCash · Easypaisa/);
+  assert.equal(await panel.getByText(/Device ID/).count(), 0, 'no internal IDs');
+  if (shots) await win.screenshot({ path: path.join(shots, 'access-free.png') });
 
-  // Apply: plan, screenshot (native dialog answered), message.
-  const png = path.join(tmp, 'payment.png');
-  fs.writeFileSync(png, Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), crypto.randomBytes(300)]));
-  const notImage = path.join(tmp, 'payment.png.txt');
-  fs.writeFileSync(notImage, 'hello');
-  await win.getByRole('button', { name: 'Get a plan' }).click();
-  await plans.getByRole('button', { name: 'Apply for Subscription' }).nth(1).click();
-  const submit = plans.getByRole('button', { name: 'Submit application' });
-  assert.ok(await submit.isDisabled(), 'screenshot required');
-  // Where to pay: the three accounts with the selected plan's price.
-  const pay = await plans.locator('.pay-box').innerText();
-  assert.match(pay, /Send PKR 10,000 for the Six Months plan/);
-  for (const m of ['NayaPay', 'JazzCash', 'Easypaisa']) assert.match(pay, new RegExp(`${m}\\s+03245237429\\s+PKR 10,000`));
-  await app.evaluate(({ dialog }, f) => (dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [f] })), notImage);
-  await plans.getByRole('button', { name: 'Choose image…' }).click();
-  await win.locator('.toast.error').filter({ hasText: /PNG, JPEG or WebP/ }).waitFor();
-  await app.evaluate(({ dialog }, f) => (dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [f] })), png);
-  await plans.getByRole('button', { name: 'Choose image…' }).click();
-  await plans.getByRole('img', { name: 'Payment screenshot preview' }).waitFor();
-  assert.ok(await submit.isEnabled(), 'the screenshot is enough; the message is optional');
-  await plans.getByLabel(/Message or transaction ID/).fill('Paid PKR 10,000 by JazzCash, TID 778899');
-  // The email is required (it identifies the customer on the subscription website).
-  await submit.click();
-  await plans.getByRole('alert').filter({ hasText: 'Enter your email address.' }).waitFor();
-  await plans.getByLabel(/^Email/).fill('not-an-email');
-  await submit.click();
-  await plans.getByRole('alert').filter({ hasText: 'The email address is not valid.' }).waitFor();
-  await plans.getByLabel(/^Email/).fill('customer@example.com');
-  if (shots) await win.screenshot({ path: path.join(shots, 'access-apply.png') });
-  await submit.click();
-  await plans.getByRole('heading', { name: 'Application submitted' }).waitFor();
-  const appId = (await plans.locator('b.mono').textContent()).trim();
-  assert.match(appId, /^LF-[0-9A-F]{10}$/);
-  assert.match(await plans.innerText(), /Pending Approval/);
-  await plans.getByRole('button', { name: 'Done' }).click();
-  await win.getByRole('button', { name: 'Pending approval' }).waitFor();
+  // Choose a plan: the Activation ID and code go to the administrator only.
+  await panel.getByText('Six Months', { exact: true }).click();
+  await panel.getByRole('button', { name: 'Get activation code' }).click();
+  await panel.getByRole('heading', { name: 'Enter activation code' }).waitFor();
+  assert.equal(await panel.getByLabel('Email').count(), 0, 'no email is asked for');
+  assert.equal(lic.sent.length, 1);
+  const mail = lic.sent[0];
+  assert.equal(mail.to, 'info.axoraweb@gmail.com', 'the only recipient is the administrator');
+  const actId = mail.text.match(/Activation ID: (ACT-\S+)/)[1];
+  assert.match(mail.text, /Plan: Six Months: PKR 10,000, 250 leads a day/);
+  const code = mail.text.match(/Activation code: (\d{4})/)[1];
+  assert.match(await panel.innerText(), new RegExp(`Six Months · ${actId}`));
+  await win.locator('.pill-dot').waitFor();
+  assert.match(await panel.getByRole('button', { name: /New code in 0:\d\d/ }).textContent(), /New code in/);
+  if (shots) await win.screenshot({ path: path.join(shots, 'access-code.png') });
+  // Reopening the panel shows the same request (no new code).
+  await closePanel();
+  await pill.click();
+  await panel.getByRole('heading', { name: 'Enter activation code' }).waitFor();
+  assert.equal(lic.sent.length, 1);
 
-  // The administrator's email: details, screenshot, two action buttons.
-  assert.equal(lic.mails.length, 1);
-  const mail = lic.mails[0];
-  assert.equal(mail.to, 'info.axoraweb@gmail.com');
-  assert.match(mail.subject, new RegExp(`${appId}: Six Months \\(PKR 10,000\\)`));
-  assert.match(mail.html, /TID 778899/);
-  assert.ok(mail.attachments[0].content.equals(fs.readFileSync(png)));
-  const href = (a) => mail.html.match(new RegExp(`href="([^"]*/${a}\\?token=[^"]+)"`))[1].replace(/&amp;/g, '&');
+  // A wrong code activates nothing; the right one (pasted) activates the plan.
+  const wrong = code === '0000' ? '1111' : '0000';
+  await panel.getByLabel('Digit 1').click();
+  await win.keyboard.type(wrong, { delay: 40 });
+  await panel.getByRole('alert').filter({ hasText: 'Incorrect code. 4 attempts left.' }).waitFor();
+  assert.equal((await refresh()).plan.id, 'free');
+  await panel.getByLabel('Digit 1').click();
+  await win.evaluate((c) => {
+    const dt = new DataTransfer();
+    dt.setData('text', c);
+    document.activeElement.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+  }, code);
+  await panel.getByRole('heading', { name: 'Six Months activated' }).waitFor();
+  if (shots) await win.screenshot({ path: path.join(shots, 'access-activated.png') });
+  await panel.getByRole('button', { name: 'Done' }).click();
+  await win.getByRole('button', { name: 'Six Months · 250 left' }).waitFor();
+  const deviceId = await deviceIdOf(win);
 
-  // Pending: still blocked, but another application can be submitted.
-  await startSearch();
-  await plans.waitFor();
-  assert.match(await plans.innerText(), /awaiting approval/);
-  assert.equal(await plans.getByRole('button', { name: 'Apply for Subscription' }).first().isEnabled(), true);
-  await plans.getByRole('button', { name: 'Apply for Subscription' }).first().click();
-  await plans.getByRole('button', { name: 'Choose image…' }).click();
-  await plans.getByLabel(/^Email/).fill('customer@example.com');
-  await plans.getByRole('button', { name: 'Submit application' }).click(); // no message
-  await plans.getByRole('heading', { name: 'Application submitted' }).waitFor();
-  await plans.getByRole('button', { name: 'Done' }).click();
-  assert.equal(lic.mails.length, 2);
-  assert.notEqual(lic.mails[1].subject.match(/LF-[0-9A-F]+/)[0], appId);
-  assert.equal((await win.evaluate(() => window.leadFinder.subscriptionStatus())).pendingApplications, 2);
-
-  // Approve from the email: the link opens a confirmation page, its button confirms.
-  const open = async (url) => {
-    const r = await fetch(url);
-    return { status: r.status, html: await r.text() };
-  };
-  const press = async (url) => {
-    const u = new URL(url);
-    const r = await fetch(`${u.origin}${u.pathname}`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: `token=${encodeURIComponent(u.searchParams.get('token'))}` });
-    return { status: r.status, html: await r.text() };
-  };
-  const page = await open(href('approve'));
-  assert.match(page.html, /Approve Subscription\?/);
-  assert.match(page.html, /<form method="post"/);
-  assert.equal((await win.evaluate(() => window.leadFinder.subscriptionStatus())).reason, 'pending', 'opening the link changes nothing');
-  const approved = await press(href('approve'));
-  assert.match(approved.html, /Subscription approved/);
-  assert.equal((await press(href('approve'))).status, 409, 'no duplicate approval');
-  assert.equal((await press(href('cancel'))).status, 409, 'cancel link spent too');
-  assert.match((await open(href('approve'))).html, /already been used/);
-
-  // Active: the search passes the subscription check and reaches Chrome.
+  // Active: the search passes and reaches Chrome; paid features open up.
   await startSearch();
   await win.locator('.state-error').waitFor({ timeout: 20_000 });
   assert.match(await win.locator('.progress .msg').textContent(), /Google Chrome is not installed/);
-  await win.getByRole('button', { name: /days left/ }).waitFor();
+  await pill.click();
+  assert.deepEqual([await panel.locator('.sub-title h2').textContent(), await panel.locator('.sub-chip').textContent()], ['Six Months', 'Active']);
+  assert.match(await panel.locator('.sub-line').textContent(), /Until .* · 18\d days left/);
+  assert.deepEqual(await meters(), ['Today 0 / 250']);
+  await panel.getByRole('button', { name: 'Renew or upgrade' }).waitFor();
+  if (shots) await win.screenshot({ path: path.join(shots, 'access-paid.png') });
+  await closePanel();
 
-  // Expiry (server clock decides): blocked again with the expired message.
-  const deviceId = await deviceIdOf(win);
-  lic.sql('UPDATE licenses SET expires_at = ? WHERE device_id = ?', [new Date(Date.now() - 60_000).toISOString(), deviceId]);
+  // Today's leads used up (the server's count): searching is refused with the reason.
+  const day = (await refresh()).credits.day;
+  lic.sql("INSERT INTO credit_usage (account, day, bucket, used) VALUES (?, ?, 'total', 250)", [`device:${deviceId}`, day]);
+  await refresh();
+  await win.getByRole('button', { name: 'Six Months · 0 left' }).waitFor();
   await startSearch();
-  await plans.waitFor();
-  assert.match(await plans.innerText(), /Your subscription has expired/);
-  await closePlans();
-  // Modifying local app state does not help: the status is re-signed by the server each time.
+  await panel.waitFor();
+  assert.match(await panel.locator('.sub-notice').innerText(), /Today's 250 leads are used up\. More at/);
+  await closePanel();
+  lic.sql('DELETE FROM credit_usage WHERE account = ?', [`device:${deviceId}`]);
+
+  // Suspended by the administrator: nothing can be saved.
+  lic.sql("UPDATE subscriptions SET status = 'suspended' WHERE device_id = ?", [deviceId]);
+  await refresh();
+  await win.getByRole('button', { name: 'Suspended' }).waitFor();
+  await startSearch();
+  await panel.waitFor();
+  assert.match(await panel.innerText(), /Contact Axora Web Solutions to restore access/);
+  await closePanel();
+
+  // Expired: back to Free (the server's clock decides; local state doesn't help).
+  lic.sql("UPDATE subscriptions SET status = 'active', expires_at = ? WHERE device_id = ?", [new Date(Date.now() - 60_000).toISOString(), deviceId]);
   await win.evaluate(() => localStorage.setItem('subscription', JSON.stringify({ allowed: true })));
-  assert.equal((await win.evaluate(() => window.leadFinder.subscriptionStatus())).allowed, false);
+  const expired = await refresh();
+  assert.deepEqual([expired.allowed, expired.plan.id, expired.plan.state, expired.reason], [false, 'free', 'expired', 'expired']);
+  await pill.click();
+  assert.equal(await panel.locator('.sub-chip').textContent(), 'Expired');
+  assert.match(await panel.locator('.sub-line').textContent(), /Six Months ended/);
+  await closePanel();
 
-  // Cancellation: new application, cancelled by email; can apply again.
-  await win.locator('.plan-pill').click();
-  await plans.getByRole('button', { name: 'Apply for Subscription' }).first().click();
-  await plans.getByRole('button', { name: 'Choose image…' }).click();
-  await plans.getByLabel(/Message or transaction ID/).fill('Monthly renewal, TID 1122');
-  await plans.getByLabel(/^Email/).fill('customer@example.com');
-  await plans.getByRole('button', { name: 'Submit application' }).click();
-  await plans.getByRole('heading', { name: 'Application submitted' }).waitFor();
-  await plans.getByRole('button', { name: 'Done' }).click();
-  const cancelHref = lic.mails.at(-1).html.match(/href="([^"]*\/cancel\?token=[^"]+)"/)[1].replace(/&amp;/g, '&');
-  assert.match((await press(cancelHref)).html, /Application cancelled/);
-  const st = await win.evaluate(() => window.leadFinder.subscriptionStatus());
-  assert.equal(st.allowed, false);
-  assert.equal(st.subscription.state, 'expired', 'expired subscription stays expired after a cancelled renewal');
-
-  // Lifetime access.
+  // One-Time: unlimited.
   await lic.activate(deviceId, 'lifetime');
-  await win.evaluate(() => window.leadFinder.subscriptionStatus());
-  await win.getByRole('button', { name: 'Lifetime' }).waitFor();
+  await refresh();
+  await win.getByRole('button', { name: 'One-Time', exact: true }).waitFor();
+  await pill.click();
+  assert.match(await panel.locator('.usage').innerText(), /Unlimited leads/);
+  assert.equal(await panel.getByRole('button', { name: 'Renew or upgrade' }).count(), 0);
+  await closePanel();
 
   // ================= 3. Website filter (search + table) =================
   const opts = await win.locator('#site option').allTextContents();
@@ -286,9 +264,10 @@ test('app lock, subscription flow and gating, website filter, WhatsApp-only expo
   assert.match(csv, /No Site WA,\+923001234567/);
   assert.match(csv, /Has Site WA,\+923211234567/);
   assert.doesNotMatch(csv, /No Site Plain/);
+  assert.deepEqual(pageErrors, []);
 });
 
-test('without a reachable server the plans and payment accounts still show, with the exact reason', async (t) => {
+test('without a reachable server the panel says why, without guessing a plan', async (t) => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lf-access2-'));
   const env = { ...process.env, LEAD_FINDER_USER_DATA: tmp, LEAD_FINDER_LICENSE_URL: 'http://127.0.0.1:9' };
   delete env.ELECTRON_RUN_AS_NODE;
@@ -302,14 +281,11 @@ test('without a reachable server the plans and payment accounts still show, with
   await win.getByRole('dialog', { name: 'Confirm your PIN' }).waitFor();
   await typePin(win, '1357');
   await win.getByRole('heading', { name: 'Lead Finder' }).waitFor();
-  await win.getByRole('button', { name: 'Plans' }).click();
-  const plans = win.getByRole('dialog', { name: 'Subscription plans' });
-  await plans.locator('.plan-card').first().waitFor();
-  const text = await plans.innerText();
+  await win.getByRole('button', { name: 'Plan · offline' }).click();
+  const panel = win.getByRole('dialog', { name: 'Subscription' });
+  await panel.getByRole('heading', { name: "Can't reach the subscription server" }).waitFor();
+  const text = await panel.innerText();
   assert.match(text, /subscription server is not running \(http:\/\/127\.0\.0\.1:9\)\. Start it with "npm run server"/);
-  assert.doesNotMatch(text, /Check the internet connection/);
-  assert.equal(await plans.locator('.plan-card').count(), 3);
-  await plans.getByRole('button', { name: 'Apply for Subscription' }).nth(2).click();
-  assert.match(await plans.locator('.pay-box').innerText(), /Send PKR 20,000 for the Lifetime plan/);
-  if (shots) await win.screenshot({ path: path.join(shots, 'access-offline-plans.png') });
+  assert.equal(await panel.locator('.meter').count(), 0, 'no usage is shown without the server');
+  if (shots) await win.screenshot({ path: path.join(shots, 'access-offline.png') });
 });

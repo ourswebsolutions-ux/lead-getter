@@ -1,6 +1,7 @@
 'use strict';
 
 const path = require('node:path');
+const { timezoneFrom } = require('./credits');
 
 // All settings come from the environment (see .env.example).
 function loadConfig(env = process.env) {
@@ -14,9 +15,8 @@ function loadConfig(env = process.env) {
     adminEmail: env.SUBSCRIPTION_ADMIN_EMAIL,
     paymentInstructions: env.PAYMENT_INSTRUCTIONS || '',
     licensePrivateKey: Buffer.from(env.LICENSE_PRIVATE_KEY, 'base64').toString('utf8'),
-    // Axora subscription website: decides paid access when the token is set.
-    // The token is an admin credential and stays in this server's .env.
-    subscriptionApi: env.SUBSCRIPTION_API_TOKEN ? { baseUrl: env.SUBSCRIPTION_API_URL || 'https://subscription.axorawebsolutions.com/api/v1', token: env.SUBSCRIPTION_API_TOKEN } : null,
+    // Daily allowances reset at midnight in this timezone.
+    timezone: timezoneFrom(env),
     smtp: { host: env.SMTP_HOST, port: Number(env.SMTP_PORT), user: env.SMTP_USER, pass: env.SMTP_PASS, from: env.SMTP_FROM },
   };
 }

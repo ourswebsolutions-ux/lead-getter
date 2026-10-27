@@ -37,4 +37,26 @@ function verifyToken(token, publicKey) {
   return JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
 }
 
-module.exports = { b64url, sha256, randomToken, hashToken, deviceIdFromKey, publicKeyFromB64, requestDigest, signToken, verifyToken };
+// Activation request IDs: ACT-XXXX-XXXX from 32 characters without
+// look-alikes (no 0/O, 1/I); 40 random bits.
+const ID_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+function activationId() {
+  const s = [...crypto.randomBytes(8)].map((b) => ID_ALPHABET[b % 32]).join('');
+  return `ACT-${s.slice(0, 4)}-${s.slice(4)}`;
+}
+
+// A four-digit one-time code, uniformly random.
+const newOtp = () => String(crypto.randomInt(0, 10_000)).padStart(4, '0');
+
+// Codes are stored as HMACs keyed with a server secret (derived from the
+// status-signing key), so the database alone can't be used to try all 10,000.
+const otpKey = (privateKeyPem) => crypto.createHash('sha256').update('lead-finder-otp\n').update(String(privateKeyPem)).digest();
+const otpHash = (key, requestId, code) => crypto.createHmac('sha256', key).update(`${requestId}:${code}`).digest('hex');
+
+function sameHash(a, b) {
+  const x = Buffer.from(String(a), 'hex');
+  const y = Buffer.from(String(b), 'hex');
+  return x.length === 32 && y.length === 32 && crypto.timingSafeEqual(x, y);
+}
+
+module.exports = { b64url, sha256, randomToken, hashToken, deviceIdFromKey, publicKeyFromB64, requestDigest, signToken, verifyToken, activationId, newOtp, otpKey, otpHash, sameHash };

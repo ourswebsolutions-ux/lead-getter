@@ -29,8 +29,9 @@ contextBridge.exposeInMainWorld('leadFinder', {
   // Subscription
   subscriptionStatus: () => ipcRenderer.invoke('subscription:status'),
   subscriptionPlans: () => ipcRenderer.invoke('subscription:plans'),
-  pickScreenshot: () => ipcRenderer.invoke('subscription:pickScreenshot'),
-  applySubscription: (form) => ipcRenderer.invoke('subscription:apply', form && typeof form === 'object' ? { plan: String(form.plan ?? ''), message: String(form.message ?? ''), email: String(form.email ?? '') } : {}),
+  requestActivation: (plan) => ipcRenderer.invoke('subscription:request', String(plan ?? '')),
+  verifyActivationCode: (code) => ipcRenderer.invoke('subscription:verify', String(code ?? '')),
+  resendActivationCode: () => ipcRenderer.invoke('subscription:resend'),
   onSubscription: (cb) => subscribe('subscription:status', cb),
   stopSearch: () => ipcRenderer.invoke('search:stop'),
   facebookSearch: () => ipcRenderer.invoke('facebook:get'),

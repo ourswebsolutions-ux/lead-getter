@@ -117,24 +117,33 @@ A business keeps the leads it has already become. One skipped earlier only becau
 - **Security menu:** the lock button in the header offers **Change PIN** (needs the current PIN) and **Lock now**.
 - **Limits:** the lock protects the app. Someone with access to your computer account could still open `leads.db` directly with other tools.
 
-## Subscriptions
+## Subscriptions and daily leads
 
-Plans: **Monthly PKR 3,000**, **Six Months PKR 10,000**, **Lifetime PKR 20,000** (one-time).
+Every installation starts on **Free**. Paid plans come with a daily allowance of **qualified leads**:
 
-- **Applying:** the plan button in the header (or a blocked search) opens the plans. Applying asks for the plan, a payment screenshot (chosen through the system file dialog and checked to be a real PNG, JPEG or WebP of at most 5 MB), an optional message and your email (required; it identifies your account on the subscription website). The application goes to the licence server (`server/`), which emails info.axoraweb@gmail.com with Approve and Cancel buttons. The app shows **Pending Approval** with the application ID.
-- **Enforcement:** searching, CSV export and the WhatsApp features need an active subscription. Before each of them, and every 30 minutes during a search, the app asks the server for a freshly **signed** status and enforces it in the main process. Missing, pending, cancelled and expired subscriptions each get their own message and a button to the plans. Without a connection to the server, these features stay blocked; Maps needs the internet anyway.
-- **Setup:** see [server/README.md](server/README.md). The app trusts only the server whose public key is in `src/main/license-config.json`.
+| Plan | Price | Qualified leads per day |
+|---|---:|---|
+| Free | PKR 0 | 5 from Google Maps + 5 from Facebook |
+| Monthly | PKR 3,000 | 100, Google Maps and Facebook together |
+| Six Months | PKR 10,000 | 250, Google Maps and Facebook together |
+| One-Time | PKR 20,000 | Unlimited, never expires |
 
-### Axora subscription website
+Monthly and Six Months run one and six calendar months from activation. When a plan ends, the installation is back on Free.
 
-When the licence server has `SUBSCRIPTION_API_TOKEN`, the [Axora subscription website](https://subscription.axorawebsolutions.com) decides who has a paid subscription. Activation and suspension happen on the website.
-
-- **Account:** each installation is a website user whose ID is its **Device ID** (shown in the plans window) and whose email is the one in the customer's application. The email field is now required.
-- **Registration:** a new device is registered on the website automatically as **inactive**, and stays that way until the administrator activates it. Existing accounts are never changed. An email already used by another device is reported, not taken over.
-- **Access:** paid searches only while the website reports the subscription as `active`. Suspended, expired, not activated, "email in use" and "could not be confirmed" each have their own message. The 3 free searches per computer stay available.
-- **Credentials:** the website's admin token stays on the licence server. The desktop app never has it.
-
-Details: [docs/AXORA-INTEGRATION.md](docs/AXORA-INTEGRATION.md).
+- **Activating a plan:**
+  1. Click the plan pill in the header, choose a plan and click **Get activation code**.
+  2. The server creates an **Activation ID** and a **4-digit code** and emails both to the administrator only (`SUBSCRIPTION_ADMIN_EMAIL`). Nothing goes to the customer, and no email address is asked for.
+  3. Once paid, the administrator gives the customer the code (WhatsApp, phone, …).
+  4. Typing (or pasting) it and clicking **Activate** starts the plan at once.
+  - **Code rules:** a code works once, lasts 24 hours, and allows 5 wrong tries. After that, **New code** emails a fresh one to the administrator (once a minute, up to 5 a day). Only a hash of the code is stored.
+- **Daily leads:** a lead counts when it qualifies and is saved as a **new** lead.
+  - Leads already saved, a number found by both Google Maps and Facebook, retries and restarts are never charged twice.
+  - Before saving a new lead, the app asks the subscription server, which counts it and refuses once the day's allowance is used. Two searches at once can't go over the limit.
+  - When a source's allowance is used up, that source stops (on Free, the other one goes on), the leads found so far stay, and the search status says when it resets.
+  - Allowances reset at midnight in the server's timezone (`CREDITS_TIMEZONE`, default Asia/Karachi).
+  - The plan pill shows the leads left today; the Subscription panel shows today's usage per source (Free) or in total (paid).
+- **Enforcement:** the server decides. Every status is signed by the server, and every lead is counted there. Editing local files or the computer's clock changes nothing. A suspended subscription saves no leads at all. CSV export and the WhatsApp features stay with the paid plans.
+- **Server:** production runs the Lead Finder API on the subscription website (`https://subscription.axorawebsolutions.com/lead-getter`). `server/` is the same API for development and tests (`npm run dev` starts it). See [server/README.md](server/README.md).
 
 ## How a search works
 

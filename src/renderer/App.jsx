@@ -9,7 +9,7 @@ import ChatsView from './ChatsView.jsx';
 import OutreachView from './OutreachView.jsx';
 import Composer from './Composer.jsx';
 import { currentTheme, setTheme } from './theme.js';
-import Plans, { statusLine } from './Plans.jsx';
+import Subscription, { planPill, statusLine } from './Subscription.jsx';
 import { ChangePin } from './LockScreen.jsx';
 
 const ROWS_PER_PAGE = 500;
@@ -425,6 +425,7 @@ export default function App({ onLock }) {
   const [searchQuery, setSearchQuery] = useState(''); // debounced
   const [sub, setSub] = useState(null);
   const [plansOpen, setPlansOpen] = useState(null); // null | { notice }
+  const refreshSub = useCallback(() => api.subscriptionStatus().then(setSub).catch(() => {}), []);
   const [changePin, setChangePin] = useState(false);
   // Leads | Chats | Outreach. Views stay mounted once opened, so switching
   // keeps each one's place (scroll, open chat, unsaved templates).
@@ -737,15 +738,16 @@ export default function App({ onLock }) {
           <span className="conn-dot" />
           {status.profile ? <span>Chrome · {status.profile}</span> : <span>Chrome not connected</span>}
         </div>
-        <button
-          type="button"
-          className={`plan-pill reason-${sub?.reason || 'loading'}`}
-          title={statusLine(sub)}
-          onClick={() => setPlansOpen({ notice: null })}
-        >
-          <Icon name="crown" size={14} />
-          <span>{!sub ? 'Plan…' : sub.reason === 'active' ? (sub.subscription?.expiresAt ? `${sub.subscription.daysLeft} days left` : 'Lifetime') : { trial: `Free: ${sub.trial?.remaining} search${sub.trial?.remaining === 1 ? '' : 'es'} left`, trial_used: 'Get a plan', pending: 'Pending approval', expired: 'Expired', cancelled: 'Apply again', none: 'Get a plan', offline: 'Plans', unconfigured: 'Plans', misconfigured: 'Plan: server error', invalid: 'Plan: error', suspended: 'Suspended', inactive: 'Not activated', unavailable: 'Plan: checking', email_in_use: 'Email in use' }[sub.reason]}</span>
-        </button>
+        {(() => {
+          const pill = planPill(sub);
+          return (
+            <button type="button" className={`plan-pill tone-${pill.tone}`} title={statusLine(sub)} onClick={() => setPlansOpen({ notice: null })}>
+              <Icon name="crown" size={14} />
+              <span>{pill.text}</span>
+              {pill.attention && <span className="pill-dot" aria-label="Activation code waiting" />}
+            </button>
+          );
+        })()}
         <WhatsAppPanel wa={wa} />
         <ThemeToggle />
         <LockMenu onLock={onLock} onChangePin={() => setChangePin(true)} />
@@ -1085,7 +1087,15 @@ export default function App({ onLock }) {
 
       {active && <AgentCard status={status} />}
       {summary && !active && <Celebration summary={summary} onClose={() => setSummary(null)} />}
-      {plansOpen && <Plans status={sub} notice={plansOpen.notice} notify={notify} onClose={() => (setPlansOpen(null), api.subscriptionStatus().then(setSub).catch(() => {}))} />}
+      {plansOpen && (
+        <Subscription
+          status={sub}
+          notice={plansOpen.notice}
+          notify={notify}
+          onRefresh={refreshSub}
+          onClose={() => (setPlansOpen(null), refreshSub())}
+        />
+      )}
       {changePin && <ChangePin notify={notify} onClose={() => setChangePin(false)} />}
       {composeLead && <Composer lead={composeLead} connected={wa?.state === 'open'} notify={notify} onClose={() => setComposeLead(null)} />}
 

@@ -701,6 +701,35 @@ class LeadStore {
     }));
   }
 
+  // --- daily allowance ---------------------------------------------------------------
+
+  // The key a new lead is charged under (a hash, so the subscription server
+  // never sees the lead), or null when saving would not add a new lead (it is
+  // already one, it joins a Facebook lead with the same number, or it does
+  // not qualify). Validated numbers are keyed by number, so the same number
+  // found by Google Maps and Facebook is charged once.
+  creditKeyForMaps(result) {
+    return this.withRetry(() => {
+      const existing = this.stmt.get.get(result.placeKey);
+      if (existing?.qualified || existing?.website_status === 'deleted') return null;
+      if (!(result.isLead ?? QUALIFIED_STATUSES.has(result.websiteStatus))) return null;
+      const ph = normalizePhone(result.phoneRaw ?? result.phone, { address: result.address || existing?.address });
+      if (ph.status !== 'valid') return leadKey(`place:${result.placeKey}`);
+      if (this.db.prepare('SELECT 1 FROM businesses WHERE place_key = ? AND qualified = 1').get(facebookKey(ph.phone))) return null;
+      return leadKey(`phone:${ph.phone}`);
+    });
+  }
+
+  // The same for a number found in a Facebook post.
+  creditKeyForFacebook(phone) {
+    return this.withRetry(() => {
+      const marker = this.stmt.get.get(facebookKey(phone));
+      if (marker && !marker.qualified) return null; // deleted
+      if (this.db.prepare('SELECT 1 FROM businesses WHERE phone = ? AND qualified = 1').get(phone)) return null;
+      return leadKey(`phone:${phone}`);
+    });
+  }
+
   // --- Facebook -----------------------------------------------------------------
 
   // Saves a number found in a Facebook post: { phone (E.164), country, raw,
@@ -950,10 +979,16 @@ const LEAD_SELECT = `SELECT b.*, c.name AS category_name, w.status AS wa_status,
 const TOMBSTONE = `qualified = 0, website_status = 'deleted', website_detail = NULL, name = '', phone = NULL, phone_raw = NULL,
   phone_status = NULL, phone_country = NULL, address = NULL, maps_url = '', fb_post_url = NULL, fb_page_url = NULL, contact_name = NULL, description = NULL`;
 
+// What the daily allowance charges a lead under: a hash of the number (or
+// listing), never the number itself.
+function leadKey(text) {
+  return crypto.createHash('sha256').update(`lead-finder-lead\n${text}`).digest('hex');
+}
+
 // Key of a lead found on Facebook: one per number. A hash, so the marker a
 // deleted lead leaves behind does not keep the number.
 function facebookKey(phone) {
   return `fb:${crypto.createHash('sha256').update(String(phone)).digest('hex').slice(0, 32)}`;
 }
 
-module.exports = { LeadStore, QUALIFIED_STATUSES, localDate, formatCategory, categoryKey, facebookKey, DATE_RE };
+module.exports = { LeadStore, QUALIFIED_STATUSES, localDate, formatCategory, categoryKey, facebookKey, leadKey, DATE_RE };

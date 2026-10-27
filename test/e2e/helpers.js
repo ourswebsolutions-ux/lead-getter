@@ -13,26 +13,28 @@ async function startLicenseServer() {
   const sb = testLicenseStore();
   const store = sb.store;
   const config = { publicBaseUrl: 'http://placeholder', adminEmail: 'info.axoraweb@gmail.com', paymentInstructions: 'Pay by JazzCash to 0300-0000000', licensePrivateKey: privateKey.export({ format: 'pem', type: 'pkcs8' }) };
-  const server = createApp({ config, store, storage: sb.storage, mailer: { send: async (m) => m.to === config.adminEmail && mails.push(m) }, logger: { error() {} } });
+  const sent = []; // every email (code emails included)
+  const server = createApp({ config, store, mailer: { send: async (m) => (sent.push(m), m.to === config.adminEmail && mails.push(m)) }, logger: { error() {} } });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const url = `http://127.0.0.1:${server.address().port}`;
   config.publicBaseUrl = url;
   return {
     url,
     mails, // to the administrator
+    sent, // every email
+    server,
     store,
     env: { LEAD_FINDER_LICENSE_URL: url, LEAD_FINDER_LICENSE_PUBKEY: publicKey.export({ format: 'der', type: 'spki' }).toString('base64') },
     // SQL in the server database (e.g. to expire a licence or use up a trial).
     sql: (text, params = []) => store.q(text).run(...params),
-    // What an approval does: a licence row for the device.
+    // What a completed activation leaves: an active subscription with a plan.
     async activate(deviceId, plan = 'monthly', expiresAt = new Date(Date.now() + 30 * 86_400_000).toISOString()) {
       const now = new Date().toISOString();
-      const appId = `LF-${crypto.randomBytes(5).toString('hex').toUpperCase()}`;
       store.q('INSERT OR IGNORE INTO devices (id, public_key, created_at, last_seen_at) VALUES (?, ?, ?, ?)').run(deviceId, 'test', now, now);
-      store.q("INSERT INTO applications (id, device_id, plan, message, screenshot_type, screenshot_size, screenshot_sha256, status, created_at) VALUES (?, ?, ?, 'test', 'image/png', 0, 'x', 'approved', ?)").run(appId, deviceId, plan, now);
       store
-        .q('INSERT INTO licenses (device_id, plan, application_id, activated_at, expires_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (device_id) DO UPDATE SET plan = excluded.plan, application_id = excluded.application_id, expires_at = excluded.expires_at')
-        .run(deviceId, plan, appId, now, plan === 'lifetime' ? null : expiresAt);
+        .q(`INSERT INTO subscriptions (device_id, plan, status, activated_at, expires_at, updated_at) VALUES (?, ?, 'active', ?, ?, ?)
+            ON CONFLICT (device_id) DO UPDATE SET plan = excluded.plan, status = 'active', expires_at = excluded.expires_at, updated_at = excluded.updated_at`)
+        .run(deviceId, plan, now, plan === 'lifetime' || plan === 'free' ? null : expiresAt, now);
     },
     async close() {
       server.close();

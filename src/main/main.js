@@ -11,7 +11,8 @@ const { SearchSession, WEBSITE_FILTERS } = require('../browser/search-session');
 const { FacebookSession } = require('../browser/facebook-session');
 const { runSources } = require('../browser/search-sources');
 const { AppLock } = require('./applock');
-const { LicenseClient, readScreenshot } = require('./license');
+const { LicenseClient } = require('./license');
+const { CreditGate } = require('./credits');
 const { Updater, fileLog } = require('./updater');
 
 const DEV_URL = process.env.VITE_DEV_SERVER_URL || '';
@@ -121,7 +122,6 @@ function handle(channel, fn) {
 
 let appLock = null;
 let license = null;
-let pendingShot = null; // screenshot chosen in the file dialog, kept in the main process
 
 function licenseConfig() {
   let file = {};
@@ -141,13 +141,15 @@ async function requireSubscription() {
   return st.allowed ? { ok: true } : { ok: false, subscription: st.reason, error: st.message };
 }
 
-// Searching: an active subscription, or free trial searches left.
+// Searching: today's allowance (from the server's signed status) has
+// leads left for at least one source, and the subscription isn't suspended.
 async function requireSearchAccess() {
   const st = await license.status();
   sendSubscription(st);
-  if (st.allowed) return { ok: true, trial: false };
-  if (st.canSearch) return { ok: true, trial: true };
-  return { ok: false, subscription: st.reason, error: st.message };
+  if (st.canSearch) return { ok: true, status: st };
+  // Used up today: say exactly what, and when it resets.
+  const error = st.reason === 'exhausted' ? new CreditGate({ license, credits: st.credits }).message() : st.message;
+  return { ok: false, subscription: st.reason, error };
 }
 
 function sendSubscription(st) {
@@ -155,48 +157,33 @@ function sendSubscription(st) {
 }
 
 function publicStatus(st) {
-  return st && { allowed: st.allowed, canSearch: st.canSearch, reason: st.reason, message: st.message, subscription: st.subscription, application: st.application, pendingApplications: st.pendingApplications, trial: st.trial, deviceId: st.deviceId, serverTime: st.serverTime };
+  return st && { allowed: st.allowed, canSearch: st.canSearch, sources: st.sources || [], reason: st.reason, message: st.message, plan: st.plan, credits: st.credits, activation: st.activation, subscription: st.subscription, deviceId: st.deviceId, serverTime: st.serverTime };
 }
 
-async function pickScreenshot() {
-  const { canceled, filePaths } = await dialog.showOpenDialog(win, {
-    title: 'Choose the payment screenshot',
-    properties: ['openFile'],
-    filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
-  });
-  if (canceled || !filePaths[0]) return { ok: false, canceled: true };
-  const data = await fs.readFile(filePaths[0]);
-  let type;
-  try {
-    type = readScreenshot(data);
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-  pendingShot = { type, data, name: path.basename(filePaths[0]) };
-  return { ok: true, name: pendingShot.name, size: data.length, preview: `data:${type};base64,${data.toString('base64')}` };
-}
+const PAID_PLANS = ['monthly', 'six_months', 'lifetime'];
 
-// Same rule as the licence server and the subscription website.
-const EMAIL_RE = /^[^\s@<>()",;:]{1,64}@[^\s@<>()",;:]{1,189}\.[a-z]{2,24}$/i;
-
-async function applySubscription(raw) {
-  const f = raw && typeof raw === 'object' ? raw : {};
-  const plan = typeof f.plan === 'string' ? f.plan : '';
-  const message = typeof f.message === 'string' ? f.message.trim() : '';
-  const email = typeof f.email === 'string' ? f.email.trim().toLowerCase() : '';
-  if (!plan) return { ok: false, error: 'Choose a subscription plan.' };
-  if (!email) return { ok: false, error: 'Enter your email address.' };
-  if (!EMAIL_RE.test(email) || email.length > 254) return { ok: false, error: 'The email address is not valid.' };
-  if (!pendingShot) return { ok: false, error: 'Attach the payment screenshot.' };
-  if (message.length > 1000) return { ok: false, error: 'The message is too long (1000 characters maximum).' };
+// Activation: an activation code for a plan (sent to the administrator), the
+// 4-digit code, a new code. Each answers { ok, error?, reason?, retryAt? }
+// and then sends the fresh status (the activation comes from the server).
+async function activationCall(fn) {
   try {
-    const res = await license.apply({ plan, message, email, screenshot: pendingShot });
-    pendingShot = null;
+    const out = await fn();
     sendSubscription(await license.status());
-    return { ok: true, applicationId: res.applicationId, status: res.status, emailVerificationSent: res.emailVerificationSent };
+    return { ok: true, ...out };
   } catch (err) {
-    return { ok: false, error: err.message };
+    if (err.code === 'server') license.status().then(sendSubscription, () => {});
+    return { ok: false, error: err.message, reason: err.details?.reason || null, attemptsLeft: err.details?.attemptsLeft ?? null, retryAt: err.details?.retryAt || null };
   }
+}
+
+function requestActivation(plan) {
+  if (!PAID_PLANS.includes(plan)) return { ok: false, error: 'Choose a plan.' };
+  return activationCall(() => license.requestActivation(plan));
+}
+
+function verifyActivationCode(code) {
+  if (typeof code !== 'string' || !/^\d{4}$/.test(code)) return { ok: false, error: 'Enter the 4-digit code.' };
+  return activationCall(() => license.verifyCode(code));
 }
 
 function validateKeyword(value) {
@@ -300,6 +287,13 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
   const access = await requireSearchAccess();
   if (!access.ok) return access;
   if (search) return { ok: false, error: 'A search is already running.' };
+  // Sources with leads left today (on Free each has its own five).
+  const sources = access.status.sources;
+  const withMaps = sources.includes('maps');
+  if (!withMaps && !(facebookSearchOn() && sources.includes('facebook'))) {
+    const gate = new CreditGate({ license, credits: access.status.credits });
+    return { ok: false, subscription: 'exhausted', error: `${gate.message('maps')}${sources.includes('facebook') ? ' Turn on Facebook Lead Search to use your Facebook leads.' : ''}` };
+  }
   // Saved (or matched to an existing spelling) before the search starts.
   let category;
   try {
@@ -309,8 +303,11 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
   }
 
   // Facebook Lead Search (the switch above the Leads table), as it is when
-  // the search starts.
-  const withFacebook = facebookSearchOn();
+  // the search starts, if Facebook has leads left today.
+  const withFacebook = facebookSearchOn() && sources.includes('facebook');
+  // Charges each new lead with the subscription server; the app's plan pill
+  // follows every answer.
+  const credits = new CreditGate({ license, credits: access.status.credits, onChange: (c) => license.last && sendSubscription({ ...license.last, credits: c }) });
   const controller = new AbortController();
   search = { controller };
   // Remembered so a search cut short by a crash can be resumed.
@@ -319,23 +316,11 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
   let expectedProfilePath = null;
   const startedAt = new Date().toISOString();
   let stats = null;
-  sendStatus({ state: 'connecting', phase: 'connection', step: 'connecting', keyword, category: category.name, sources: withFacebook ? ['maps', 'facebook'] : ['maps'], source: 'maps', facebook: null, workers: null, processed: 0, leads: 0, newLeads: 0, skipped: 0, message: 'Connecting to Chrome' });
+  sendStatus({ state: 'connecting', phase: 'connection', step: 'connecting', keyword, category: category.name, sources: [...(withMaps ? ['maps'] : []), ...(withFacebook ? ['facebook'] : [])], source: withMaps ? 'maps' : 'facebook', facebook: null, workers: null, processed: 0, leads: 0, newLeads: 0, skipped: 0, message: 'Connecting to Chrome' });
 
   search.promise = (async () => {
     try {
       expectedProfilePath = (await connectChrome(controller.signal)).path;
-      // A free search is counted only once Chrome is ready, so a failed
-      // connection does not use one up. The server refuses when none are left.
-      if (access.trial) {
-        try {
-          const r = await license.consumeTrial();
-          if (r.consumed) sendStatus({ message: `Free trial: ${r.trial.remaining} free search${r.trial.remaining === 1 ? '' : 'es'} left after this one` });
-        } catch (err) {
-          sendSubscription(await license.status());
-          sendStatus({ state: 'error', phase: 'search', message: err.message });
-          return;
-        }
-      }
       if (controller.signal.aborted) {
         sendStatus({ state: 'stopped', message: 'Search stopped' });
         return;
@@ -344,10 +329,10 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
       const recheck = setInterval(async () => {
         const st = await license.status().catch(() => null);
         sendSubscription(st);
-        // A started free-trial search runs to the end; a subscription that
-        // expires or is suspended mid-search stops it (an unanswered check
-        // does not).
-        if (st && !access.trial && !st.allowed && !['offline', 'unavailable', 'misconfigured'].includes(st.reason)) {
+        // A subscription suspended mid-search stops it (an expired one falls
+        // back to Free, which the next charged lead enforces; an unanswered
+        // check changes nothing).
+        if (st && st.reason === 'suspended') {
           sendStatus({ state: 'stopping', message: st.message });
           controller.abort();
         }
@@ -397,13 +382,14 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
       });
       stats = await runSources({
         withFacebook,
+        withMaps,
         signal: controller.signal,
         send: (event, payload) => {
           if (event === 'status') return sendStatus(payload);
           send('leads:added', payload);
           verifier?.poke(); // check the new number on WhatsApp in the background
         },
-        createMaps: (emit) => new SearchSession({ keyword, categoryId: category.id, websiteFilter, store, signal: controller.signal, pages, recovery: recoveryFor(MAPS_TABS), emit }),
+        createMaps: (emit) => new SearchSession({ keyword, categoryId: category.id, websiteFilter, store, signal: controller.signal, pages, recovery: recoveryFor(MAPS_TABS), credits, emit }),
         createFacebook: (emit) =>
           new FacebookSession({
             keyword,
@@ -415,6 +401,7 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
             signal: controller.signal,
             pages,
             recovery: recoveryFor(FACEBOOK_TABS),
+            credits,
             emit,
           }),
       });
@@ -945,8 +932,9 @@ app.whenReady().then(() => {
     return publicStatus(st);
   });
   handle('subscription:plans', () => license.plans().catch((err) => ({ error: err.message })));
-  handle('subscription:pickScreenshot', () => pickScreenshot());
-  handle('subscription:apply', (form) => applySubscription(form));
+  handle('subscription:request', (plan) => requestActivation(plan));
+  handle('subscription:verify', (code) => verifyActivationCode(code));
+  handle('subscription:resend', () => activationCall(() => license.resendCode()));
   handle('leads:list', (filter) => store.listLeads(validateFilter(filter)));
   // Which of these leads match the table's filter (same rules as leads:list).
   handle('leads:match', (filter, ids) => {
