@@ -1,51 +1,41 @@
-# Lead Finder activation tool (administrator)
+# Lead Finder activation setup (administrator)
 
-Creates 4-digit activation codes for Lead Finder and emails them **only to you** (`ADMIN_EMAIL`). It runs on your computer when you need it. It is not a server, website or dashboard, and it never contacts the customer.
+The app itself creates each 6-digit activation code and emails it **only to you** (`ADMIN_EMAIL`), with the customer's Activation ID, plan and price. This folder holds the settings the app is built with. It is not a server, website or dashboard.
 
-## Setup (once)
+## 1. Email account
+
+The SMTP login is built into every installed copy of the app, where it can be extracted. **Use a send-only SMTP key** from a transactional email service such as Brevo (free tier), Mailgun, SendGrid or Amazon SES. **Never** use your mailbox password or a Gmail App Password: anyone who extracts it could read your mail, including the codes in the Sent folder.
+
+Brevo example: create an account, verify the sender address, and create an SMTP key under *SMTP & API*. Then use `SMTP_HOST=smtp-relay.brevo.com`, `SMTP_PORT=587`, `SMTP_USER` = your Brevo SMTP login, and `SMTP_PASS` = the SMTP key.
+
+## 2. Setup
 
 ```
 cd tools/activation
-npm install
-npm run setup          # creates .env with a new activation secret; writes it into the app build (git-ignored)
+npm run setup          # creates .env (first time) with a new ACTIVATION_SECRET
+# fill in ADMIN_EMAIL, SMTP_* (and CONTACT_* if different) in .env, then:
+npm run setup          # writes the app's settings
+npm run check-smtp     # sends a test email to ADMIN_EMAIL
 ```
-
-Then edit `.env`:
-
-| Setting | |
-|---|---|
-| `ADMIN_EMAIL` | The only address codes are sent to |
-| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` | Your outgoing mail account. For Gmail: `smtp.gmail.com`, `465`, your address, and an [App Password](https://myaccount.google.com/apppasswords) (not your normal password) |
-| `CONTACT_WHATSAPP`, `CONTACT_PHONE` | Shown on the app's WhatsApp and Call buttons. Run `npm run setup` again after changing them, then build a new release |
-
-Check the mail settings with `npm run check-smtp`.
 
 `npm run setup` writes:
-- `src/main/activation-secret.json`: the secret, git-ignored, packaged into builds you make here;
-- `src/main/activation-config.json`: the contact numbers, committed.
+- `src/main/activation-secret.json`: secret, `ADMIN_EMAIL` and SMTP. Git-ignored; packaged into builds made on this computer.
+- `src/main/activation-config.json`: the WhatsApp/phone contact shown in the app. Committed.
 
-**Releases built on GitHub** need the same secret as a repository secret. Run this from the repository folder and paste the `ACTIVATION_SECRET` value from `.env` when asked:
+## 3. Releases built on GitHub
+
+From the repository folder:
 
 ```
-gh secret set ACTIVATION_SECRET
+gh secret set ACTIVATION_CONFIG < src/main/activation-secret.json
 ```
 
-A release build stops with an error if the secret is missing.
+A release build stops with an error when this is missing or incomplete. Run the command again after changing the SMTP key or email.
 
-**Keep `.env` secret and backed up.** Anyone with `ACTIVATION_SECRET` can make working codes. `npm run setup -- --new-secret` replaces it (then update the GitHub secret too). Codes from the old secret stop working, and existing activations end, in builds made afterwards. `.env` is git-ignored; never commit it or send it to anyone.
+## Daily use
 
-The secret is also inside every installed app, because the app has to check codes without a server. See the main README, "How codes are checked (and the limits)".
+When a customer clicks **Activate**, you receive *"Lead Finder activation 123456: Monthly for LF-XXXX-XXXX-XXXX"*. Check the payment, then send the 6 digits to the customer by WhatsApp or phone **within 10 minutes**. If the code has expired, the customer clicks **Send a new code** and you get a new email; the old code stops working.
 
-## Issuing a code
+**Keep `.env` secret and backed up.** `npm run setup -- --new-secret` replaces `ACTIVATION_SECRET`, which ends existing activations in builds made afterwards. Never commit `.env` or send it to anyone.
 
-1. The customer sends you their **Activation ID** (`LF-XXXX-XXXX-XXXX`) and plan by WhatsApp or phone.
-2. Check the payment.
-3. Run:
-
-   ```
-   npm run otp -- LF-XXXX-XXXX-XXXX monthly       # or six_months, lifetime
-   ```
-
-4. The 4-digit code arrives in your inbox (it is not printed in the terminal). Send it to the customer by WhatsApp or phone. They choose the same plan in **Activate** and type the code.
-
-A code works once, only on that Activation ID and plan, on the day it was made and the next two days (UTC). For a renewal, just issue a new code: the app adds the plan's length to a plan that is still running. `issued.log` here records each issue (ID, plan, dates), without the code.
+See the main README, "Limitations (no server)", for what this does and doesn't protect against.

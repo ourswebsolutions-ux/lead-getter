@@ -120,13 +120,15 @@ function handle(channel, fn) {
 // The 4-digit app lock.
 let appLock = null;
 
-// --- subscription (activation codes) -------------------------------------------
-// Checked here in the main process, offline: see activation.js.
+// --- subscription (activation) ----------------------------------------------------
+// Codes are made, emailed to the administrator and checked here in the main
+// process (never in the window): see activation.js.
 
 let activation = null;
 
 // activation-config.json (contact numbers) is in the repository;
-// activation-secret.json is not: it is added when the app is built.
+// activation-secret.json (secret, administrator email, SMTP) is not: it is
+// added when the app is built.
 function activationConfig() {
   const read = (f) => {
     try {
@@ -135,10 +137,18 @@ function activationConfig() {
       return {};
     }
   };
-  const config = { ...read('./activation-config.json'), secret: read('./activation-secret.json').secret };
-  // Tests use their own secret; never honoured in a packaged app.
-  const testSecret = process.env.LEAD_FINDER_ACTIVATION_SECRET;
-  return testSecret && !app.isPackaged ? { ...config, secret: testSecret } : config;
+  let config = { ...read('./activation-config.json'), ...read('./activation-secret.json') };
+  // Tests use their own settings (and a local mail server); never honoured
+  // in a packaged app.
+  if (process.env.LEAD_FINDER_ACTIVATION_CONFIG && !app.isPackaged) config = { ...config, ...JSON.parse(process.env.LEAD_FINDER_ACTIVATION_CONFIG) };
+  return config;
+}
+
+function createActivation() {
+  const config = activationConfig();
+  const { createMailer, mailError } = require('./mailer');
+  const mailer = config.smtp?.host ? createMailer(config.smtp, { allowInsecure: !app.isPackaged }) : null;
+  return new Activation({ store, config, mailer, mailError });
 }
 
 function requirePlan() {
@@ -178,9 +188,15 @@ function watchActivation() {
   setInterval(syncNetworkTime, 6 * 60 * 60 * 1000).unref();
 }
 
-function activate(code, plan) {
-  if (typeof code !== 'string' || code.length > 1000 || typeof plan !== 'string') return { ok: false, error: 'Enter the activation code.' };
-  const r = activation.activate(code, plan);
+async function requestActivation(plan) {
+  if (typeof plan !== 'string') return { ok: false, error: 'Choose a plan first.' };
+  const r = await activation.request(plan);
+  return { ...r, status: sendActivation() };
+}
+
+async function verifyActivation(code, plan) {
+  if (typeof code !== 'string' || code.length > 20 || typeof plan !== 'string') return { ok: false, error: 'Enter the 6-digit code.' };
+  const r = await activation.verify(code, plan);
   const status = sendActivation();
   if (r.ok && wa) wa.hasSession().then((has) => has && wa.connect()).catch(() => {});
   return { ...r, status };
@@ -871,7 +887,7 @@ app.whenReady().then(() => {
   try {
     store = new LeadStore(path.join(app.getPath('userData'), 'leads.db'));
     appLock = new AppLock({ store, cipher: keychainCipher() });
-    activation = new Activation({ store, config: activationConfig() });
+    activation = createActivation();
     // The subscription system's request log, from earlier versions.
     require('node:fs').rmSync(path.join(app.getPath('userData'), 'licence.log'), { force: true });
     const last = store.getState('lastSearch');
@@ -990,7 +1006,8 @@ app.whenReady().then(() => {
   handle('export:csv', (scope, filter) => exportCsv(scope === 'all' ? 'all' : 'filtered', filter));
   handle('lead:open', (url) => openListing(url));
   handle('activation:status', () => sendActivation());
-  handle('activation:activate', (code, plan) => activate(code, plan));
+  handle('activation:request', (plan) => requestActivation(plan));
+  handle('activation:verify', (code, plan) => verifyActivation(code, plan));
   handle('activation:contact', (kind, text) => openContact(kind, text));
 
   createWindow();
@@ -1020,7 +1037,7 @@ function smokeTest(reportFile) {
         baileys: typeof (await import('baileys')).default === 'function',
         sqlite: store.db != null,
       };
-      // The app must carry the activation secret, or no plan could be activated.
+      // The app must carry its activation settings (secret, email), or no plan could be activated.
       report.activation = activation.status().configured;
       const ok = report.lockScreen && report.activation && Object.values(report.modules).every(Boolean);
       finish(ok, ok ? undefined : 'checks failed');

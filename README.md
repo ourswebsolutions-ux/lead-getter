@@ -115,7 +115,7 @@ A business keeps the leads it has already become. One skipped earlier only becau
 - **Security menu:** the lock button in the header offers **Change PIN** (needs the current PIN) and **Lock now**.
 - **Limits:** the lock protects the app. Someone with access to your computer account could still open `leads.db` directly with other tools.
 
-## Subscription (activation codes)
+## Subscription (activation)
 
 | Plan | Price | Length |
 |---|---:|---|
@@ -125,34 +125,34 @@ A business keeps the leads it has already become. One skipped earlier only becau
 
 Searching (Google Maps and Facebook), CSV export, WhatsApp linking/checks/sending, chats and live campaigns need an active plan. Without one, saved leads can still be viewed, filtered and deleted, and test campaigns still run.
 
-**Activating (customer):**
-1. Click **Activate** at the top, choose a plan, and send the **Activation ID** shown there (LF-XXXX-XXXX-XXXX) by **WhatsApp** or **Call**. The WhatsApp button pre-fills the ID and plan.
-2. After payment you receive a **4-digit activation code**. Type it in and the plan starts immediately. A code entered while a plan is still running adds its length to the current end date.
+**Activating:**
+1. The customer clicks **Activate** at the top, chooses a plan and clicks **Activate**.
+2. The app creates a random 6-digit code and emails it, with the customer's **Activation ID**, plan and price, **only to the administrator** (`adminEmail`) over SMTP. The customer never receives an email.
+3. The app then shows the code entry, with the administrator's WhatsApp and phone number and buttons to send the Activation ID and plan.
+4. The administrator confirms the payment and gives the code to the customer by WhatsApp or phone.
+5. The customer enters it and clicks **Verify & Activate**. The plan starts immediately and the app shows when it ends. A code entered while a plan is still running adds the new plan's length to the current end.
 
-**Issuing a code (administrator):** run the tool in [tools/activation](tools/activation/README.md) on your own computer. `npm run otp -- LF-XXXX-XXXX-XXXX monthly` emails the 4-digit code **only to the administrator's address** (`ADMIN_EMAIL`, over your SMTP account). You then pass it to the customer by WhatsApp or phone. There is no server, website, dashboard or customer email.
+**Rules (checked in the main process, never in the window):**
+- A code works for **10 minutes**, **once**, only on the computer (Activation ID) and plan it was requested for.
+- **5 tries** per code; after that it is cancelled.
+- A new request **replaces** (cancels) the previous code.
+- Requests are limited to one a minute and six an hour.
+- Requests and verifications can't run twice at the same time.
+- If the email can't be sent, the customer is told so ("could not be sent: …"), nothing is kept, and that code can never activate anything.
+- Plans and waiting codes are kept across restarts and updates in the local database, sealed so that hand edits are rejected. Monthly and 6 Months end on their calendar date; Lifetime never ends.
+- Turning the computer's clock back changes nothing. When online, the app also takes the time from an HTTPS response.
 
-### How codes are checked (and the limits)
+**Setup:** see [tools/activation](tools/activation/README.md). The secret, administrator email and SMTP login are **never committed**: local builds read the git-ignored `src/main/activation-secret.json`, and GitHub release builds read the `ACTIVATION_CONFIG` repository secret. A release fails without them.
 
-The app checks codes itself, offline, in the main process (not the window). A code is `HMAC-SHA256(secret, Activation ID, plan, issue day)` cut to 4 digits:
+### Limitations (no server)
 
-- **Bound to one computer.** The Activation ID comes from the computer's machine id, and a code made for another ID doesn't match.
-- **Bound to the plan.** A code only works for the plan it was made for.
-- **OTP expiry.** A code works on its issue day and the next two days (UTC), then it is refused as expired.
-- **Single use.** Codes used on this computer are remembered and refused again.
-- **Guessing.** Every refused code counts as a wrong try. After 5 wrong tries, entry is locked for 15 minutes.
-- **Plan end.** Monthly and 6 Months end one or six calendar months after activation, and Lifetime never ends. The stored plan is sealed with the secret, so editing the database doesn't change it, and a database copied to another computer doesn't carry the plan.
-- **Clock changes.** The app remembers the latest time it has seen, so turning the computer's clock back doesn't bring an ended plan back. When online, it also takes the time from an HTTPS response.
-- **Kept across restarts and updates** in the local database (`app_state`).
+There is no server, so the code is created and checked on the customer's own computer. This **cannot be fully secure**, and it isn't presented as such:
 
-**The secret:** `ACTIVATION_SECRET` is created by `npm run setup` in `tools/activation/.env`. It is **never committed**: local builds read it from the git-ignored `src/main/activation-secret.json`, and GitHub release builds read the `ACTIVATION_SECRET` repository secret. A release fails without it.
+- **The SMTP login is inside every installed app.** Anyone who unpacks the app can extract it. Use a **send-only SMTP key** from a transactional email service (Brevo, Mailgun, SendGrid, Amazon SES), never a mailbox password or Gmail App Password. A mailbox login would let them read the Sent folder, and the codes in it. Someone with the key could also send email through that account, so watch its usage and replace the key if it is abused.
+- **The code briefly exists in the customer's app** before it is emailed. Only a slow scrypt hash is stored, and it expires after 10 minutes, but someone who can read the app's memory, or modifies the app, can get past the check.
+- **The sealing secret is inside the app too**, so a determined person could forge a plan record.
 
-**What this does not protect against, stated plainly.** There is no server, so the check runs entirely on the customer's computer, and the secret is inside every installed copy:
-- Someone who unpacks the app can extract the secret and make working codes for any computer, or modify the app to skip the check.
-- Clearing the app's data resets the wrong-try counter and the record of used codes. A code could then be guessed slowly (10,000 possibilities) or reused within its 3 days.
-
-This scheme stops casual sharing and guessing, not a determined attacker. Stronger protection needs either a server, or the longer signed codes this project used before (no secret in the app, but much longer to type).
-
-Changing the secret (`npm run setup -- --new-secret`, plus the GitHub secret) makes old codes stop working and ends existing activations in builds made afterwards. Back up `tools/activation/.env`.
+What this protects against: ordinary users guessing codes, sharing codes between computers or plans, reusing them, editing the database, or changing the clock. Real protection would need a server that creates and checks codes, which this project deliberately doesn't have.
 
 ## How a search works
 
@@ -422,7 +422,7 @@ The [Google Maps Terms of Service](https://www.google.com/help/terms_maps/), sec
 
 ```
 src/main/       Electron main process: window, validated IPC, search lifecycle,
-                activation.js + activation-code.js (offline plan check)
+                activation.js + mailer.js (plans, codes emailed to the administrator)
 src/preload/    Restricted bridge (window.leadFinder)
 src/renderer/   React UI (Vite)
 src/browser/    chrome.js (discovery + CDP attach), maps.js (Maps page ops),
@@ -433,7 +433,7 @@ src/database/   SQLite store (node:sqlite, built into Electron)
 src/export/     CSV generation
 test/           Unit tests, Electron E2E test, real-Chrome integration script
 scripts/        dev.js (npm run dev), release.js (npm run release)
-tools/activation/  Administrator's code tool (not packaged): setup, otp
+tools/activation/  Activation setup (not packaged): writes the build's settings, tests SMTP
 build/          App icon
 ```
 

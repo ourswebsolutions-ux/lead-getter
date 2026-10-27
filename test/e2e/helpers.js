@@ -1,25 +1,33 @@
 'use strict';
 // Shared E2E helpers: unlocking through the real lock screen, and a plan
-// activated with a throwaway secret (the app accepts a test secret from
-// LEAD_FINDER_ACTIVATION_SECRET only when it isn't packaged).
+// activated through the real flow (Activate -> email -> code -> Verify)
+// with a local mail server. The app accepts these test settings
+// (LEAD_FINDER_ACTIVATION_CONFIG) only when it isn't packaged.
 
 const crypto = require('node:crypto');
-const { createCode } = require('../../src/main/activation-code');
+const { startSmtp } = require('../fake-smtp');
 
-const secret = crypto.randomBytes(32);
-const activationEnv = {
-  LEAD_FINDER_ACTIVATION_SECRET: secret.toString('base64'),
-  LEAD_FINDER_NO_NETWORK_TIME: '1',
-};
+// A fixed port per test process, so the settings can be given at launch.
+const port = 20000 + (process.pid % 20000);
+const mail = startSmtp({ port, unref: true });
+const smtp = { host: '127.0.0.1', port, user: 'sender@example.com', pass: 'test-pass', from: 'Lead Finder <sender@example.com>', insecure: true };
+const activationConfig = { secret: crypto.randomBytes(32).toString('base64'), adminEmail: 'admin@example.com', smtp };
+const activationEnv = { LEAD_FINDER_ACTIVATION_CONFIG: JSON.stringify(activationConfig), LEAD_FINDER_NO_NETWORK_TIME: '1' };
 
-// What the administrator's tool would email.
-const testCode = (activationId, plan, opts = {}) => createCode({ activationId, plan, secret, ...opts }).code;
+// The code in the latest email for an Activation ID.
+async function codeFor(activationId) {
+  const m = (await mail).messages.filter((x) => x.text.includes(activationId)).at(-1);
+  return m && m.text.match(/Activation code \(OTP\): (\d{6})/)[1];
+}
 
-// Activates `plan` through the app's own check (main process).
+// Activates `plan` through the app's own request and check (main process).
 async function activatePlan(win, plan = 'lifetime') {
+  await mail;
   const st = await win.evaluate(() => window.leadFinder.activationStatus());
   if (st.state === 'active') return st;
-  const r = await win.evaluate(([c, p]) => window.leadFinder.activate(c, p), [testCode(st.activationId, plan), plan]);
+  const req = await win.evaluate((p) => window.leadFinder.requestActivation(p), plan);
+  if (!req.ok) throw new Error(`Activation request failed: ${req.error}`);
+  const r = await win.evaluate(([c, p]) => window.leadFinder.verifyActivation(c, p), [await codeFor(st.activationId), plan]);
   if (!r.ok) throw new Error(`Activation failed: ${r.error}`);
   return r.status;
 }
@@ -39,4 +47,4 @@ async function unlock(win, pin = '1357', { plan = 'lifetime' } = {}) {
   if (plan && !process.env.LEAD_FINDER_EXE) await activatePlan(win, plan);
 }
 
-module.exports = { unlock, activatePlan, activationEnv, testCode };
+module.exports = { unlock, activatePlan, activationEnv, activationConfig, codeFor, mail };

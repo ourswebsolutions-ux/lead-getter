@@ -17,11 +17,12 @@ if (!targets) {
   process.exit(1);
 }
 
-// Without the activation secret no plan could be activated in the build.
+// Without the activation settings no plan could be activated in the build.
 try {
-  if (!require('../src/main/activation-secret.json').secret) throw new Error();
+  const c = require('../src/main/activation-secret.json');
+  if (!c.secret || !c.adminEmail || !c.smtp?.host) throw new Error();
 } catch {
-  console.error('src/main/activation-secret.json is missing: run `npm run setup` in tools/activation (or set ACTIVATION_SECRET in CI).');
+  console.error('src/main/activation-secret.json is missing or incomplete: run `npm run setup` in tools/activation (or set ACTIVATION_CONFIG in CI).');
   process.exit(1);
 }
 

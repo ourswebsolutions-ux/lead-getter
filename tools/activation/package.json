@@ -1,17 +1,13 @@
 {
-  "name": "lead-finder-activation-tool",
-  "version": "1.0.0",
+  "name": "lead-finder-activation-setup",
+  "version": "2.0.0",
   "private": true,
-  "description": "Administrator's tool: creates Lead Finder activation codes and emails them to the administrator only. Runs on the administrator's computer; not a server.",
+  "description": "Administrator's setup for Lead Finder activation: writes the build's activation settings (secret, administrator email, SMTP) and tests the email account. Not a server.",
   "engines": {
     "node": ">=22.13"
   },
   "scripts": {
     "setup": "node setup.js",
-    "otp": "node otp.js",
-    "check-smtp": "node otp.js --check-smtp"
-  },
-  "dependencies": {
-    "nodemailer": "^7.0.6"
+    "check-smtp": "node check-smtp.js"
   }
 }
