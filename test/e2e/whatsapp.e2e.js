@@ -11,7 +11,7 @@ const net = require('node:net');
 const { spawn } = require('node:child_process');
 const { _electron, chromium } = require('playwright-core');
 const { LeadStore } = require('../../src/database/db');
-const { unlock } = require('./helpers');
+const { unlock, activationEnv } = require('./helpers');
 
 const root = path.join(__dirname, '..', '..');
 const shots = process.env.LEAD_FINDER_SCREENSHOTS;
@@ -38,7 +38,7 @@ test('WhatsApp: real QR linking, statuses, composer and send guards', async (t) 
   const userData = path.join(tmp, 'app');
   fs.mkdirSync(userData);
   seed(path.join(userData, 'leads.db'));
-  const env = { ...process.env, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome') };
+  const env = { ...process.env, ...activationEnv, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome') };
   delete env.ELECTRON_RUN_AS_NODE;
   const app = await _electron.launch(process.env.LEAD_FINDER_EXE ? { executablePath: process.env.LEAD_FINDER_EXE, args: [], env } : { args: [root], cwd: root, env });
   t.after(async () => {
@@ -132,7 +132,7 @@ test('WhatsApp linking with the real keychain reaches a real QR code', async (t)
   fs.mkdirSync(userData);
   seed(path.join(userData, 'leads.db'));
   const port = await freePort();
-  const env = { ...process.env, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome') };
+  const env = { ...process.env, ...activationEnv, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome') };
   delete env.ELECTRON_RUN_AS_NODE;
   const exe = process.env.LEAD_FINDER_EXE;
   const proc = exe

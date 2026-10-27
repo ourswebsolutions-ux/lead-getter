@@ -11,7 +11,7 @@ const path = require('node:path');
 const { _electron } = require('playwright-core');
 const { DatabaseSync } = require('node:sqlite');
 const { LeadStore } = require('../../src/database/db');
-const { unlock } = require('./helpers');
+const { unlock, activationEnv } = require('./helpers');
 
 const root = path.join(__dirname, '..', '..');
 
@@ -40,7 +40,7 @@ test('Facebook Lead Search switch and Facebook leads in the Leads table', async 
   fs.mkdirSync(userData);
   const dbFile = path.join(userData, 'leads.db');
   seed(dbFile);
-  const env = { ...process.env, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome'), LEAD_FINDER_NO_UPDATES: '1' };
+  const env = { ...process.env, ...activationEnv, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome'), LEAD_FINDER_NO_UPDATES: '1' };
   delete env.ELECTRON_RUN_AS_NODE;
   let { app, win } = await launch(env);
   t.after(async () => {

@@ -1,0 +1,17 @@
+{
+  "name": "lead-finder-activation-tool",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Administrator's tool: creates Lead Finder activation codes and emails them to the administrator only. Runs on the administrator's computer; not a server.",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "setup": "node setup.js",
+    "otp": "node otp.js",
+    "check-smtp": "node otp.js --check-smtp"
+  },
+  "dependencies": {
+    "nodemailer": "^7.0.6"
+  }
+}

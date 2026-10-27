@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Icon from './icons.jsx';
+import { planNeeded } from './Activation.jsx';
 
 const api = window.leadFinder;
 
@@ -137,7 +138,7 @@ export default function ChatsView({ wa, notify, hidden }) {
       if (r.ok) {
         setDraft('');
         openChat(selected, { quiet: true });
-      } else notify({ type: 'error', text: r.error });
+      } else if (!planNeeded(r)) notify({ type: 'error', text: r.error });
     } finally {
       setSending(false);
     }

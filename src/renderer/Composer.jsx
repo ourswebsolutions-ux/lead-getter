@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import Icon from './icons.jsx';
+import { planNeeded } from './Activation.jsx';
 
 // Message composer for one lead. Nothing is sent until the user presses
 // Send; the result shown is WhatsApp's actual response.
@@ -31,7 +32,8 @@ export default function Composer({ lead, connected, onClose, notify }) {
       if (res.ok) {
         notify({ type: 'ok', text: `Message sent to ${lead.name} (${lead.phone}).` });
         onClose();
-      } else setError(res.error);
+      } else if (planNeeded(res)) onClose();
+      else setError(res.error);
     } catch (err) {
       setError(err.message);
     } finally {

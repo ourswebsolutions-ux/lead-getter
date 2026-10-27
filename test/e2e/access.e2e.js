@@ -8,6 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { _electron } = require('playwright-core');
 const { LeadStore } = require('../../src/database/db');
+const { activatePlan, activationEnv } = require('./helpers');
 
 const root = path.join(__dirname, '..', '..');
 const shots = process.env.LEAD_FINDER_SCREENSHOTS;
@@ -40,7 +41,7 @@ test('app lock, website filter, WhatsApp-only export', async (t) => {
   const userData = path.join(tmp, 'app');
   fs.mkdirSync(userData);
   seed(path.join(userData, 'leads.db'));
-  const env = { ...process.env, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome') };
+  const env = { ...process.env, ...activationEnv, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome') };
   delete env.ELECTRON_RUN_AS_NODE;
   let { app, win } = await launch(env);
   const pageErrors = [];
@@ -105,17 +106,21 @@ test('app lock, website filter, WhatsApp-only export', async (t) => {
   await typePin(win, '9753');
   await win.getByRole('heading', { name: 'Lead Finder' }).waitFor();
 
-  // ================= 2. No subscription anywhere: everything is free =================
-  assert.equal(await win.locator('.plan-pill').count(), 0, 'no plan button');
-  assert.equal(await win.getByText(/Activation code|Subscription|Get a plan|Free · |leads left|Upgrade/).count(), 0, 'no subscription text');
-  for (const k of ['subscriptionStatus', 'requestActivation', 'verifyActivationCode']) assert.equal(await win.evaluate((n) => typeof window.leadFinder[n], k), 'undefined', `no ${k} in the bridge`);
+  // ================= 2. Paid features need a plan (checked in the main process) =================
+  await win.locator('.plan-pill', { hasText: 'Activate' }).waitFor();
+  assert.equal((await win.evaluate(() => window.leadFinder.startSearch('Real Estate Lahore', 'Real Estate'))).subscription, 'none');
+  assert.equal((await win.evaluate(() => window.leadFinder.exportCsv('all', {}))).subscription, 'none');
+  // Viewing saved leads stays available.
+  await win.waitForFunction(() => document.querySelectorAll('tbody tr').length === 3);
+  await activatePlan(win, 'lifetime');
+  await win.locator('.plan-pill', { hasText: 'Lifetime' }).waitFor();
   await win.getByLabel('Search keyword').fill('Real Estate Lahore');
   await win.getByRole('combobox', { name: 'Category', exact: true }).fill('Real Estate');
   await win.getByLabel('Search keyword').click();
   await win.getByRole('button', { name: 'Start Search' }).click();
   await win.locator('.state-error').waitFor({ timeout: 20_000 });
   assert.match(await win.locator('.progress .msg').textContent(), /Google Chrome is not installed/, 'the search goes straight to Chrome');
-  assert.equal((await win.evaluate(() => window.leadFinder.whatsappConnect())).subscription, undefined, 'WhatsApp needs no plan');
+  assert.equal((await win.evaluate(() => window.leadFinder.whatsappConnect())).subscription, undefined, 'WhatsApp works with a plan');
 
   // ================= 3. Website filter (search + table) =================
   const opts = await win.locator('#site option').allTextContents();

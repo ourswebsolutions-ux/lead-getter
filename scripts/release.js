@@ -17,6 +17,14 @@ if (!targets) {
   process.exit(1);
 }
 
+// Without the activation secret no plan could be activated in the build.
+try {
+  if (!require('../src/main/activation-secret.json').secret) throw new Error();
+} catch {
+  console.error('src/main/activation-secret.json is missing: run `npm run setup` in tools/activation (or set ACTIVATION_SECRET in CI).');
+  process.exit(1);
+}
+
 const bin = (name) => path.join(root, 'node_modules', '.bin', process.platform === 'win32' ? `${name}.cmd` : name);
 const run = (cmd, args) => execFileSync(cmd, args, { cwd: root, stdio: 'inherit', shell: process.platform === 'win32' });
 run(bin('vite'), ['build']);

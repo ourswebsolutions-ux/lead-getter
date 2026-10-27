@@ -115,11 +115,44 @@ A business keeps the leads it has already become. One skipped earlier only becau
 - **Security menu:** the lock button in the header offers **Change PIN** (needs the current PIN) and **Lock now**.
 - **Limits:** the lock protects the app. Someone with access to your computer account could still open `leads.db` directly with other tools.
 
-## Free to use
+## Subscription (activation codes)
 
-Lead Finder has no subscriptions, plans, activation codes or lead limits. Every feature works without signing up: Google Maps and Facebook lead search, the Leads table and export, WhatsApp checks, chats and campaigns. It doesn't contact any subscription or licence server.
+| Plan | Price | Length |
+|---|---:|---|
+| Monthly | PKR 3,000 | 1 month |
+| 6 Months | PKR 10,000 | 6 months |
+| Lifetime | PKR 20,000 | never expires |
 
-Updating from a version that had subscriptions removes what that system stored on the computer: its device key and its `licence.log`. Leads, settings, chats and campaign history stay as they were.
+Searching (Google Maps and Facebook), CSV export, WhatsApp linking/checks/sending, chats and live campaigns need an active plan. Without one, saved leads can still be viewed, filtered and deleted, and test campaigns still run.
+
+**Activating (customer):**
+1. Click **Activate** at the top, choose a plan, and send the **Activation ID** shown there (LF-XXXX-XXXX-XXXX) by **WhatsApp** or **Call**. The WhatsApp button pre-fills the ID and plan.
+2. After payment you receive a **4-digit activation code**. Type it in and the plan starts immediately. A code entered while a plan is still running adds its length to the current end date.
+
+**Issuing a code (administrator):** run the tool in [tools/activation](tools/activation/README.md) on your own computer. `npm run otp -- LF-XXXX-XXXX-XXXX monthly` emails the 4-digit code **only to the administrator's address** (`ADMIN_EMAIL`, over your SMTP account). You then pass it to the customer by WhatsApp or phone. There is no server, website, dashboard or customer email.
+
+### How codes are checked (and the limits)
+
+The app checks codes itself, offline, in the main process (not the window). A code is `HMAC-SHA256(secret, Activation ID, plan, issue day)` cut to 4 digits:
+
+- **Bound to one computer.** The Activation ID comes from the computer's machine id, and a code made for another ID doesn't match.
+- **Bound to the plan.** A code only works for the plan it was made for.
+- **OTP expiry.** A code works on its issue day and the next two days (UTC), then it is refused as expired.
+- **Single use.** Codes used on this computer are remembered and refused again.
+- **Guessing.** Every refused code counts as a wrong try. After 5 wrong tries, entry is locked for 15 minutes.
+- **Plan end.** Monthly and 6 Months end one or six calendar months after activation, and Lifetime never ends. The stored plan is sealed with the secret, so editing the database doesn't change it, and a database copied to another computer doesn't carry the plan.
+- **Clock changes.** The app remembers the latest time it has seen, so turning the computer's clock back doesn't bring an ended plan back. When online, it also takes the time from an HTTPS response.
+- **Kept across restarts and updates** in the local database (`app_state`).
+
+**The secret:** `ACTIVATION_SECRET` is created by `npm run setup` in `tools/activation/.env`. It is **never committed**: local builds read it from the git-ignored `src/main/activation-secret.json`, and GitHub release builds read the `ACTIVATION_SECRET` repository secret. A release fails without it.
+
+**What this does not protect against, stated plainly.** There is no server, so the check runs entirely on the customer's computer, and the secret is inside every installed copy:
+- Someone who unpacks the app can extract the secret and make working codes for any computer, or modify the app to skip the check.
+- Clearing the app's data resets the wrong-try counter and the record of used codes. A code could then be guessed slowly (10,000 possibilities) or reused within its 3 days.
+
+This scheme stops casual sharing and guessing, not a determined attacker. Stronger protection needs either a server, or the longer signed codes this project used before (no secret in the app, but much longer to type).
+
+Changing the secret (`npm run setup -- --new-secret`, plus the GitHub secret) makes old codes stop working and ends existing activations in builds made afterwards. Back up `tools/activation/.env`.
 
 ## How a search works
 
@@ -388,7 +421,8 @@ The [Google Maps Terms of Service](https://www.google.com/help/terms_maps/), sec
 ## Project layout
 
 ```
-src/main/       Electron main process: window, validated IPC, search lifecycle
+src/main/       Electron main process: window, validated IPC, search lifecycle,
+                activation.js + activation-code.js (offline plan check)
 src/preload/    Restricted bridge (window.leadFinder)
 src/renderer/   React UI (Vite)
 src/browser/    chrome.js (discovery + CDP attach), maps.js (Maps page ops),
@@ -399,10 +433,11 @@ src/database/   SQLite store (node:sqlite, built into Electron)
 src/export/     CSV generation
 test/           Unit tests, Electron E2E test, real-Chrome integration script
 scripts/        dev.js (npm run dev), release.js (npm run release)
+tools/activation/  Administrator's code tool (not packaged): setup, otp
 build/          App icon
 ```
 
-Security: context isolation on, Node integration off, sandboxed renderer, strict CSP in builds, IPC accepted only from the app's own page, navigation and new windows blocked, and only Google Maps and Facebook URLs can be opened externally.
+Security: context isolation on, Node integration off, sandboxed renderer, strict CSP in builds, IPC accepted only from the app's own page, navigation and new windows blocked, and only Google Maps and Facebook URLs (plus the administrator's WhatsApp/phone from the app's own config) can be opened externally.
 
 ## Real-Chrome integration tests
 

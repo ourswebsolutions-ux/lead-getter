@@ -8,7 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { _electron } = require('playwright-core');
 const { LeadStore } = require('../../src/database/db');
-const { unlock } = require('./helpers');
+const { unlock, activationEnv } = require('./helpers');
 
 const root = path.join(__dirname, '..', '..');
 const TOTAL = 1200;
@@ -31,6 +31,7 @@ test('a long lead list is drawn in pages', async (t) => {
   seed(path.join(userData, 'leads.db'));
   const env = {
     ...process.env,
+    ...activationEnv,
     LEAD_FINDER_USER_DATA: userData,
     LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome'),
     LEAD_FINDER_NO_UPDATES: '1',

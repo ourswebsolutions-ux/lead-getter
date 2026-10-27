@@ -9,7 +9,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { _electron } = require('playwright-core');
 const { LeadStore, localDate } = require('../../src/database/db');
-const { unlock } = require('./helpers');
+const { unlock, activationEnv } = require('./helpers');
 
 const root = path.join(__dirname, '..', '..');
 const shots = process.env.LEAD_FINDER_SCREENSHOTS;
@@ -55,7 +55,7 @@ test('categories, today/past views, filters, exports and deletion through the re
   const userData = path.join(tmp, 'app');
   fs.mkdirSync(userData);
   seed(path.join(userData, 'leads.db'));
-  const env = { ...process.env, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome') };
+  const env = { ...process.env, ...activationEnv, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome') };
   delete env.ELECTRON_RUN_AS_NODE;
 
   let { app, win } = await launch(env);

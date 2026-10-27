@@ -26,6 +26,11 @@ contextBridge.exposeInMainWorld('leadFinder', {
   lockUnlock: (pin) => ipcRenderer.invoke('lock:unlock', String(pin ?? '')),
   lockChange: (current, next, confirm) => ipcRenderer.invoke('lock:change', String(current ?? ''), String(next ?? ''), String(confirm ?? '')),
   lockNow: () => ipcRenderer.invoke('lock:lock'),
+  // Subscription: this computer's Activation ID, plan status and activation codes.
+  activationStatus: () => ipcRenderer.invoke('activation:status'),
+  activate: (code, plan) => ipcRenderer.invoke('activation:activate', String(code ?? ''), String(plan ?? '')),
+  contactAdmin: (kind, text) => ipcRenderer.invoke('activation:contact', kind === 'call' ? 'call' : 'whatsapp', String(text ?? '')),
+  onActivation: (callback) => subscribe('activation:status', callback),
   stopSearch: () => ipcRenderer.invoke('search:stop'),
   facebookSearch: () => ipcRenderer.invoke('facebook:get'),
   setFacebookSearch: (on) => ipcRenderer.invoke('facebook:set', Boolean(on)),

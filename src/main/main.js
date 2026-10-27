@@ -11,6 +11,7 @@ const { SearchSession, WEBSITE_FILTERS } = require('../browser/search-session');
 const { FacebookSession } = require('../browser/facebook-session');
 const { runSources } = require('../browser/search-sources');
 const { AppLock } = require('./applock');
+const { Activation } = require('./activation');
 const { Updater, fileLog } = require('./updater');
 
 const DEV_URL = process.env.VITE_DEV_SERVER_URL || '';
@@ -119,6 +120,86 @@ function handle(channel, fn) {
 // The 4-digit app lock.
 let appLock = null;
 
+// --- subscription (activation codes) -------------------------------------------
+// Checked here in the main process, offline: see activation.js.
+
+let activation = null;
+
+// activation-config.json (contact numbers) is in the repository;
+// activation-secret.json is not: it is added when the app is built.
+function activationConfig() {
+  const read = (f) => {
+    try {
+      return require(f);
+    } catch {
+      return {};
+    }
+  };
+  const config = { ...read('./activation-config.json'), secret: read('./activation-secret.json').secret };
+  // Tests use their own secret; never honoured in a packaged app.
+  const testSecret = process.env.LEAD_FINDER_ACTIVATION_SECRET;
+  return testSecret && !app.isPackaged ? { ...config, secret: testSecret } : config;
+}
+
+function requirePlan() {
+  const st = activation.status();
+  if (st.state === 'active') return { ok: true };
+  const error = st.state === 'expired' ? `Your ${st.planName} plan has ended. Renew it under Activate to continue.` : 'This needs an active plan. Click Activate at the top to choose a plan.';
+  return { ok: false, subscription: st.state, error };
+}
+
+let lastActivationState = null;
+function sendActivation() {
+  const st = activation.status();
+  // A plan that ended stops WhatsApp checks (the linked session is kept).
+  if (lastActivationState === 'active' && st.state !== 'active') wa?.disconnect().catch(() => {});
+  lastActivationState = st.state;
+  send('activation:status', st);
+  return st;
+}
+
+// The time from an HTTPS answer's Date header, so a computer clock set
+// wrong doesn't change when a plan ends. Best effort; offline is fine.
+async function syncNetworkTime() {
+  if (process.env.LEAD_FINDER_NO_NETWORK_TIME === '1') return;
+  try {
+    const res = await fetch('https://www.google.com/generate_204', { method: 'HEAD', signal: AbortSignal.timeout(8000) });
+    const date = Date.parse(res.headers.get('date') || '');
+    if (Number.isFinite(date)) activation.setNetworkTime(date);
+  } catch {}
+}
+
+// A plan that ends while the app is open is noticed within a minute.
+function watchActivation() {
+  syncNetworkTime().finally(() => sendActivation());
+  setInterval(() => {
+    if (activation.status().state !== lastActivationState) sendActivation();
+  }, 60_000).unref();
+  setInterval(syncNetworkTime, 6 * 60 * 60 * 1000).unref();
+}
+
+function activate(code, plan) {
+  if (typeof code !== 'string' || code.length > 1000 || typeof plan !== 'string') return { ok: false, error: 'Enter the activation code.' };
+  const r = activation.activate(code, plan);
+  const status = sendActivation();
+  if (r.ok && wa) wa.hasSession().then((has) => has && wa.connect()).catch(() => {});
+  return { ...r, status };
+}
+
+// The administrator's WhatsApp or phone, from activation-config.json only.
+function openContact(kind, text) {
+  const c = activation.config.contact || {};
+  if (kind === 'whatsapp' && /^\d{8,15}$/.test(c.whatsapp || '')) {
+    shell.openExternal(`https://wa.me/${c.whatsapp}?text=${encodeURIComponent(String(text || '').slice(0, 500))}`);
+    return { ok: true };
+  }
+  if (kind === 'call' && /^\+?\d{8,15}$/.test(c.phone || '')) {
+    shell.openExternal(`tel:${c.phone}`);
+    return { ok: true };
+  }
+  return { ok: false };
+}
+
 function validateKeyword(value) {
   if (typeof value !== 'string') return { error: 'Enter a search keyword.' };
   const keyword = value.replace(/\s+/g, ' ').trim();
@@ -217,6 +298,8 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
   if (cat.error) return { ok: false, error: cat.error };
   const websiteFilter = WEBSITE_FILTERS.has(rawWebsite) ? rawWebsite : 'without';
   if (search) return { ok: false, error: 'A search is already running.' };
+  const plan = requirePlan();
+  if (!plan.ok) return plan;
   // Saved (or matched to an existing spelling) before the search starts.
   let category;
   try {
@@ -391,6 +474,8 @@ function safeFilePart(text) {
 
 // scope 'all' exports every lead; otherwise only leads matching the filter.
 async function exportCsv(scope, rawFilter) {
+  const plan = requirePlan();
+  if (!plan.ok) return plan;
   const filter = scope === 'all' ? {} : validateFilter(rawFilter);
   const leads = store.listLeads(filter);
   if (!leads.length) return { ok: false, error: 'There are no leads matching this selection to export.' };
@@ -451,6 +536,7 @@ function initChatsAndOutreach(cipher) {
     hasReplied: (phone, since) => Boolean(since) && chatStore.hasIncomingSince(jidOfPhone(phone), since),
     // Category campaigns fill their queues from the saved leads.
     leads: (filter = {}) => store.listLeads(filter),
+    canSend: async () => activation.active,
     nameFor: (lead) => require('../whatsapp/templates').pickName({ contactName: chatStore.chat(jidOfPhone(lead.phone))?.name, businessName: lead.name }).name,
   });
   chats.on('update', (u) => send('chats:update', u));
@@ -524,6 +610,10 @@ async function outreachSetCategory(raw, on, opts) {
   if (on) {
     const existing = outreach.store.campaignForCategory(cat.key);
     const test = existing ? outreach.load(existing.id).config.test : true;
+    if (!test) {
+      const plan = requirePlan();
+      if (!plan.ok) return plan;
+    }
   }
   return outreach.setCategoryEnabled(cat.key, cat.name, Boolean(on), { acknowledge: Boolean(opts && opts.acknowledge === true) });
 }
@@ -532,6 +622,10 @@ async function outreachStart(id, opts) {
   if (!outreach) return unavailable();
   const c = outreach.load(id);
   if (!c) return { ok: false, error: 'That campaign no longer exists.' };
+  if (!c.config.test) {
+    const plan = requirePlan();
+    if (!plan.ok) return plan;
+  }
   return outreach.start(id, { acknowledge: Boolean(opts && opts.acknowledge === true) });
 }
 
@@ -539,6 +633,10 @@ async function outreachResume(id) {
   if (!outreach) return unavailable();
   const c = outreach.load(id);
   if (!c) return { ok: false, error: 'That campaign no longer exists.' };
+  if (!c.config.test) {
+    const plan = requirePlan();
+    if (!plan.ok) return plan;
+  }
   return outreach.resume(id);
 }
 
@@ -598,12 +696,14 @@ function initWhatsApp() {
   // A device linked earlier reconnects automatically.
   if (fake) return wa.connect();
   wa.hasSession()
-    .then((has) => has && wa.connect())
+    .then((has) => has && activation.active && wa.connect())
     .catch(() => {});
 }
 
 async function waConnect() {
   if (!wa) return { ok: false, error: waInitError || 'WhatsApp is not available.' };
+  const plan = requirePlan();
+  if (!plan.ok) return plan;
   await wa.connect();
   return { ok: true };
 }
@@ -626,6 +726,8 @@ async function waLogout() {
 
 async function waRecheck(phone) {
   if (!wa || typeof phone !== 'string' || !E164.test(phone)) return { ok: false, error: 'Invalid number.' };
+  const plan = requirePlan();
+  if (!plan.ok) return plan;
   try {
     const status = await wa.check(phone);
     store.setWhatsAppResult(phone, status, 'baileys');
@@ -643,6 +745,8 @@ async function waSend(leadId, rawText) {
   const text = typeof rawText === 'string' ? rawText.trim() : '';
   if (!text) return { ok: false, error: 'Write a message first.' };
   if (text.length > 4000) return { ok: false, error: 'The message is too long (4000 characters maximum).' };
+  const plan = requirePlan();
+  if (!plan.ok) return plan;
   const lead = store.leadById(leadId);
   if (!lead) return { ok: false, error: 'That lead no longer exists.' };
   if (lead.phoneStatus !== 'valid' || lead.whatsapp !== 'available' || lead.whatsappMethod === 'manual') {
@@ -767,6 +871,7 @@ app.whenReady().then(() => {
   try {
     store = new LeadStore(path.join(app.getPath('userData'), 'leads.db'));
     appLock = new AppLock({ store, cipher: keychainCipher() });
+    activation = new Activation({ store, config: activationConfig() });
     // The subscription system's request log, from earlier versions.
     require('node:fs').rmSync(path.join(app.getPath('userData'), 'licence.log'), { force: true });
     const last = store.getState('lastSearch');
@@ -829,6 +934,8 @@ app.whenReady().then(() => {
   handle('chats:send', async (jid, text) => {
     if (!chats) return unavailable();
     if (!isJid(jid)) return { ok: false, error: 'Invalid chat.' };
+    const plan = requirePlan();
+    if (!plan.ok) return plan;
     return chats.send(jid, text);
   });
   // Outreach campaign
@@ -882,6 +989,9 @@ app.whenReady().then(() => {
   handle('search:status', () => lastStatus);
   handle('export:csv', (scope, filter) => exportCsv(scope === 'all' ? 'all' : 'filtered', filter));
   handle('lead:open', (url) => openListing(url));
+  handle('activation:status', () => sendActivation());
+  handle('activation:activate', (code, plan) => activate(code, plan));
+  handle('activation:contact', (kind, text) => openContact(kind, text));
 
   createWindow();
   if (process.env.LEAD_FINDER_SMOKE_TEST) return smokeTest(process.env.LEAD_FINDER_SMOKE_TEST);
@@ -910,7 +1020,9 @@ function smokeTest(reportFile) {
         baileys: typeof (await import('baileys')).default === 'function',
         sqlite: store.db != null,
       };
-      const ok = report.lockScreen && Object.values(report.modules).every(Boolean);
+      // The app must carry the activation secret, or no plan could be activated.
+      report.activation = activation.status().configured;
+      const ok = report.lockScreen && report.activation && Object.values(report.modules).every(Boolean);
       finish(ok, ok ? undefined : 'checks failed');
     } catch (err) {
       finish(false, err.message);
@@ -923,6 +1035,7 @@ let unlockedOnce = false;
 function afterUnlock() {
   if (unlockedOnce) return;
   unlockedOnce = true;
+  watchActivation();
   initWhatsApp();
 }
 

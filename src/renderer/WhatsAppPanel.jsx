@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import Icon from './icons.jsx';
+import { planNeeded } from './Activation.jsx';
 
 // Header control for the linked WhatsApp account: status pill plus a small
 // popover with the QR code, connection state and check progress.
@@ -42,7 +43,7 @@ export default function WhatsAppPanel({ wa }) {
   const run = (fn) => async () => {
     setBusy(true);
     try {
-      await fn();
+      planNeeded(await fn());
     } finally {
       setBusy(false);
     }

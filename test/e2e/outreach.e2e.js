@@ -10,7 +10,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { _electron } = require('playwright-core');
 const { LeadStore } = require('../../src/database/db');
-const { unlock } = require('./helpers');
+const { unlock, activationEnv } = require('./helpers');
 
 const root = path.join(__dirname, '..', '..');
 const shots = process.env.LEAD_FINDER_SCREENSHOTS;
@@ -46,6 +46,7 @@ test('WhatsApp chats and outreach: history, live messages, campaign, replies, re
   const log = path.join(tmp, 'wa-sent.log');
   const env = {
     ...process.env,
+    ...activationEnv,
     LEAD_FINDER_USER_DATA: userData,
     LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome'),
     LEAD_FINDER_NO_UPDATES: '1',

@@ -49,7 +49,17 @@ jobs:
 
       - name: Unit tests (no network)
         shell: bash
-        run: node --test test/category-campaigns.test.js test/facebook.test.js test/facebook-scroll.test.js test/parallel-pages.test.js test/chats.test.js test/outreach.test.js test/campaigns.test.js test/updater.test.js test/applock.test.js test/categories.test.js test/csv.test.js test/db.test.js test/phone.test.js test/session.test.js test/website.test.js test/whatsapp.test.js test/chrome.test.js test/maps-dom.test.js
+        run: node --test test/category-campaigns.test.js test/facebook.test.js test/facebook-scroll.test.js test/parallel-pages.test.js test/chats.test.js test/outreach.test.js test/campaigns.test.js test/updater.test.js test/applock.test.js test/categories.test.js test/csv.test.js test/db.test.js test/phone.test.js test/session.test.js test/website.test.js test/whatsapp.test.js test/chrome.test.js test/maps-dom.test.js test/activation.test.js
+
+      # The activation secret (tools/activation/.env) is never in the
+      # repository; installers get it from the ACTIVATION_SECRET secret.
+      - name: Activation secret
+        shell: bash
+        env:
+          ACTIVATION_SECRET: ${{ secrets.ACTIVATION_SECRET }}
+        run: |
+          [ -n "$ACTIVATION_SECRET" ] || { echo "::error::Set the ACTIVATION_SECRET repository secret (see tools/activation/README.md)"; exit 1; }
+          node -e "require('fs').writeFileSync('src/main/activation-secret.json', JSON.stringify({ secret: process.env.ACTIVATION_SECRET }))"
 
       - name: Build installers
         run: npm run release -- ${{ matrix.args }}

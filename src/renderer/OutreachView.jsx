@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import Icon from './icons.jsx';
+import { planNeeded } from './Activation.jsx';
 
 const api = window.leadFinder;
 
@@ -21,6 +22,7 @@ const WAITING = {
   interval: 'Waiting before the next contact (45–60 minutes after the last one)',
   next_message: 'Next message to the same contact in about a minute',
   whatsapp: 'Waiting for WhatsApp to connect',
+  subscription: 'Waiting for an active plan (Activate at the top)',
   daily_cap: 'Daily limit reached: continues tomorrow',
   quiet_hours: 'Outside sending hours for the remaining contacts',
   not_started: 'Waiting for the start date',
@@ -545,7 +547,7 @@ export default function OutreachView({ wa, notify, hidden }) {
     try {
       const r = await fn();
       if (!r.ok && r.needsAcknowledgement) setAck({ campaign: true });
-      else if (!r.ok) notify({ type: 'error', text: r.error });
+      else if (!r.ok && !planNeeded(r)) notify({ type: 'error', text: r.error });
       await loadOverview();
       await loadSnap(selected);
       return r;
@@ -577,7 +579,7 @@ export default function OutreachView({ wa, notify, hidden }) {
         setAck({ category: key });
         return;
       }
-      if (!r.ok) notify({ type: 'error', text: r.error });
+      if (!r.ok && !planNeeded(r)) notify({ type: 'error', text: r.error });
       await loadOverview();
       if (r.id) {
         setSelected(r.id);

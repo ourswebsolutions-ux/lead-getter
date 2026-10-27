@@ -7,3 +7,5 @@ release/
 server/.env
 server/data/
 server/node_modules/
+# The activation secret, added at build time (tools/activation, CI secret).
+src/main/activation-secret.json

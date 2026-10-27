@@ -16,7 +16,7 @@ const MIN = 60_000;
 // 10:00 in Pakistan (UTC+5), a Wednesday.
 const START = Date.parse('2026-10-21T05:00:00Z');
 
-function setup({ test: testMode = false, contacts = 3, ready = true, file } = {}) {
+function setup({ test: testMode = false, contacts = 3, ready = true, file, plan = { active: true } } = {}) {
   const dir = file ? path.dirname(file) : fs.mkdtempSync(path.join(os.tmpdir(), 'lf-outreach-'));
   const db = new LeadStore(file || path.join(dir, 'leads.db'));
   const clock = { t: START };
@@ -40,6 +40,7 @@ function setup({ test: testMode = false, contacts = 3, ready = true, file } = {}
       clock: () => clock.t,
       random: () => 0.5, // 52.5 minutes
       tickMs: 1e9,
+      canSend: async () => plan.active,
     });
   const o = outreach();
   const cid = o.create('Campaign A').id;
@@ -53,7 +54,7 @@ function setup({ test: testMode = false, contacts = 3, ready = true, file } = {}
     c.addLeads(Array.from({ length: contacts }, (_, i) => ({ phone: `+92300100${String(i).padStart(4, '0')}`, leadId: null, name: i % 2 ? null : `Name${i}` })));
     assert.equal(c.configure({ test: testMode }).ok, true);
   }
-  return { db, o, c, cid, clock, sent, transport, make, outreach, dir, file: file || path.join(dir, 'leads.db') };
+  return { db, o, c, cid, clock, sent, transport, plan, make, outreach, dir, file: file || path.join(dir, 'leads.db') };
 }
 
 const advance = (h, ms) => (h.clock.t += ms);
@@ -335,6 +336,24 @@ test('quiet hours in the recipient’s time zone', async () => {
   h.clock.t = Date.parse('2026-10-22T04:00:00Z'); // 09:00 in Pakistan
   await h.o.tick();
   assert.equal(h.sent.length, 1);
+});
+
+test('no active plan: live campaigns wait (nothing reserved) and continue once a plan is active; test campaigns still run', async () => {
+  const h = setup({ contacts: 1 });
+  h.plan.active = false;
+  h.c.start({ acknowledge: true });
+  await run(h, 10 * MIN);
+  assert.equal(h.sent.length, 0);
+  assert.equal(h.c.snapshot().waiting, 'subscription');
+  assert.equal(h.c.sends({ test: false }).length, 0);
+  h.plan.active = true;
+  await h.o.tick();
+  assert.equal(h.sent.length, 1);
+  const t = setup({ contacts: 1, test: true });
+  t.plan.active = false;
+  t.c.start({ acknowledge: true });
+  await run(t, 10 * MIN);
+  assert.ok(t.c.sends({ test: true }).length > 0);
 });
 
 test('disconnected: waits, nothing reserved; sends once after reconnecting', async () => {

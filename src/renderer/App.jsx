@@ -9,6 +9,7 @@ import ChatsView from './ChatsView.jsx';
 import OutreachView from './OutreachView.jsx';
 import Composer from './Composer.jsx';
 import { currentTheme, setTheme } from './theme.js';
+import Activation, { planNeeded, planPill, statusLine } from './Activation.jsx';
 import { ChangePin } from './LockScreen.jsx';
 
 const ROWS_PER_PAGE = 500;
@@ -422,6 +423,8 @@ export default function App({ onLock }) {
   const [facebookOn, setFacebookOn] = useState(false); // Facebook Lead Search (stored in the app)
   const [tableSearch, setTableSearch] = useState('');
   const [searchQuery, setSearchQuery] = useState(''); // debounced
+  const [plan, setPlan] = useState(null); // this computer's subscription (activation.js)
+  const [plansOpen, setPlansOpen] = useState(null); // null | { notice }
   const [changePin, setChangePin] = useState(false);
   // Leads | Chats | Outreach. Views stay mounted once opened, so switching
   // keeps each one's place (scroll, open chat, unsaved templates).
@@ -578,6 +581,10 @@ export default function App({ onLock }) {
     const offStatus = api.onStatus(setStatus);
     const offSummary = api.onSummary(setSummary);
     api.whatsappState().then(setWa).catch(() => {});
+    api.activationStatus().then(setPlan).catch(() => {});
+    const offPlan = api.onActivation(setPlan);
+    const onPlanNeeded = (e) => setPlansOpen({ notice: e.detail });
+    window.addEventListener('lead-finder:plan-needed', onPlanNeeded);
     const offWa = api.onWhatsAppState(setWa);
     // Background WhatsApp checks: the leads with that number are applied
     // like new ones (with "WhatsApp only", a confirmed number now shows).
@@ -596,6 +603,8 @@ export default function App({ onLock }) {
       offStatus();
       offSummary();
       offWa();
+      offPlan();
+      window.removeEventListener('lead-finder:plan-needed', onPlanNeeded);
       offWaLeads();
       offLead();
       clearInterval(timer);
@@ -625,7 +634,8 @@ export default function App({ onLock }) {
   async function runSearch(kw, cat) {
     const res = await api.startSearch(kw, cat, websiteFilter);
     if (!res.ok) {
-      notify({ type: 'error', text: res.error });
+      // No active plan: show the Activate panel with the reason.
+      if (!planNeeded(res)) notify({ type: 'error', text: res.error });
       return;
     }
     setCategory(res.category.name); // the saved spelling
@@ -651,6 +661,7 @@ export default function App({ onLock }) {
   async function exportCsv(scope) {
     try {
       const res = await api.exportCsv(scope, filter);
+      if (planNeeded(res)) return;
       if (res.ok) notify({ type: 'ok', text: `Exported ${res.count} leads to ${res.filePath}` });
       else if (!res.canceled) notify({ type: 'error', text: res.error });
     } catch (err) {
@@ -728,6 +739,15 @@ export default function App({ onLock }) {
           <span className="conn-dot" />
           {status.profile ? <span>Chrome · {status.profile}</span> : <span>Chrome not connected</span>}
         </div>
+        {(() => {
+          const pill = planPill(plan);
+          return (
+            <button type="button" className={`plan-pill tone-${pill.tone}`} title={statusLine(plan)} onClick={() => setPlansOpen({ notice: null })}>
+              <Icon name="crown" size={14} />
+              <span>{pill.text}</span>
+            </button>
+          );
+        })()}
         <WhatsAppPanel wa={wa} />
         <ThemeToggle />
         <LockMenu onLock={onLock} onChangePin={() => setChangePin(true)} />
@@ -1067,6 +1087,7 @@ export default function App({ onLock }) {
 
       {active && <AgentCard status={status} />}
       {summary && !active && <Celebration summary={summary} onClose={() => setSummary(null)} />}
+      {plansOpen && <Activation status={plan} notice={plansOpen.notice} notify={notify} onClose={() => setPlansOpen(null)} />}
       {changePin && <ChangePin notify={notify} onClose={() => setChangePin(false)} />}
       {composeLead && <Composer lead={composeLead} connected={wa?.state === 'open'} notify={notify} onClose={() => setComposeLead(null)} />}
 
