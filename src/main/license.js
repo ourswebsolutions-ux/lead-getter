@@ -207,7 +207,8 @@ class LicenseClient {
       return (this.last = { ...out, reason, message: err.message || REASON_TEXT[reason] });
     }
     const p = verifyToken(token, this.serverKey);
-    if (!p || p.deviceId !== out.deviceId || p.nonce !== nonce || !p.plan || !p.credits) return (this.last = { ...out, reason: 'invalid', message: REASON_TEXT.invalid });
+    if (!p || p.deviceId !== out.deviceId || p.nonce !== nonce) return (this.last = { ...out, reason: 'invalid', message: REASON_TEXT.invalid });
+    if (!p.plan || !p.credits) return (this.last = legacyStatus(out, p));
     const credits = p.credits;
     const plan = { ...p.plan, daysLeft: p.plan.expiresAt && p.plan.state === 'active' ? Math.max(0, Math.ceil((Date.parse(p.plan.expiresAt) - Date.parse(p.serverTime)) / 86_400_000)) : null };
     const left = (c) => c.limit === null || c.remaining > 0;
@@ -227,6 +228,12 @@ class LicenseClient {
       subscription: { state: plan.state, plan: plan.id, expiresAt: plan.expiresAt, daysLeft: plan.daysLeft },
       serverTime: p.serverTime,
     });
+  }
+
+  // A server without the daily allowance yet (legacyStatus): one of the 3
+  // free searches, counted there.
+  consumeTrial() {
+    return this.request('POST', '/api/trial/consume', {});
   }
 
   // An Activation ID and code for `plan`; the code goes to the
@@ -249,6 +256,37 @@ class LicenseClient {
   reserveCredit(source, key) {
     return this.request('POST', '/api/credits/reserve', { source, key });
   }
+}
+
+// A subscription server not yet updated for activation codes and the daily
+// allowance (signed status version 1): the earlier rules apply until it is.
+// An active subscription searches without a daily limit; otherwise the 3
+// free searches per computer (each used when a search starts). Nothing is
+// charged per lead. The same app switches to the new rules as soon as the
+// server answers with them.
+function legacyStatus(out, p) {
+  const sub = p.subscription || { state: 'none' };
+  const trial = p.trial || { limit: 0, used: 0, remaining: 0 };
+  const active = sub.state === 'active';
+  const suspended = sub.state === 'suspended';
+  const daysLeft = active && sub.expiresAt ? Math.max(0, Math.ceil((Date.parse(sub.expiresAt) - Date.parse(p.serverTime)) / 86_400_000)) : null;
+  const canSearch = !suspended && (active || trial.remaining > 0);
+  const reason = suspended ? 'suspended' : active ? 'active' : trial.remaining > 0 ? 'free' : 'exhausted';
+  return {
+    ...out,
+    legacy: true,
+    allowed: active,
+    canSearch,
+    sources: canSearch ? ['maps', 'facebook'] : [],
+    reason,
+    message: reason === 'exhausted' ? `Your ${trial.limit} free searches have been used.` : REASON_TEXT[reason] || '',
+    plan: active ? { id: 'legacy', name: 'Subscription', state: 'active', expiresAt: sub.expiresAt || null, daysLeft } : { id: 'free', name: 'Free', state: suspended ? 'suspended' : 'free', expiresAt: null, daysLeft: null },
+    credits: null,
+    trial,
+    activation: null,
+    subscription: { state: sub.state, expiresAt: sub.expiresAt || null, daysLeft },
+    serverTime: p.serverTime,
+  };
 }
 
 function verifyToken(token, publicKey) {

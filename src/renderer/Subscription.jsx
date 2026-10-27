@@ -38,6 +38,7 @@ export function planPill(st) {
   if (UNREACHABLE.has(st.reason)) return { text: 'Plan · offline', tone: 'warn' };
   const p = st.plan;
   if (p.state === 'suspended') return { text: 'Suspended', tone: 'danger' };
+  if (st.legacy) return st.allowed ? { text: p.daysLeft !== null ? `${p.daysLeft} days left` : 'Subscribed', tone: 'accent' } : { text: `Free · ${st.trial?.remaining ?? 0} searches left`, tone: st.trial?.remaining ? 'idle' : 'warn' };
   const left = leadsLeft(st.credits);
   const attention = st.activation?.status === 'pending';
   return { text: left === null ? p.name : `${p.name} · ${left} left`, tone: left === 0 ? 'warn' : p.id !== 'free' ? 'accent' : 'idle', attention };
@@ -210,6 +211,7 @@ export default function Subscription({ status: st, notice, onClose, onRefresh, n
   else if (!st) stage = 'loading';
   else if (UNREACHABLE.has(st.reason)) stage = 'error';
   else if (p.state === 'suspended') stage = 'suspended';
+  else if (st.legacy) stage = 'legacy';
   else if (act && !choosing) stage = 'code';
   else if (choosing || !paidActive) stage = p.id === 'lifetime' && paidActive ? 'plan' : 'choose';
   else stage = 'plan';
@@ -291,6 +293,12 @@ export default function Subscription({ status: st, notice, onClose, onRefresh, n
               <button type="button" className="btn btn-sm" onClick={onRefresh}>
                 Try again
               </button>
+            </Step>
+          )}
+
+          {stage === 'legacy' && (
+            <Step icon="clock" title="Activation codes are coming">
+              <p>{st.allowed ? 'Your subscription is active.' : `${st.trial?.remaining ?? 0} of ${st.trial?.limit ?? 3} free searches left.`} Plans can be activated with a code as soon as the subscription server is updated.</p>
             </Step>
           )}
 

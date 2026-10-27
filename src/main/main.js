@@ -148,7 +148,7 @@ async function requireSearchAccess() {
   sendSubscription(st);
   if (st.canSearch) return { ok: true, status: st };
   // Used up today: say exactly what, and when it resets.
-  const error = st.reason === 'exhausted' ? new CreditGate({ license, credits: st.credits }).message() : st.message;
+  const error = st.reason === 'exhausted' && !st.legacy ? new CreditGate({ license, credits: st.credits }).message() : st.message;
   return { ok: false, subscription: st.reason, error };
 }
 
@@ -157,7 +157,7 @@ function sendSubscription(st) {
 }
 
 function publicStatus(st) {
-  return st && { allowed: st.allowed, canSearch: st.canSearch, sources: st.sources || [], reason: st.reason, message: st.message, plan: st.plan, credits: st.credits, activation: st.activation, subscription: st.subscription, deviceId: st.deviceId, serverTime: st.serverTime };
+  return st && { allowed: st.allowed, canSearch: st.canSearch, sources: st.sources || [], reason: st.reason, message: st.message, plan: st.plan, credits: st.credits, activation: st.activation, subscription: st.subscription, legacy: Boolean(st.legacy), trial: st.trial || null, deviceId: st.deviceId, serverTime: st.serverTime };
 }
 
 const PAID_PLANS = ['monthly', 'six_months', 'lifetime'];
@@ -307,7 +307,8 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
   const withFacebook = facebookSearchOn() && sources.includes('facebook');
   // Charges each new lead with the subscription server; the app's plan pill
   // follows every answer.
-  const credits = new CreditGate({ license, credits: access.status.credits, onChange: (c) => license.last && sendSubscription({ ...license.last, credits: c }) });
+  // (A server without the allowance yet charges nothing: no gate.)
+  const credits = access.status.legacy ? null : new CreditGate({ license, credits: access.status.credits, onChange: (c) => license.last && sendSubscription({ ...license.last, credits: c }) });
   const controller = new AbortController();
   search = { controller };
   // Remembered so a search cut short by a crash can be resumed.
@@ -321,6 +322,18 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
   search.promise = (async () => {
     try {
       expectedProfilePath = (await connectChrome(controller.signal)).path;
+      // A server without the allowance yet: a free search is used once
+      // Chrome is ready (the server refuses when none are left).
+      if (access.status.legacy && !access.status.allowed) {
+        try {
+          await license.consumeTrial();
+          sendSubscription(await license.status());
+        } catch (err) {
+          sendSubscription(await license.status());
+          sendStatus({ state: 'error', phase: 'search', message: err.message });
+          return;
+        }
+      }
       if (controller.signal.aborted) {
         sendStatus({ state: 'stopped', message: 'Search stopped' });
         return;

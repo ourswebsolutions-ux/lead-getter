@@ -143,6 +143,7 @@ Monthly and Six Months run one and six calendar months from activation. When a p
   - Allowances reset at midnight in the server's timezone (`CREDITS_TIMEZONE`, default Asia/Karachi).
   - The plan pill shows the leads left today; the Subscription panel shows today's usage per source (Free) or in total (paid).
 - **Enforcement:** the server decides. Every status is signed by the server, and every lead is counted there. Editing local files or the computer's clock changes nothing. A suspended subscription saves no leads at all. CSV export and the WhatsApp features stay with the paid plans.
+- **Before the website is updated:** if the subscription server still answers the earlier way (signed status version 1), the app uses the earlier rules. An active subscription searches without a daily limit; otherwise there are 3 free searches per computer, and nothing is charged per lead. The panel says activation codes come with the server update. The same app switches to codes and daily leads at its next status check once the server is updated.
 - **Server:** production runs the Lead Finder API on the subscription website (`https://subscription.axorawebsolutions.com/lead-getter`). `server/` is the same API for development and tests (`npm run dev` starts it). See [server/README.md](server/README.md).
 
 ## How a search works

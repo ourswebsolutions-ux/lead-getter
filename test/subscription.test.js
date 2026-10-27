@@ -150,3 +150,29 @@ test('an unreachable local server is reported as "not running", not as an intern
   assert.deepEqual([s.reason, s.canSearch], ['offline', false]);
   assert.match(s.message, /npm run server/);
 });
+
+test('a server not yet updated (status version 1): the earlier rules, nothing charged per lead', async () => {
+  const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
+  let v1 = {};
+  // Answers like the earlier licence server: the version 1 signed status.
+  const fetchImpl = async (url) => {
+    const nonce = new URL(url).searchParams.get('nonce');
+    const body = Buffer.from(JSON.stringify({ v: 1, deviceId: client.deviceId, nonce, serverTime: '2026-10-27T05:00:00.000Z', ...v1 })).toString('base64url');
+    const token = `${body}.${crypto.sign(null, Buffer.from(body), privateKey).toString('base64url')}`;
+    return new Response(JSON.stringify({ token }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const client = new LicenseClient({ store: new LeadStore(':memory:'), cipher: null, config: { serverUrl: 'https://example.test/lead-getter', publicKey: publicKey.export({ format: 'der', type: 'spki' }).toString('base64') }, fetchImpl, machineId: 'm' });
+
+  v1 = { subscription: { state: 'none' }, trial: { limit: 3, used: 1, remaining: 2 } };
+  let s = await client.status();
+  assert.deepEqual([s.legacy, s.reason, s.canSearch, s.allowed, s.credits, s.plan.id, s.trial.remaining], [true, 'free', true, false, null, 'free', 2]);
+  v1 = { subscription: { state: 'none' }, trial: { limit: 3, used: 3, remaining: 0 } };
+  s = await client.status();
+  assert.deepEqual([s.reason, s.canSearch, s.message], ['exhausted', false, 'Your 3 free searches have been used.']);
+  v1 = { subscription: { state: 'active', expiresAt: '2026-11-26T05:00:00.000Z' }, trial: { limit: 3, used: 3, remaining: 0 } };
+  s = await client.status();
+  assert.deepEqual([s.reason, s.canSearch, s.allowed, s.plan.daysLeft, s.sources], ['active', true, true, 30, ['maps', 'facebook']]);
+  v1 = { subscription: { state: 'suspended' }, trial: { limit: 3, used: 0, remaining: 3 } };
+  s = await client.status();
+  assert.deepEqual([s.reason, s.canSearch], ['suspended', false]);
+});
