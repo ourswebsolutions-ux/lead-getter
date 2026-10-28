@@ -104,7 +104,12 @@ Before starting a search, choose **Website**:
 - **With website:** only businesses whose Google Maps listing links to their own website. The domain is saved and shown. Listings without a website are skipped without any Google web check.
 - **All businesses:** both kinds.
 
-A business keeps the leads it has already become. One skipped earlier only because of a different filter is reopened when a later search wants it, so its phone and address get saved too. In the table, **Website** (All / Without / With) filters what's shown, and **WhatsApp only** shows just numbers WhatsApp confirmed. **Export CSV** exports exactly what's shown, so with WhatsApp only ticked, the file contains only those numbers.
+A business keeps the leads it has already become. One skipped earlier only because of a different filter is reopened when a later search wants it, so its phone and address get saved too. In the table, **Website** (All / Without / With) filters what's shown, and **WhatsApp** (All numbers / On WhatsApp / Not on WhatsApp) filters by WhatsApp's own check:
+- *On WhatsApp* shows the numbers WhatsApp confirmed.
+- *Not on WhatsApp* shows the numbers WhatsApp confirmed have no account, for calls or SMS instead.
+- Numbers not checked yet appear in neither.
+
+**Export CSV** exports exactly what's shown, so with *Not on WhatsApp* selected, the file contains only those numbers.
 
 ## App lock (4-digit PIN)
 
@@ -165,7 +170,18 @@ Pacing is deliberately slow: a few seconds between listings and a longer break e
 
 ## Facebook Lead Search
 
-**Facebook Lead Search** is an ON/OFF switch under the search form. The app stores it, and every search reads it when it starts.
+## Sources: Google Maps, Facebook, LinkedIn
+
+Three switches under the search form, **Google Maps**, **Facebook** and **LinkedIn**, choose what a search runs:
+- **Combinations:** any one, any two, or all three. At least one must be on.
+- **Independent:** only the sources that are on start, side by side. Each has its own progress row (*Running, Paused, Completed, Failed, Stopped*) and message, and one failing never stops the others.
+- **Saved:** the app stores the switches, and a search reads them when it starts.
+
+What each source needs:
+- **Google Maps and Facebook** use the **Search keyword** and **Category**. The **Website** filter belongs to Google Maps and is shown only when it's on.
+- **LinkedIn** has **its own search bar** (*LinkedIn search*, e.g. `Full Stack Developer`), shown when LinkedIn is on. With LinkedIn alone, the category is optional; without one, its leads get a category named after the LinkedIn search.
+
+**Facebook Lead Search** is the Facebook switch under the search form. The app stores it, and every search reads it when it starts.
 
 - **OFF** (the default): only Google Maps is searched, exactly as before. Facebook is never opened.
 - **ON:** Google Maps and Facebook search **at the same time**, with the same keyword and category.
@@ -220,7 +236,7 @@ Pacing is deliberately slow: a few seconds between listings and a longer break e
 
 ## LinkedIn Lead Search
 
-**LinkedIn Lead Search** is a second switch under the search form, used the same way as Facebook. It finds **companies that need what the keyword describes** (for `Full Stack Developer`: companies hiring one, or asking for one in a post) and their **public business contact details**. It runs at the same time as Google Maps and Facebook, in its own Chrome window, using that profile's LinkedIn login.
+**LinkedIn Lead Search** is the LinkedIn switch. It searches what you type in the **LinkedIn search** bar and finds **companies that need what it describes** (for `Full Stack Developer`: companies hiring one, or asking for one in a post) and their **public business contact details**. It runs at the same time as Google Maps and Facebook, in its own Chrome window, using that profile's LinkedIn login.
 
 1. **Jobs:** LinkedIn job listings for the keyword, then each job's own page for the company that posted it, its location and the description. The target is the hiring company, never job seekers.
 2. **Company page:** each company's LinkedIn *About* page, for its official website, phone and headquarters.
@@ -252,7 +268,7 @@ Lead Finder never fetches a business's website itself, so a site that is tempora
 ## Categories, Today and Past leads
 
 New leads appear in the table as soon as they're saved, from Google Maps and Facebook alike, including while the window is behind Chrome.
-- **Matching the filters:** for each new lead the app asks the database whether it matches the current filters (category, website, Seen/Unseen, source, search, WhatsApp only, date), using the same rules as loading the table. So a lead appears exactly when it matches, and nothing needs clicking.
+- **Matching the filters:** for each new lead the app asks the database whether it matches the current filters (category, website, Seen/Unseen, source, search, WhatsApp, date), using the same rules as loading the table. So a lead appears exactly when it matches, and nothing needs clicking.
 - **Nothing reset:** filters, selection, search and paging stay as they are. A number found again updates its row instead of adding a second one.
 - **Empty table:** while a search runs it says *Searching for leads…*. *No leads found* (with **Show all leads**) appears only when the current filters really match nothing.
 

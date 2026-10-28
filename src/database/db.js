@@ -623,6 +623,11 @@ class LeadStore {
       clauses.push(`b.phone_status = 'valid' AND EXISTS (SELECT 1 FROM whatsapp_checks w2
         WHERE w2.phone = b.phone AND w2.status = 'available' AND w2.method != 'manual')`);
     }
+    // Only numbers WhatsApp itself said have no account (to call or SMS instead).
+    if (filter.whatsapp === 'unavailable') {
+      clauses.push(`b.phone_status = 'valid' AND EXISTS (SELECT 1 FROM whatsapp_checks w2
+        WHERE w2.phone = b.phone AND w2.status = 'unavailable' AND w2.method != 'manual')`);
+    }
     return { sql: clauses.join(' AND '), params };
   }
 

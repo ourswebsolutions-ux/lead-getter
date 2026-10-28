@@ -1130,7 +1130,8 @@ td.name .name-extra { display: flex; flex-wrap: wrap; gap: 2px 10px; margin-top:
 td.name .name-extra a { color: var(--accent); text-decoration: none; }
 td.name .name-extra a:hover { text-decoration: underline; }
 .country-select select { max-width: 190px; height: 26px; padding-top: 0; padding-bottom: 0; font-size: 12.5px; }
-@media (max-width: 1279px) { .source-hint { display: none; } }
+@media (max-width: 1279px) { .source-hint:not(.warn) { display: none; } }
+.source-hint.warn { color: var(--warn); font-weight: 500; }
 
 /* Per-source progress while Google Maps and Facebook search side by side. */
 .workers { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; }

@@ -137,7 +137,7 @@ test('app lock, website filter, WhatsApp-only export', async (t) => {
   await win.getByLabel('Show websites').selectOption('all');
 
   // ================= 4. WhatsApp-only view and export =================
-  await win.getByLabel('WhatsApp numbers only').check();
+  await win.getByLabel('Show WhatsApp status').selectOption('available');
   await win.waitForFunction(() => document.querySelectorAll('tbody tr').length === 2);
   assert.deepEqual((await names()).sort(), ['Has Site WA', 'No Site WA']);
   const out = path.join(tmp, 'wa.csv');
@@ -148,5 +148,17 @@ test('app lock, website filter, WhatsApp-only export', async (t) => {
   assert.match(csv, /No Site WA,\+923001234567/);
   assert.match(csv, /Has Site WA,\+923211234567/);
   assert.doesNotMatch(csv, /No Site Plain/);
+
+  // ================= 5. Not on WhatsApp: view and export =================
+  await win.getByLabel('Show WhatsApp status').selectOption('unavailable');
+  await win.waitForFunction(() => document.querySelectorAll('tbody tr').length === 1);
+  assert.deepEqual(await names(), ['No Site Plain']);
+  const notWa = path.join(tmp, 'not-wa.csv');
+  await app.evaluate(({ dialog }, f) => (dialog.showSaveDialog = async () => ({ canceled: false, filePath: f })), notWa);
+  await win.getByRole('button', { name: /^Export CSV/ }).click();
+  await win.waitForFunction(() => document.querySelectorAll('.toast.ok').length >= 2);
+  const csv2 = fs.readFileSync(notWa, 'utf8').trim().split('\r\n');
+  assert.equal(csv2.length, 2, 'header and one number');
+  assert.match(csv2[1], /^No Site Plain,\+923007654321,Valid,.*Unavailable/);
   assert.deepEqual(pageErrors, []);
 });

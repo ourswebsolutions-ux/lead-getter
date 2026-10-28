@@ -254,7 +254,7 @@ function validateFilter(raw) {
   else if (Number.isInteger(f.category) && f.category > 0) out.category = f.category;
   else out.category = 'all';
   if (f.website === 'with' || f.website === 'without') out.website = f.website;
-  if (f.whatsapp === 'available') out.whatsapp = 'available';
+  if (f.whatsapp === 'available' || f.whatsapp === 'unavailable') out.whatsapp = f.whatsapp;
   for (const k of ['date', 'from', 'to', 'before']) {
     if (typeof f[k] === 'string' && DATE_RE.test(f[k])) out[k] = f[k];
   }
@@ -321,11 +321,36 @@ function profileLabel(profile) {
 
 // --- search ----------------------------------------------------------------
 
-async function startSearch(rawKeyword, rawCategory, rawWebsite) {
-  const { keyword, error } = validateKeyword(rawKeyword);
-  if (error) return { ok: false, error };
-  const cat = validateCategory(rawCategory);
-  if (cat.error) return { ok: false, error: cat.error };
+// rawKeyword/rawCategory: the Google Maps and Facebook search; rawLinkedIn:
+// LinkedIn's own search (its search bar). Only the sources switched on run.
+async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn) {
+  // The source switches above the Leads table, as they are now.
+  const withMaps = mapsSearchOn();
+  const withFacebook = facebookSearchOn();
+  const withLinkedIn = linkedinSearchOn();
+  if (!withMaps && !withFacebook && !withLinkedIn) return { ok: false, error: 'Turn on at least one source: Google Maps, Facebook or LinkedIn.' };
+  let keyword = '';
+  let cat = { category: '' };
+  if (withMaps || withFacebook) {
+    const k = validateKeyword(rawKeyword);
+    if (k.error) return { ok: false, error: k.error };
+    keyword = k.keyword;
+    cat = validateCategory(rawCategory);
+    if (cat.error) return { ok: false, error: cat.error };
+  }
+  let linkedinKeyword = '';
+  if (withLinkedIn) {
+    const k = validateKeyword(rawLinkedIn);
+    if (k.error) return { ok: false, error: `LinkedIn search: ${k.error.replace(/^Enter a search keyword/, 'enter what to search for')}` };
+    linkedinKeyword = k.keyword;
+    // LinkedIn alone: its leads go to the category given, else one named after its search.
+    if (!keyword) {
+      keyword = linkedinKeyword;
+      const given = validateCategory(rawCategory);
+      cat = given.error ? validateCategory(linkedinKeyword) : given;
+      if (cat.error) return { ok: false, error: cat.error };
+    }
+  }
   const websiteFilter = WEBSITE_FILTERS.has(rawWebsite) ? rawWebsite : 'without';
   if (search) return { ok: false, error: 'A search is already running.' };
   const plan = requirePlan();
@@ -338,20 +363,16 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
     return { ok: false, error: `Could not save the category: ${err.message}` };
   }
 
-  // Facebook and LinkedIn Lead Search (the switches above the Leads table),
-  // as they are when the search starts.
-  const withFacebook = facebookSearchOn();
-  const withLinkedIn = linkedinSearchOn();
-  const sources = ['maps', ...(withFacebook ? ['facebook'] : []), ...(withLinkedIn ? ['linkedin'] : [])];
+  const sources = [...(withMaps ? ['maps'] : []), ...(withFacebook ? ['facebook'] : []), ...(withLinkedIn ? ['linkedin'] : [])];
   const controller = new AbortController();
   search = { controller };
   // Remembered so a search cut short by a crash can be resumed.
-  store.setState('lastSearch', { keyword, category: category.name, state: 'running', startedAt: new Date().toISOString() });
+  store.setState('lastSearch', { keyword, category: category.name, linkedinKeyword, sources, state: 'running', startedAt: new Date().toISOString() });
   interrupted = null;
   let expectedProfilePath = null;
   const startedAt = new Date().toISOString();
   let stats = null;
-  sendStatus({ state: 'connecting', phase: 'connection', step: 'connecting', keyword, category: category.name, sources, source: 'maps', facebook: null, linkedin: null, workers: null, processed: 0, leads: 0, newLeads: 0, skipped: 0, message: 'Connecting to Chrome' });
+  sendStatus({ state: 'connecting', phase: 'connection', step: 'connecting', keyword, category: category.name, linkedinKeyword, sources, source: sources[0], facebook: null, linkedin: null, workers: null, processed: 0, leads: 0, newLeads: 0, skipped: 0, message: 'Connecting to Chrome' });
 
   search.promise = (async () => {
     try {
@@ -407,6 +428,7 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
       const country = phoneCountry();
       const diagnose = searchDiagnostics(keyword);
       stats = await runSources({
+        withMaps,
         withFacebook,
         withLinkedIn,
         signal: controller.signal,
@@ -431,7 +453,7 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
           }),
         createLinkedIn: (emit) =>
           new LinkedInSession({
-            keyword,
+            keyword: linkedinKeyword,
             categoryId: category.id,
             country,
             store,
@@ -455,7 +477,7 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
       updater?.idle(); // an update waiting for the search can install now
       sendSummary({ keyword, category: category.name, startedAt, stats });
       try {
-        store.setState('lastSearch', { keyword, category: category.name, state: lastStatus.state, endedAt: new Date().toISOString() });
+        store.setState('lastSearch', { keyword, category: category.name, linkedinKeyword, sources, state: lastStatus.state, endedAt: new Date().toISOString() });
       } catch {}
     }
   })();
@@ -484,6 +506,17 @@ function sendSummary({ keyword, category, startedAt, stats }) {
     alreadySaved: Math.max(0, qualifiedSeen - newLeads),
     started: Boolean(stats),
   });
+}
+
+// Google Maps is on unless switched off (it was the only source before).
+function mapsSearchOn() {
+  return store.getState('mapsSearch') !== false;
+}
+
+function setMapsSearch(on) {
+  if (typeof on !== 'boolean') return { ok: false, error: 'Invalid value' };
+  store.setState('mapsSearch', on);
+  return { ok: true, on };
 }
 
 function facebookSearchOn() {
@@ -1072,8 +1105,10 @@ app.whenReady().then(() => {
     store.setState('lastSearch', { state: 'dismissed' });
     return { ok: true };
   });
-  handle('search:start', (keyword, category, website) => startSearch(keyword, category, website));
+  handle('search:start', (keyword, category, website, linkedin) => startSearch(keyword, category, website, linkedin));
   handle('search:stop', () => stopSearch());
+  handle('maps:get', () => ({ on: mapsSearchOn() }));
+  handle('maps:set', (on) => setMapsSearch(on));
   handle('facebook:get', () => ({ on: facebookSearchOn() }));
   handle('facebook:set', (on) => setFacebookSearch(on));
   handle('linkedin:get', () => ({ on: linkedinSearchOn() }));

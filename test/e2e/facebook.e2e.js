@@ -54,9 +54,9 @@ test('Facebook Lead Search switch and Facebook leads in the Leads table', async 
   // --- The switch: off by default, stored by the app, kept after a restart.
   const sw = win.getByRole('switch', { name: 'Facebook Lead Search' });
   assert.equal(await sw.getAttribute('aria-checked'), 'false');
-  await win.getByText('Google Maps only.').waitFor();
+  await win.waitForFunction(() => document.querySelector('.source-hint')?.textContent.trim() === 'Google Maps only.');
   await sw.click();
-  await win.getByText('Google Maps + Facebook, side by side.').waitFor();
+  await win.waitForFunction(() => document.querySelector('.source-hint')?.textContent.trim() === 'Google Maps + Facebook, side by side.');
   assert.equal(await sw.getAttribute('aria-checked'), 'true');
   await app.close();
   const stored = new DatabaseSync(dbFile, { readOnly: true });
@@ -100,7 +100,7 @@ test('Facebook Lead Search switch and Facebook leads in the Leads table', async 
 
   // --- Switching off is stored too.
   await win.getByRole('switch', { name: 'Facebook Lead Search' }).click();
-  await win.getByText('Google Maps only.').waitFor();
+  await win.waitForFunction(() => document.querySelector('.source-hint')?.textContent.trim() === 'Google Maps only.');
   assert.deepEqual(await win.evaluate(() => window.leadFinder.facebookSearch()), { on: false });
   assert.deepEqual(errors, []);
 });

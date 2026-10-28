@@ -19,7 +19,9 @@ contextBridge.exposeInMainWorld('leadFinder', {
   listCategories: () => ipcRenderer.invoke('categories:list'),
   renameCategory: (id, name) => ipcRenderer.invoke('categories:rename', Number(id), String(name ?? '')),
   deleteCategory: (id) => ipcRenderer.invoke('categories:delete', Number(id)),
-  startSearch: (keyword, category, website) => ipcRenderer.invoke('search:start', String(keyword ?? ''), String(category ?? ''), String(website ?? 'without')),
+  // linkedin: LinkedIn's own search (used when LinkedIn Lead Search is on).
+  startSearch: (keyword, category, website, linkedin) =>
+    ipcRenderer.invoke('search:start', String(keyword ?? ''), String(category ?? ''), String(website ?? 'without'), String(linkedin ?? '')),
   // App lock (4-digit PIN)
   lockState: () => ipcRenderer.invoke('lock:state'),
   lockSetup: (pin, confirm) => ipcRenderer.invoke('lock:setup', String(pin ?? ''), String(confirm ?? '')),
@@ -35,6 +37,8 @@ contextBridge.exposeInMainWorld('leadFinder', {
   stopSearch: () => ipcRenderer.invoke('search:stop'),
   facebookSearch: () => ipcRenderer.invoke('facebook:get'),
   setFacebookSearch: (on) => ipcRenderer.invoke('facebook:set', Boolean(on)),
+  mapsSearch: () => ipcRenderer.invoke('maps:get'),
+  setMapsSearch: (on) => ipcRenderer.invoke('maps:set', Boolean(on)),
   linkedinSearch: () => ipcRenderer.invoke('linkedin:get'),
   setLinkedInSearch: (on) => ipcRenderer.invoke('linkedin:set', Boolean(on)),
   // The country local numbers ("0300 1234567") are read with; null = automatic.

@@ -445,10 +445,18 @@ export default function App({ onLock }) {
   const [composeLead, setComposeLead] = useState(null);
   const [websiteFilter, setWebsiteFilter] = useState('without'); // for the next search
   const [siteView, setSiteView] = useState('all'); // table: all | without | with
-  const [waOnly, setWaOnly] = useState(false);
+  const [waView, setWaView] = useState('all'); // all | available | unavailable (WhatsApp's own check)
   const [campaignView, setCampaignView] = useState('all'); // all | seen | unseen
   const [sourceView, setSourceView] = useState('all'); // all | maps | facebook | linkedin
+  const [mapsOn, setMapsOn] = useState(true); // Google Maps search (stored in the app)
   const [facebookOn, setFacebookOn] = useState(false); // Facebook Lead Search (stored in the app)
+  const [liKeyword, setLiKeyword] = useState(() => {
+    try {
+      return localStorage.getItem('lf-linkedin-keyword') || '';
+    } catch {
+      return '';
+    }
+  }); // LinkedIn's own search
   const [linkedinOn, setLinkedinOn] = useState(false); // LinkedIn Lead Search (stored in the app)
   const [country, setCountry] = useState(null); // { setting, effective, countries }: how local numbers are read
   const [tableSearch, setTableSearch] = useState('');
@@ -496,7 +504,7 @@ export default function App({ onLock }) {
   const filter = useMemo(() => {
     const f = { category: catFilter };
     if (siteView !== 'all') f.website = siteView;
-    if (waOnly) f.whatsapp = 'available';
+    if (waView !== 'all') f.whatsapp = waView;
     if (campaignView !== 'all') f.campaign = campaignView;
     if (sourceView !== 'all') f.source = sourceView;
     if (searchQuery) f.search = searchQuery;
@@ -507,7 +515,7 @@ export default function App({ onLock }) {
       if (range.to) f.to = range.to;
     } else f.before = today;
     return f;
-  }, [view, today, pastMode, pastDate, range, catFilter, siteView, waOnly, campaignView, sourceView, searchQuery]);
+  }, [view, today, pastMode, pastDate, range, catFilter, siteView, waView, campaignView, sourceView, searchQuery]);
   const filterRef = useRef(filter);
   filterRef.current = filter;
   const viewKey = JSON.stringify(filter);
@@ -607,6 +615,7 @@ export default function App({ onLock }) {
     loadCategories();
     api.getStatus().then(setStatus).catch(() => {});
     api.getInterrupted().then(setInterrupted).catch(() => {});
+    api.mapsSearch().then((r) => setMapsOn(r?.on !== false)).catch(() => {});
     api.facebookSearch().then((r) => setFacebookOn(Boolean(r?.on))).catch(() => {});
     api.linkedinSearch().then((r) => setLinkedinOn(Boolean(r?.on))).catch(() => {});
     api.phoneCountry().then(setCountry).catch(() => {});
@@ -651,7 +660,25 @@ export default function App({ onLock }) {
   }, [status.state, loadCategories]);
 
   const active = ACTIVE.has(status.state);
-  const canStart = !active && keyword.trim().length >= 2 && formatCategory(category).length >= 2;
+  // Each source on its own: Google Maps and Facebook use the keyword and
+  // category, LinkedIn its own search; at least one source must be on.
+  const mainSearch = mapsOn || facebookOn;
+  const anySource = mainSearch || linkedinOn;
+  const canStart =
+    !active &&
+    anySource &&
+    (!mainSearch || (keyword.trim().length >= 2 && formatCategory(category).length >= 2)) &&
+    (!linkedinOn || liKeyword.trim().length >= 2);
+
+  async function toggleMaps() {
+    const next = !mapsOn;
+    setMapsOn(next);
+    const res = await api.setMapsSearch(next).catch((e) => ({ ok: false, error: e.message }));
+    if (!res.ok) {
+      setMapsOn(!next);
+      notify({ type: 'error', text: `Could not change Google Maps search: ${res.error}` });
+    }
+  }
 
   async function toggleFacebook() {
     const next = !facebookOn;
@@ -679,8 +706,11 @@ export default function App({ onLock }) {
     else notify({ type: 'error', text: `Could not change the phone country: ${res.error}` });
   }
 
-  async function runSearch(kw, cat) {
-    const res = await api.startSearch(kw, cat, websiteFilter);
+  async function runSearch(kw, cat, li = liKeyword) {
+    try {
+      localStorage.setItem('lf-linkedin-keyword', li);
+    } catch {}
+    const res = await api.startSearch(kw, cat, websiteFilter, li);
     if (!res.ok) {
       // No active plan: show the Activate panel with the reason.
       if (!planNeeded(res)) notify({ type: 'error', text: res.error });
@@ -703,7 +733,8 @@ export default function App({ onLock }) {
   async function resume() {
     setKeyword(interrupted.keyword);
     setCategory(interrupted.category);
-    await runSearch(interrupted.keyword, interrupted.category);
+    if (interrupted.linkedinKeyword) setLiKeyword(interrupted.linkedinKeyword);
+    await runSearch(interrupted.keyword, interrupted.category, interrupted.linkedinKeyword || liKeyword);
   }
 
   async function exportCsv(scope) {
@@ -744,11 +775,11 @@ export default function App({ onLock }) {
   }, []);
 
   // Filters that can hide leads (besides the date view).
-  const narrowed = catFilter !== 'all' || siteView !== 'all' || waOnly || campaignView !== 'all' || sourceView !== 'all' || Boolean(searchQuery);
+  const narrowed = catFilter !== 'all' || siteView !== 'all' || waView !== 'all' || campaignView !== 'all' || sourceView !== 'all' || Boolean(searchQuery);
   const showAll = () => {
     setCatFilter('all');
     setSiteView('all');
-    setWaOnly(false);
+    setWaView('all');
     setCampaignView('all');
     setSourceView('all');
     setTableSearch('');
@@ -806,6 +837,7 @@ export default function App({ onLock }) {
       <main className="content" hidden={workspace !== 'leads'}>
         <section className="panel search-panel">
           <form className="search" onSubmit={start}>
+            {mainSearch && (
             <div className="field grow">
               <label htmlFor="kw">Search keyword</label>
               <div className="input-wrap">
@@ -823,20 +855,42 @@ export default function App({ onLock }) {
                 />
               </div>
             </div>
+            )}
+            {linkedinOn && (
+              <div className="field grow">
+                <label htmlFor="li-kw">LinkedIn search</label>
+                <div className="input-wrap">
+                  <span className="field-icon">
+                    <Icon name="search" />
+                  </span>
+                  <input
+                    id="li-kw"
+                    value={liKeyword}
+                    onChange={(e) => setLiKeyword(e.target.value)}
+                    placeholder="e.g. Full Stack Developer"
+                    maxLength={120}
+                    disabled={active}
+                    title="Jobs, posts and companies on LinkedIn: the companies that need this"
+                  />
+                </div>
+              </div>
+            )}
             <div className="field cat">
-              <label htmlFor="cat">Category</label>
+              <label htmlFor="cat">{mainSearch ? 'Category' : 'Category (optional)'}</label>
               <CategoryInput value={category} onChange={setCategory} categories={catData.categories} disabled={active} />
             </div>
-            <div className="field site">
-              <label htmlFor="site">Website</label>
-              <select id="site" className="site-select" value={websiteFilter} disabled={active} onChange={(e) => setWebsiteFilter(e.target.value)}>
-                {Object.entries(WEBSITE_LABELS).map(([v, t]) => (
-                  <option key={v} value={v}>
-                    {t}
-                  </option>
-                ))}
-              </select>
-            </div>
+            {mapsOn && (
+              <div className="field site">
+                <label htmlFor="site">Website</label>
+                <select id="site" className="site-select" value={websiteFilter} disabled={active} onChange={(e) => setWebsiteFilter(e.target.value)}>
+                  {Object.entries(WEBSITE_LABELS).map(([v, t]) => (
+                    <option key={v} value={v}>
+                      {t}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div className="buttons">
               <button type="submit" className="btn btn-primary" disabled={!canStart}>
                 <Icon name="play" /> Start Search
@@ -847,6 +901,21 @@ export default function App({ onLock }) {
             </div>
           </form>
           <div className="source-row">
+            <span className="source-item" title={mapsOn ? 'Google Maps listings for the keyword and category, with the website filter.' : 'Off: Google Maps is not searched.'}>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={mapsOn}
+                aria-label="Google Maps search"
+                className={`switch ${mapsOn ? 'on' : ''}`}
+                disabled={active}
+                title={active ? 'Takes effect from the next search' : undefined}
+                onClick={toggleMaps}
+              >
+                <span className="switch-knob" />
+              </button>
+              <span className="source-label">Google Maps</span>
+            </span>
             <span className="source-item" title={facebookOn ? 'Public Facebook posts are searched at the same time as Google Maps, with the same keyword and category (in a separate Chrome window, using your Facebook login).' : 'Off: Facebook is not searched.'}>
               <button
                 type="button"
@@ -860,7 +929,7 @@ export default function App({ onLock }) {
               >
                 <span className="switch-knob" />
               </button>
-              <span className="source-label">Facebook Lead Search</span>
+              <span className="source-label">Facebook</span>
             </span>
             <span
               className="source-item"
@@ -882,7 +951,7 @@ export default function App({ onLock }) {
               >
                 <span className="switch-knob" />
               </button>
-              <span className="source-label">LinkedIn Lead Search</span>
+              <span className="source-label">LinkedIn</span>
             </span>
             {country && (
               <label className="select-wrap country-select" title="Numbers written without a country code (like 0300 1234567) are read as numbers of this country. Numbers that can't be confirmed are kept and marked to check.">
@@ -897,10 +966,11 @@ export default function App({ onLock }) {
                 </select>
               </label>
             )}
-            <span className="muted source-hint">
-              {facebookOn || linkedinOn
-                ? `Google Maps${facebookOn ? ' + Facebook' : ''}${linkedinOn ? ' + LinkedIn' : ''}, side by side.`
-                : 'Google Maps only.'}
+            <span className={`muted source-hint ${anySource ? '' : 'warn'}`}>
+              {!anySource
+                ? 'Turn on at least one source.'
+                : [mapsOn && 'Google Maps', facebookOn && 'Facebook', linkedinOn && 'LinkedIn'].filter(Boolean).join(' + ') +
+                  ([mapsOn, facebookOn, linkedinOn].filter(Boolean).length > 1 ? ', side by side.' : ' only.')}
             </span>
           </div>
 
@@ -1038,9 +1108,13 @@ export default function App({ onLock }) {
               <Icon name="search" size={14} />
               <input type="search" value={tableSearch} placeholder="Name, business or phone" aria-label="Search leads" onChange={(e) => setTableSearch(e.target.value)} />
             </label>
-            <label className="check-wrap" title="Show and export only numbers that WhatsApp confirmed">
-              <input type="checkbox" checked={waOnly} onChange={(e) => setWaOnly(e.target.checked)} aria-label="WhatsApp numbers only" />
-              <span>WhatsApp only</span>
+            <label className="select-wrap" title="Show and export numbers by WhatsApp's own check: on WhatsApp, or confirmed not on WhatsApp (to call or SMS instead)">
+              <span>WhatsApp</span>
+              <select aria-label="Show WhatsApp status" value={waView} onChange={(e) => setWaView(e.target.value)}>
+                <option value="all">All numbers</option>
+                <option value="available">On WhatsApp</option>
+                <option value="unavailable">Not on WhatsApp</option>
+              </select>
             </label>
             <CategoryManager
               categories={catData.categories}

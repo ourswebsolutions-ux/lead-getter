@@ -147,7 +147,7 @@ test('leads from both sources appear in the table as they are found', async (t) 
   await source.selectOption('all');
 
   // --- WhatsApp only: a number confirmed during the search shows up.
-  await win.getByRole('checkbox', { name: 'WhatsApp numbers only' }).check();
+  await win.getByLabel('Show WhatsApp status').selectOption('available');
   await rowCount(0);
   await app.evaluate(
     ({ BrowserWindow }, a) => {
@@ -160,7 +160,7 @@ test('leads from both sources appear in the table as they are found', async (t) 
     { dbModule, dbFile },
   );
   await until(async () => JSON.stringify(await names()) === '["FB Later"]' || (await names()), 'confirmed number appears under WhatsApp only');
-  await win.getByRole('checkbox', { name: 'WhatsApp numbers only' }).uncheck();
+  await win.getByLabel('Show WhatsApp status').selectOption('all');
 
   // --- A reload on its way while new leads arrive: none are lost.
   await rowCount(14);

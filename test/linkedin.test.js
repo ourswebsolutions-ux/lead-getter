@@ -251,3 +251,50 @@ test('LinkedIn runs beside Google Maps (and Facebook) with its own progress', as
   assert.deepEqual(Object.keys(last.workers).sort(), ['linkedin', 'maps']);
   assert.match(last.message, /Google Maps: Search finished\. LinkedIn: 3 linkedin leads\./);
 });
+
+test('any combination of sources: without Google Maps only the selected ones run, each with its own progress', async () => {
+  const made = [];
+  const session = (source, leads) => (emit) => {
+    made.push(source);
+    return {
+      stats: { processed: leads, leads, newLeads: leads, skipped: 0, [source]: { leads, newLeads: leads } },
+      async run() {
+        emit('status', { state: 'running', message: 'working', processed: leads, leads, newLeads: leads });
+        return { state: 'done', message: `${leads} leads.` };
+      },
+    };
+  };
+  for (const combo of [{ withFacebook: true }, { withLinkedIn: true }, { withFacebook: true, withLinkedIn: true }]) {
+    made.length = 0;
+    const statuses = [];
+    const stats = await runSources({
+      withMaps: false,
+      ...combo,
+      signal: new AbortController().signal,
+      send: (e, p) => e === 'status' && statuses.push(p),
+      createMaps: () => assert.fail('Google Maps must not start'),
+      createFacebook: session('facebook', 2),
+      createLinkedIn: session('linkedin', 3),
+    });
+    const want = [...(combo.withFacebook ? ['facebook'] : []), ...(combo.withLinkedIn ? ['linkedin'] : [])];
+    assert.deepEqual(made, want);
+    const last = statuses.at(-1);
+    assert.equal(last.state, 'done');
+    assert.deepEqual(Object.keys(last.workers).sort(), want);
+    assert.doesNotMatch(last.message, /Google Maps/);
+    assert.equal(stats.newLeads, (combo.withFacebook ? 2 : 0) + (combo.withLinkedIn ? 3 : 0));
+  }
+});
+
+test('"Not on WhatsApp" lists and exports only numbers WhatsApp said have no account', () => {
+  const s = new LeadStore(':memory:');
+  const add = (n, phone) => s.save({ placeKey: `0x${n}:0x1`, mapsUrl: `https://www.google.com/maps/place/${n}`, name: `Shop ${n}`, phoneRaw: phone, address: 'Lahore, Pakistan', websiteStatus: 'no_website' });
+  add(1, '+92 300 1111111');
+  add(2, '+92 300 2222222');
+  add(3, '+92 300 3333333');
+  s.setWhatsAppResult('+923001111111', 'available', 'baileys');
+  s.setWhatsAppResult('+923002222222', 'unavailable', 'baileys');
+  assert.deepEqual(s.listLeads({ whatsapp: 'unavailable' }).map((l) => l.name), ['Shop 2']);
+  assert.deepEqual(s.listLeads({ whatsapp: 'available' }).map((l) => l.name), ['Shop 1']);
+  assert.equal(s.listLeads({}).length, 3, 'not checked yet: in neither list');
+});
