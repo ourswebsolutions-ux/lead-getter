@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Facebook search, current markup (test fixture)</title>
+<style>
+  body { font: 14px sans-serif; margin: 0; }
+  [aria-posinset] { min-height: 380px; border-bottom: 1px solid #ccc; padding: 8px; }
+</style>
+</head>
+<body>
+<div role="feed" id="feed"></div>
+<script>
+  // Posts the way Facebook's post search renders them now: top-level posts
+  // are div[aria-posinset] (not role=article), the text is in
+  // data-ad-rendering-role="story_message", and the post's own link (its
+  // date) has href="#" until the pointer is over it. Numbers are written
+  // the many ways people write them.
+  const BATCHES = [
+    [
+      { id: 101, author: 'Ali Garments', text: 'Garments shop Lahore. Call 0300-1234567 for wholesale rates.' },
+      { id: 102, author: 'Lahore Cloth House', text: 'Ladies suits 03211234567 / 0333 7654321 WhatsApp only' },
+      { id: 103, author: 'Sara Ahmed', text: 'Any good garments shop near Liberty? Sale ends 12/05/2024, price Rs 25000, 1.2k views' },
+      { id: 104, author: 'Kids Wear Factory', text: 'Factory outlet: +92 42 35761234 or 0092 300 7654321' },
+    ],
+    [
+      { id: 105, author: 'Ali Garments', text: 'Restocked! Same number 0300 1234567' },
+      { id: 106, author: 'Dubai Fabrics', text: 'Export orders: +971 50 123 4567, UK office +44 20 7946 0958' },
+      { id: 107, author: 'NY Apparel', text: 'Call us at +1 (212) 555-0123' },
+    ],
+  ];
+  const feed = document.getElementById('feed');
+  let pos = 0;
+  function render(p) {
+    const a = document.createElement('div');
+    a.setAttribute('aria-posinset', String(++pos));
+    a.innerHTML = `<div><h4><a href="/page${p.id}?__tn__=%3C">${p.author}</a></h4>
+      <span><a class="ts" role="link" href="#" tabindex="0">3h</a></span></div>
+      <div data-ad-rendering-role="story_message"><div dir="auto">${p.text}</div></div>
+      <div>12 comments · 4 shares</div>`;
+    const ts = a.querySelector('.ts');
+    const reveal = () => ts.setAttribute('href', `https://www.facebook.com/page${p.id}/posts/pfbid0${p.id}?__cft__[0]=AZ&__tn__=%2CO`);
+    ts.addEventListener('mouseover', reveal);
+    ts.addEventListener('focus', reveal);
+    feed.appendChild(a);
+  }
+  BATCHES[0].forEach(render);
+  let next = 1;
+  window.addEventListener('scroll', () => {
+    if (next >= BATCHES.length || window.scrollY + window.innerHeight < document.body.scrollHeight - 50) return;
+    const batch = BATCHES[next++];
+    setTimeout(() => {
+      batch.forEach(render);
+      if (next >= BATCHES.length) {
+        const end = document.createElement('div');
+        end.innerHTML = '<span>End of results</span>';
+        document.body.appendChild(end);
+      }
+    }, 150);
+  });
+</script>
+</body>
+</html>

@@ -196,7 +196,19 @@ const LeadRow = memo(function LeadRow({ lead: l, fresh, selected, pastView, onTo
       <td className="check">
         <input type="checkbox" aria-label={`Select ${l.name}`} checked={selected} onChange={() => onToggle(l.id)} />
       </td>
-      <td className="name" dir="auto">{l.name}</td>
+      <td className="name" dir="auto">
+        {l.name}
+        {(l.email || l.jobTitle) && (
+          <span className="name-extra">
+            {l.email && (
+              <a href={`mailto:${l.email}`} title="Business email">
+                {l.email}
+              </a>
+            )}
+            {l.jobTitle && <span title="LinkedIn job">{l.jobTitle}</span>}
+          </span>
+        )}
+      </td>
       <td className="phone-cell">
         <PhoneCell lead={l} waOpen={waOpen} onCompose={onCompose} onChanged={onWhatsApp} notify={notify} />
       </td>
@@ -216,6 +228,17 @@ const LeadRow = memo(function LeadRow({ lead: l, fresh, selected, pastView, onTo
             onClick={() => api.openListing(l.fbPostUrl)}
           >
             Facebook
+          </button>
+        )}
+        {(l.sources || []).includes('linkedin') && (
+          <button
+            type="button"
+            className="chip src-linkedin"
+            title={`Found on LinkedIn${l.jobTitle ? `: ${l.jobTitle}` : ''}${l.discovery ? `\n${l.discovery}` : ''}`}
+            aria-label={`Open ${l.name} on LinkedIn`}
+            onClick={() => api.openListing(l.jobUrl || l.linkedinUrl || l.linkedinPostUrl)}
+          >
+            LinkedIn
           </button>
         )}
       </td>
@@ -240,7 +263,11 @@ const LeadRow = memo(function LeadRow({ lead: l, fresh, selected, pastView, onTo
         )}
       </td>
       <td className="row-actions">
-        {l.source === 'facebook' ? (
+        {l.source === 'linkedin' ? (
+          <button type="button" className="icon-btn" aria-label={`Open ${l.name} on LinkedIn`} title="Open on LinkedIn" onClick={() => api.openListing(l.linkedinUrl || l.jobUrl || l.linkedinPostUrl)}>
+            <Icon name="external" />
+          </button>
+        ) : l.source === 'facebook' ? (
           <button type="button" className="icon-btn" aria-label={`Open ${l.name} on Facebook`} title="Open the Facebook post" onClick={() => api.openListing(l.fbPostUrl)}>
             <Icon name="external" />
           </button>
@@ -314,6 +341,7 @@ function WorkerRows({ workers }) {
       {[
         ['maps', 'Google Maps'],
         ['facebook', 'Facebook'],
+        ['linkedin', 'LinkedIn'],
       ].map(([key, label]) => {
         const w = workers[key];
         if (!w) return null;
@@ -341,7 +369,7 @@ function EmptyLeads({ view, active, filtered, onShowAll, onShowToday }) {
   let action = null;
   if (active && view === 'today' && !filtered) {
     title = 'Searching for leads…';
-    text = 'New leads appear here as Google Maps and Facebook find them.';
+    text = 'New leads appear here as Google Maps, Facebook and LinkedIn find them.';
   } else if (active && view !== 'today') {
     title = 'Searching for leads…';
     text = 'Leads from the running search are listed under Today.';
@@ -419,8 +447,10 @@ export default function App({ onLock }) {
   const [siteView, setSiteView] = useState('all'); // table: all | without | with
   const [waOnly, setWaOnly] = useState(false);
   const [campaignView, setCampaignView] = useState('all'); // all | seen | unseen
-  const [sourceView, setSourceView] = useState('all'); // all | maps | facebook
+  const [sourceView, setSourceView] = useState('all'); // all | maps | facebook | linkedin
   const [facebookOn, setFacebookOn] = useState(false); // Facebook Lead Search (stored in the app)
+  const [linkedinOn, setLinkedinOn] = useState(false); // LinkedIn Lead Search (stored in the app)
+  const [country, setCountry] = useState(null); // { setting, effective, countries }: how local numbers are read
   const [tableSearch, setTableSearch] = useState('');
   const [searchQuery, setSearchQuery] = useState(''); // debounced
   const [plan, setPlan] = useState(null); // this computer's subscription (activation.js)
@@ -578,6 +608,8 @@ export default function App({ onLock }) {
     api.getStatus().then(setStatus).catch(() => {});
     api.getInterrupted().then(setInterrupted).catch(() => {});
     api.facebookSearch().then((r) => setFacebookOn(Boolean(r?.on))).catch(() => {});
+    api.linkedinSearch().then((r) => setLinkedinOn(Boolean(r?.on))).catch(() => {});
+    api.phoneCountry().then(setCountry).catch(() => {});
     const offStatus = api.onStatus(setStatus);
     const offSummary = api.onSummary(setSummary);
     api.whatsappState().then(setWa).catch(() => {});
@@ -629,6 +661,22 @@ export default function App({ onLock }) {
       setFacebookOn(!next);
       notify({ type: 'error', text: `Could not change Facebook Lead Search: ${res.error}` });
     }
+  }
+
+  async function toggleLinkedin() {
+    const next = !linkedinOn;
+    setLinkedinOn(next);
+    const res = await api.setLinkedInSearch(next).catch((e) => ({ ok: false, error: e.message }));
+    if (!res.ok) {
+      setLinkedinOn(!next);
+      notify({ type: 'error', text: `Could not change LinkedIn Lead Search: ${res.error}` });
+    }
+  }
+
+  async function changeCountry(code) {
+    const res = await api.setPhoneCountry(code || null).catch((e) => ({ ok: false, error: e.message }));
+    if (res.ok) setCountry(res);
+    else notify({ type: 'error', text: `Could not change the phone country: ${res.error}` });
   }
 
   async function runSearch(kw, cat) {
@@ -799,23 +847,60 @@ export default function App({ onLock }) {
             </div>
           </form>
           <div className="source-row">
-            <button
-              type="button"
-              role="switch"
-              aria-checked={facebookOn}
-              aria-label="Facebook Lead Search"
-              className={`switch ${facebookOn ? 'on' : ''}`}
-              disabled={active}
-              title={active ? 'Takes effect from the next search' : undefined}
-              onClick={toggleFacebook}
+            <span className="source-item" title={facebookOn ? 'Public Facebook posts are searched at the same time as Google Maps, with the same keyword and category (in a separate Chrome window, using your Facebook login).' : 'Off: Facebook is not searched.'}>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={facebookOn}
+                aria-label="Facebook Lead Search"
+                className={`switch ${facebookOn ? 'on' : ''}`}
+                disabled={active}
+                title={active ? 'Takes effect from the next search' : undefined}
+                onClick={toggleFacebook}
+              >
+                <span className="switch-knob" />
+              </button>
+              <span className="source-label">Facebook Lead Search</span>
+            </span>
+            <span
+              className="source-item"
+              title={
+                linkedinOn
+                  ? 'Companies hiring or asking for the keyword (LinkedIn jobs and posts) are found at the same time, with their public business phone, email and website (in a separate Chrome window, using your LinkedIn login).'
+                  : 'Off: LinkedIn is not searched.'
+              }
             >
-              <span className="switch-knob" />
-            </button>
-            <span className="source-label">Facebook Lead Search</span>
-            <span className="muted">
-              {facebookOn
-                ? 'On: public Facebook posts are searched at the same time as Google Maps, with the same keyword and category (in a separate Chrome window, using your Facebook login).'
-                : 'Off: Google Maps only.'}
+              <button
+                type="button"
+                role="switch"
+                aria-checked={linkedinOn}
+                aria-label="LinkedIn Lead Search"
+                className={`switch ${linkedinOn ? 'on' : ''}`}
+                disabled={active}
+                title={active ? 'Takes effect from the next search' : undefined}
+                onClick={toggleLinkedin}
+              >
+                <span className="switch-knob" />
+              </button>
+              <span className="source-label">LinkedIn Lead Search</span>
+            </span>
+            {country && (
+              <label className="select-wrap country-select" title="Numbers written without a country code (like 0300 1234567) are read as numbers of this country. Numbers that can't be confirmed are kept and marked to check.">
+                <span>Local numbers</span>
+                <select aria-label="Country for local phone numbers" value={country.setting || ''} disabled={active} onChange={(e) => changeCountry(e.target.value)}>
+                  <option value="">Automatic{country.effective ? ` (${country.countries.find((c) => c.code === country.effective)?.name || country.effective})` : ''}</option>
+                  {country.countries.map((c) => (
+                    <option key={c.code} value={c.code}>
+                      {c.name} (+{c.callingCode})
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <span className="muted source-hint">
+              {facebookOn || linkedinOn
+                ? `Google Maps${facebookOn ? ' + Facebook' : ''}${linkedinOn ? ' + LinkedIn' : ''}, side by side.`
+                : 'Google Maps only.'}
             </span>
           </div>
 
@@ -946,6 +1031,7 @@ export default function App({ onLock }) {
                 <option value="all">All sources</option>
                 <option value="maps">Google Maps</option>
                 <option value="facebook">Facebook</option>
+                <option value="linkedin">LinkedIn</option>
               </select>
             </label>
             <label className="table-search">

@@ -177,15 +177,18 @@ Pacing is deliberately slow: a few seconds between listings and a longer break e
 - **Reading posts:**
   - It reads the posts on screen (opening Facebook's own *See more* on long posts), then scrolls to the bottom of the results and **waits until Facebook has loaded new posts**, watching for more posts or its loading indicator rather than a fixed delay. Then it reads those and repeats.
   - It stops at Facebook's *End of results*, after 150 posts per query, when you press **Stop Search**, or when several scrolls in a row load nothing. Each retry nudges the page and waits longer, bringing the Facebook window forward once. The status then says no more posts could be loaded.
-  - Progress shows the posts read, the valid numbers found and the new leads saved.
+  - Progress shows the posts read, the valid numbers, the numbers to check and the new leads saved. The end message adds numbers already saved and posts that couldn't be saved.
+  - Facebook often leaves a post's own link (its date) empty until the pointer is over it. Lead Finder hovers it so Facebook fills it in. A post that still shows no link is read anyway, and its lead links to the search it came from.
   - It doesn't open individual posts or pages. The pace is a few seconds per scroll.
   - Posts already saved by an earlier search aren't saved again.
 - **Numbers:**
-  - Only numbers a post shows are saved: in its text, or in its WhatsApp (`wa.me`) or `tel:` links.
-  - Each number is checked with libphonenumber, and only numbers valid for their country are kept, at most 5 per post.
-  - Local numbers (`0300 1234567`) are read as numbers of the country most of your leads are in, or this computer's region if you have no leads yet.
+  - Only numbers a post shows are saved: in its text, in its WhatsApp (`wa.me`) or `tel:` links, and in its visible comments. A commenter's number is saved under the commenter, never as the poster's.
+  - Any country and layout: `03001234567`, `0300-1234567`, `0300 1234567`, `(0300) 1234567`, `+92 300 1234567`, `0092 300 1234567`, `+1 (212) 555-0123`, `+44 20 7946 0958`, and Urdu digits. Each is checked with libphonenumber and stored in international form (`+923001234567`). At most 5 per post.
+  - **Local numbers** (without `+` or `00`) are read with the **Local numbers** country next to the switches. *Automatic* means the country of most of your leads, else this computer's time zone (e.g. Asia/Karachi is Pakistan), and only then its language region. A post's own international numbers can also show the country.
+  - A number that looks like a phone number but can't be confirmed (no known country, or not valid for its country) is **kept as written and marked to check**. It's shown as unverified and never used for WhatsApp until it's confirmed.
+  - Not numbers: dates, prices (`Rs 25000`), counts (`1.2k views`, `350 likes`), order numbers, IDs and long post IDs. Digits on different lines are never joined.
   - A post without a number doesn't create a lead, and nothing is guessed or filled in.
-  - A commenter's number is not the poster's, so comments are ignored.
+- **Diagnostics:** after each Facebook query, `search-diagnostics.log` in the app's data folder records the posts on the page, how many had a link, and why candidate numbers were rejected. It holds counts only: no post text, numbers, cookies or account details.
 - **What a Facebook lead stores:**
   - the post author's name (business name and contact name);
   - the number;
@@ -214,6 +217,24 @@ Pacing is deliberately slow: a few seconds between listings and a longer break e
     - any other error.
   - Lead Finder never logs in, answers a check or works around a block.
 - **Facebook's terms:** like the Google Maps terms below, [Facebook's terms](https://www.facebook.com/terms.php) restrict automated collection. Lead Finder reads only what your own logged-in account is shown, slowly. You're responsible for how you use it.
+
+## LinkedIn Lead Search
+
+**LinkedIn Lead Search** is a second switch under the search form, used the same way as Facebook. It finds **companies that need what the keyword describes** (for `Full Stack Developer`: companies hiring one, or asking for one in a post) and their **public business contact details**. It runs at the same time as Google Maps and Facebook, in its own Chrome window, using that profile's LinkedIn login.
+
+1. **Jobs:** LinkedIn job listings for the keyword, then each job's own page for the company that posted it, its location and the description. The target is the hiring company, never job seekers.
+2. **Company page:** each company's LinkedIn *About* page, for its official website, phone and headquarters.
+3. **Website:** the company's own website, plus up to two of its contact or about pages, for a business email (the site's own domain first) and phone number. Only `mailto:`, `tel:` and what the pages show are used.
+4. **Google Maps:** when there's still no confirmed phone, Google Maps is searched for the company name and city. A result is used only when it's clearly the same business: the same website, or the exact same name (ignoring Ltd, Pvt and the like) in the same city. A similar name is never enough.
+5. **Posts:** LinkedIn posts for the keyword about hiring, projects, websites, software or outsourcing. A post counts when it's by a company, links to one, or publishes business contact details for that need.
+6. **Company search:** when jobs and posts give fewer than 5 companies, LinkedIn's company search for the keyword.
+
+- **Saving:** a company is kept when it has a phone, an email, a website, or the job or post itself. Contact details are never made up. Each lead records the job title, job URL, post URL, LinkedIn company URL, website, email and location. It also records how far discovery got, e.g. *"phone (maps), email, website; LinkedIn company page read; matched on Google Maps"*, shown on the *LinkedIn* source chip.
+- **One lead per business:** a company already saved (same phone, LinkedIn company page, website or email), from any source, gets this source added instead of a second lead. A LinkedIn lead later found on Google Maps becomes that listing. Jobs and posts already read aren't read again.
+- **Limits:** 20 jobs, 20 posts and 25 companies per search, a few seconds between LinkedIn pages, website timeouts with one retry, and Stop at any point.
+- **Problems:** a login page, security check or limit message stops the LinkedIn pages only. Lead Finder never logs in or works around them. Companies already found are still completed from their websites and Google Maps, and the status says what happened. Without a LinkedIn login, the public job pages may still work, but company pages and post search usually need one.
+- **Leads table:** a *LinkedIn* source chip (opens the job, company or post), the business email and job title under the name, a *LinkedIn* option in the Source filter, and *Email, Website, LinkedIn Company URL, LinkedIn Job URL, LinkedIn Post URL, Job Title, Discovery* in the CSV export. WhatsApp campaigns use only leads with a validated phone, as before.
+- **LinkedIn's terms:** the [LinkedIn User Agreement](https://www.linkedin.com/legal/user-agreement) prohibits automated access and scraping. Lead Finder reads only what your own account is shown, slowly and in small numbers, but LinkedIn may still restrict accounts that use automation. You're responsible for how you use it.
 
 ### Website rules (conservative)
 

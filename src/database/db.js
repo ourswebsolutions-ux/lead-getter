@@ -152,10 +152,47 @@ class LeadStore {
     this.migrateV6();
     this.migrateV7();
     this.migrateV8();
+    this.migrateV9();
   }
 
   // Version 8: the subscription system is gone. Its only local data, the
   // device key it signed requests with, is deleted; nothing else changes.
+  // Version 9: LinkedIn as a third lead source. Company leads keep their
+  // business email, official website, LinkedIn company/job/post addresses,
+  // the job title and how far discovery got; lead_sources also records
+  // LinkedIn (and what was found there). Existing data is copied unchanged.
+  migrateV9() {
+    if (this.db.prepare('PRAGMA user_version').get().user_version >= 9) return;
+    this.transaction(() => {
+      const has = (col) => this.db.prepare("SELECT 1 FROM pragma_table_info('businesses') WHERE name = ?").get(col);
+      for (const col of ['email', 'website_url', 'li_company_url', 'li_job_url', 'li_post_url', 'job_title', 'discovery']) {
+        if (!has(col)) this.db.exec(`ALTER TABLE businesses ADD COLUMN ${col} TEXT`);
+      }
+      this.db.exec(`
+        CREATE TABLE lead_sources_v9 (
+          id          INTEGER PRIMARY KEY,
+          business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+          source      TEXT NOT NULL CHECK (source IN ('facebook', 'linkedin')),
+          url         TEXT NOT NULL,
+          page_url    TEXT,
+          author      TEXT,
+          text        TEXT,
+          phone       TEXT NOT NULL,
+          found_at    TEXT NOT NULL,
+          kind        TEXT,
+          title       TEXT,
+          UNIQUE (source, url, phone)
+        );
+        INSERT INTO lead_sources_v9 (id, business_id, source, url, page_url, author, text, phone, found_at)
+          SELECT id, business_id, source, url, page_url, author, text, phone, found_at FROM lead_sources;
+        DROP TABLE lead_sources;
+        ALTER TABLE lead_sources_v9 RENAME TO lead_sources;
+        CREATE INDEX IF NOT EXISTS lead_sources_business ON lead_sources (business_id);
+        CREATE INDEX IF NOT EXISTS businesses_li_company ON businesses (li_company_url);
+        PRAGMA user_version = 9;`);
+    });
+  }
+
   migrateV8() {
     if (this.db.prepare('PRAGMA user_version').get().user_version >= 8) return;
     this.transaction(() => {
@@ -554,8 +591,9 @@ class LeadStore {
     }
     // Source: found on Google Maps (Facebook leads have a 'fb:' key) and/or
     // in a Facebook post.
-    if (filter.source === 'maps') clauses.push("b.place_key NOT LIKE 'fb:%'");
+    if (filter.source === 'maps') clauses.push("b.place_key NOT LIKE 'fb:%' AND b.place_key NOT LIKE 'li:%'");
     else if (filter.source === 'facebook') clauses.push('b.fb_post_url IS NOT NULL');
+    else if (filter.source === 'linkedin') clauses.push('(b.li_company_url IS NOT NULL OR b.li_job_url IS NOT NULL OR b.li_post_url IS NOT NULL)');
     if (filter.website === 'without') clauses.push("b.website_status IN ('no_website', 'social_only')");
     else if (filter.website === 'with') clauses.push("b.website_status IN ('has_website', 'possible_website')");
     // Campaign status: Seen = a campaign message to this number was sent
@@ -693,7 +731,12 @@ class LeadStore {
       };
       // The same number found on Facebook first: that lead becomes this
       // listing, keeping its id, date, campaign history and Facebook post.
-      const fromFacebook = !existing && qualified && ph.status === 'valid' ? this.db.prepare('SELECT id FROM businesses WHERE place_key = ? AND qualified = 1').get(facebookKey(ph.phone)) : null;
+      // (Or found on LinkedIn first, with the same validated number.)
+      const fromFacebook =
+        !existing && qualified && ph.status === 'valid'
+          ? this.db.prepare('SELECT id FROM businesses WHERE place_key = ? AND qualified = 1').get(facebookKey(ph.phone)) ||
+            this.db.prepare("SELECT id FROM businesses WHERE phone = ? AND qualified = 1 AND place_key LIKE 'li:%' ORDER BY id LIMIT 1").get(ph.phone)
+          : null;
       if (existing) {
         const { keyword, ...updateRow } = row;
         this.stmt.update.run(updateRow);
@@ -720,15 +763,27 @@ class LeadStore {
   // fields are filled in. Its date, category, campaign history and Seen
   // status stay as they were. A deleted number is not added back.
   // Returns { lead, isNewLead, newSource } or { lead: null, skipped }.
+  // r.status 'unverified': a number as written that could not be confirmed
+  // (no country, or not valid for it); it is kept for checking with that
+  // status, and never used for WhatsApp until a person confirms it.
   saveFacebookLead(r, now = new Date().toISOString()) {
-    if (!E164.test(String(r.phone))) throw new Error('Only validated international numbers are saved from Facebook.');
-    const key = facebookKey(r.phone);
+    const unverified = r.status === 'unverified';
+    const digits = String(r.phone || '').replace(/\D/g, '');
+    if (unverified ? digits.length < 7 || digits.length > 15 : !E164.test(String(r.phone))) {
+      throw Object.assign(new Error('Not a phone number that can be saved.'), { code: 'invalid_lead' });
+    }
+    const key = facebookKey(unverified ? `raw:${digits}` : r.phone);
     const text = r.text ? String(r.text).slice(0, 2000) : null;
     return this.withRetry(() =>
       this.transaction(() => {
         const marker = this.stmt.get.get(key);
         if (marker && !marker.qualified) return { lead: null, skipped: 'deleted' };
-        const existing = this.db.prepare('SELECT id FROM businesses WHERE phone = ? AND qualified = 1 ORDER BY id LIMIT 1').get(r.phone);
+        // The same number already a lead: as validated, as written, or (for a
+        // number to check) a validated lead ending in its national digits.
+        const national = digits.replace(/^0+/, '');
+        const existing = (marker && { id: marker.id }) || (unverified
+          ? this.db.prepare('SELECT id FROM businesses WHERE qualified = 1 AND (phone = ? OR phone_raw = ? OR (phone_status = \'valid\' AND length(?) >= 9 AND phone LIKE \'%\' || ?)) ORDER BY id LIMIT 1').get(r.phone, r.phone, national, national)
+          : this.db.prepare('SELECT id FROM businesses WHERE phone = ? AND qualified = 1 ORDER BY id LIMIT 1').get(r.phone));
         let id;
         if (existing) {
           id = existing.id;
@@ -747,7 +802,7 @@ class LeadStore {
             name: r.name || '',
             phone: r.phone,
             phone_raw: r.raw || r.phone,
-            phone_status: 'valid',
+            phone_status: unverified ? 'unverified' : 'valid',
             phone_country: r.country || null,
             address: null,
             website_status: 'not_checked',
@@ -774,6 +829,105 @@ class LeadStore {
     );
   }
 
+  // --- LinkedIn -------------------------------------------------------------------
+
+  // Saves a company found on LinkedIn: { companyName, companyUrl (LinkedIn
+  // company page), website, email, phone ({ phone, raw, status, country } or
+  // null), address, jobUrl, jobTitle, postUrl, sourceUrl, sourceKind ('job' |
+  // 'post' | 'company'), text, discovery, keyword, categoryId }.
+  // The same business already a lead (same number, LinkedIn company page,
+  // website or email) is not added again: empty fields are filled in and
+  // this source is recorded. A deleted company is not added back.
+  // Returns { lead, isNewLead, newSource } or { lead: null, skipped }.
+  saveLinkedInLead(r, now = new Date().toISOString()) {
+    const companyUrl = r.companyUrl || null;
+    const name = String(r.companyName || '').trim();
+    if (!name && !companyUrl) throw Object.assign(new Error('A LinkedIn lead needs a company.'), { code: 'invalid_lead' });
+    const key = `li:${crypto.createHash('sha256').update(companyUrl || `name:${name.toLowerCase()}|${r.sourceUrl || ''}`).digest('hex').slice(0, 32)}`;
+    const ph = r.phone && r.phone.phone ? r.phone : null;
+    const host = siteHost(r.website);
+    const text = r.text ? String(r.text).slice(0, 2000) : null;
+    return this.withRetry(() =>
+      this.transaction(() => {
+        const marker = this.stmt.get.get(key);
+        if (marker && !marker.qualified) return { lead: null, skipped: 'deleted' };
+        const q = (sql, ...a) => this.db.prepare(sql).get(...a);
+        // Deleted leads keep only their public LinkedIn company address.
+        if (companyUrl && q('SELECT 1 FROM businesses WHERE qualified = 0 AND li_company_url = ?', companyUrl)) return { lead: null, skipped: 'deleted' };
+        const existing =
+          (marker && marker.qualified ? marker : null) ||
+          (companyUrl && q('SELECT id FROM businesses WHERE qualified = 1 AND li_company_url = ? ORDER BY id LIMIT 1', companyUrl)) ||
+          (ph?.status === 'valid' && q('SELECT id FROM businesses WHERE qualified = 1 AND phone = ? ORDER BY id LIMIT 1', ph.phone)) ||
+          (host && q("SELECT id FROM businesses WHERE qualified = 1 AND (website_url LIKE ? OR website_url LIKE ? OR website_detail = ? OR website_detail LIKE ?) ORDER BY id LIMIT 1", `%://${host}%`, `%://www.${host}%`, host, `${host}/%`)) ||
+          (r.email && q('SELECT id FROM businesses WHERE qualified = 1 AND lower(email) = lower(?) ORDER BY id LIMIT 1', r.email));
+        let id;
+        if (existing) {
+          id = existing.id;
+          this.db
+            .prepare(
+              `UPDATE businesses SET email = COALESCE(email, ?), website_url = COALESCE(website_url, ?), li_company_url = COALESCE(li_company_url, ?),
+                 li_job_url = COALESCE(li_job_url, ?), li_post_url = COALESCE(li_post_url, ?), job_title = COALESCE(job_title, ?),
+                 description = COALESCE(description, ?), address = COALESCE(address, ?), discovery = COALESCE(?, discovery),
+                 name = CASE WHEN name = '' THEN ? ELSE name END, category_id = COALESCE(category_id, ?),
+                 website_status = CASE WHEN website_status = 'not_checked' AND ? IS NOT NULL THEN 'has_website' ELSE website_status END,
+                 website_detail = CASE WHEN website_status = 'not_checked' AND ? IS NOT NULL THEN ? ELSE website_detail END
+               WHERE id = ?`,
+            )
+            .run(r.email || null, r.website || null, companyUrl, r.jobUrl || null, r.postUrl || null, r.jobTitle || null, text, r.address || null, r.discovery || null, name, r.categoryId ?? null, host, host, host, id);
+          // A number fills an empty one only (a validated one replaces a number to check).
+          if (ph) {
+            this.db
+              .prepare(
+                `UPDATE businesses SET phone = ?, phone_raw = ?, phone_status = ?, phone_country = ?
+                 WHERE id = ? AND (phone IS NULL OR (phone_status != 'valid' AND ? = 'valid'))`,
+              )
+              .run(ph.phone, ph.raw || ph.phone, ph.status, ph.country || null, id, ph.status);
+          }
+        } else {
+          const ins = this.stmt.insert.run({
+            place_key: key,
+            maps_url: r.sourceUrl || companyUrl || '',
+            name: name || 'Company on LinkedIn',
+            phone: ph?.phone ?? null,
+            phone_raw: ph ? ph.raw || ph.phone : null,
+            phone_status: ph?.status ?? null,
+            phone_country: ph?.country ?? null,
+            address: r.address || null,
+            website_status: host ? 'has_website' : 'not_checked',
+            website_detail: host,
+            qualified: 1,
+            keyword: r.keyword || null,
+            category_id: r.categoryId ?? null,
+            now,
+            today: localDate(new Date(now)),
+          });
+          id = Number(ins.lastInsertRowid);
+          this.db
+            .prepare(
+              `UPDATE businesses SET email = ?, website_url = ?, li_company_url = ?, li_job_url = ?, li_post_url = ?, job_title = ?,
+                 description = ?, discovery = ? WHERE id = ?`,
+            )
+            .run(r.email || null, r.website || null, companyUrl, r.jobUrl || null, r.postUrl || null, r.jobTitle || null, text, r.discovery || null, id);
+        }
+        const url = r.sourceUrl || r.jobUrl || r.postUrl || companyUrl;
+        const added = url
+          ? this.db
+              .prepare(
+                `INSERT INTO lead_sources (business_id, source, url, page_url, author, text, phone, found_at, kind, title)
+                 VALUES (?, 'linkedin', ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source, url, phone) DO NOTHING`,
+              )
+              .run(id, url, companyUrl, name || null, text, ph?.phone || '', now, r.sourceKind || null, r.jobTitle || null).changes
+          : 0;
+        return { lead: toLead(this.db.prepare(`${LEAD_SELECT} WHERE b.id = ?`).get(id)), isNewLead: !existing, newSource: added > 0 };
+      }),
+    );
+  }
+
+  // A LinkedIn job or post already recorded as a source (not read again).
+  hasLinkedInSource(url) {
+    return Boolean(this.withRetry(() => this.db.prepare("SELECT 1 FROM lead_sources WHERE source = 'linkedin' AND url = ? LIMIT 1").get(url)));
+  }
+
   // A post whose numbers were already saved (it is not read again).
   hasFacebookPost(url) {
     return Boolean(this.withRetry(() => this.db.prepare("SELECT 1 FROM lead_sources WHERE source = 'facebook' AND url = ? LIMIT 1").get(url)));
@@ -783,7 +937,7 @@ class LeadStore {
   leadSources(id) {
     return this.withRetry(() =>
       this.db
-        .prepare("SELECT url, page_url AS pageUrl, author, text, phone, found_at AS foundAt FROM lead_sources WHERE business_id = ? ORDER BY found_at DESC, id DESC")
+        .prepare("SELECT source, kind, title, url, page_url AS pageUrl, author, text, phone, found_at AS foundAt FROM lead_sources WHERE business_id = ? ORDER BY found_at DESC, id DESC")
         .all(id),
     );
   }
@@ -939,9 +1093,22 @@ function toLead(row) {
     // Campaign status: 'seen' once a campaign message was sent to this
     // number; campaignDelivery is the best receipt (sent/delivered/read).
     campaign: row.camp_rank > 0 ? 'seen' : 'unseen',
-    // Where the lead was found: Google Maps and/or a Facebook post.
-    source: String(row.place_key).startsWith('fb:') ? 'facebook' : 'maps',
-    sources: [...(String(row.place_key).startsWith('fb:') ? [] : ['maps']), ...(row.fb_post_url ? ['facebook'] : [])],
+    // Where the lead was found: Google Maps, a Facebook post and/or LinkedIn.
+    source: String(row.place_key).startsWith('fb:') ? 'facebook' : String(row.place_key).startsWith('li:') ? 'linkedin' : 'maps',
+    sources: [
+      ...(/^(fb|li):/.test(String(row.place_key)) ? [] : ['maps']),
+      ...(row.fb_post_url ? ['facebook'] : []),
+      ...(row.li_company_url || row.li_job_url || row.li_post_url ? ['linkedin'] : []),
+    ],
+    email: row.email || '',
+    websiteUrl: row.website_url || '',
+    linkedinUrl: row.li_company_url || '',
+    jobUrl: row.li_job_url || '',
+    linkedinPostUrl: row.li_post_url || '',
+    jobTitle: row.job_title || '',
+    discovery: row.discovery || '',
+    // What contact details the lead has.
+    contacts: { phone: Boolean(row.phone), email: Boolean(row.email), website: Boolean(row.website_url || ['has_website', 'possible_website'].includes(row.website_status)) },
     fbPostUrl: row.fb_post_url || '',
     fbPageUrl: row.fb_page_url || '',
     contactName: row.contact_name || '',
@@ -958,7 +1125,18 @@ const LEAD_SELECT = `SELECT b.*, c.name AS category_name, w.status AS wa_status,
   LEFT JOIN whatsapp_checks w ON w.phone = b.phone AND b.phone_status = 'valid'`;
 
 const TOMBSTONE = `qualified = 0, website_status = 'deleted', website_detail = NULL, name = '', phone = NULL, phone_raw = NULL,
-  phone_status = NULL, phone_country = NULL, address = NULL, maps_url = '', fb_post_url = NULL, fb_page_url = NULL, contact_name = NULL, description = NULL`;
+  phone_status = NULL, phone_country = NULL, address = NULL, maps_url = '', fb_post_url = NULL, fb_page_url = NULL, contact_name = NULL, description = NULL,
+  email = NULL, website_url = NULL, li_job_url = NULL, li_post_url = NULL, job_title = NULL, discovery = NULL`;
+
+// A website's host without "www." (for matching the same company), or null.
+function siteHost(url) {
+  try {
+    const u = new URL(url);
+    return /^https?:$/.test(u.protocol) ? u.hostname.toLowerCase().replace(/^www\./, '') : null;
+  } catch {
+    return null;
+  }
+}
 
 // Key of a lead found on Facebook: one per number. A hash, so the marker a
 // deleted lead leaves behind does not keep the number.

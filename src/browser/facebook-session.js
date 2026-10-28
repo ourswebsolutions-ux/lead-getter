@@ -38,16 +38,20 @@ class FacebookUnavailable extends FatalSearchError {
 class FacebookSession extends SearchSession {
   // categoryName: for the extra category query; country: how local numbers
   // in posts are read.
-  constructor({ categoryName = '', country = null, facebook = fbDefault, pacing = {}, ...opts }) {
+  // diagnose(record): optional; receives a summary per query (counts and
+  // reasons only: no post text, numbers, cookies or account details).
+  constructor({ categoryName = '', country = null, facebook = fbDefault, pacing = {}, diagnose = null, ...opts }) {
     super({ ...opts, pacing: { ...DEFAULT_PACING, ...FB_PACING, ...pacing } });
     this.fb = facebook;
     this.country = country;
+    this.diagnose = diagnose;
     this.queries = facebook.buildQueries(this.keyword, categoryName);
     this.doneQueries = new Set();
     this.loadedQueries = 0;
     this.seenPosts = new Set();
-    // posts read, valid numbers found in them, leads saved (new or not)
-    this.stats.facebook = { posts: 0, numbers: 0, leads: 0, newLeads: 0 };
+    // posts read; numbers detected; of those valid and to check (unverified);
+    // leads saved (new, or already a lead); posts that could not be saved
+    this.stats.facebook = { posts: 0, detected: 0, numbers: 0, unverified: 0, leads: 0, newLeads: 0, duplicates: 0, failures: 0 };
   }
 
   status(state, message, phase = 'search') {
@@ -70,12 +74,17 @@ class FacebookSession extends SearchSession {
   summary() {
     const f = this.stats.facebook;
     const n = (k, one, many = `${one}s`) => `${f[k]} ${f[k] === 1 ? one : many}`;
-    return `${n('posts', 'post')} read, ${n('numbers', 'valid number')}, ${n('newLeads', 'new lead')}.${this.ending ? ` ${this.ending}` : ''}`;
+    const parts = [`${n('posts', 'post')} read`, `${n('numbers', 'valid number')}`];
+    if (f.unverified) parts.push(`${n('unverified', 'number')} to check`);
+    parts.push(n('newLeads', 'new lead'));
+    if (f.duplicates) parts.push(`${f.duplicates} already saved`);
+    if (f.failures) parts.push(`${n('failures', 'post')} not saved`);
+    return `${parts.join(', ')}.${this.ending ? ` ${this.ending}` : ''}`;
   }
 
   progress(note = '') {
     const f = this.stats.facebook;
-    this.status('running', `Facebook: ${f.posts} posts read · ${f.numbers} valid numbers · ${f.newLeads} new leads${note ? ` · ${note}` : ''}`);
+    this.status('running', `Facebook: ${f.posts} posts read · ${f.numbers} valid numbers${f.unverified ? ` · ${f.unverified} to check` : ''} · ${f.newLeads} new leads${note ? ` · ${note}` : ''}`);
   }
 
   // Each query once; after a reconnect, finished queries are skipped and
@@ -111,26 +120,35 @@ class FacebookSession extends SearchSession {
     // "End of results", or several scrolls in a row that load nothing.
     let read = 0;
     let stalls = 0;
+    const diag = { query, rounds: 0, postsOnPage: 0, withLink: 0, revealed: 0, emptyText: 0, rejected: {}, ending: '' };
+    const report = (ending) => {
+      this.ending = ending;
+      diag.ending = ending;
+      try {
+        this.diagnose?.({ source: 'facebook', ...diag, stats: { ...this.stats.facebook } });
+      } catch {}
+    };
     for (;;) {
       const state = await this.op(() => this.fb.detectState(page));
       if (state) throw new FacebookUnavailable(state);
       await this.op(() => this.fb.expandSeeMore(page));
+      diag.revealed += await this.op(() => (this.fb.revealPostLinks ? this.fb.revealPostLinks(page) : 0));
       const posts = await this.op(() => this.fb.collectPosts(page));
-      // Posts stay on the page as it grows: each is read once (by its address).
+      diag.rounds++;
+      diag.postsOnPage = Math.max(diag.postsOnPage, posts.length);
+      // Posts stay on the page as it grows: each is read once (by its address,
+      // or its author and text when Facebook shows no address).
       const fresh = posts.filter((p) => p.key && !this.seenPosts.has(p.key));
       for (const post of fresh) {
         this.seenPosts.add(post.key);
-        await this.processPost(post);
-        if (++read >= this.pacing.fbMaxPosts) {
-          this.ending = `Stopped at ${this.pacing.fbMaxPosts} posts for "${query}".`;
-          return;
-        }
+        if (post.url) diag.withLink++;
+        if (!post.text) diag.emptyText++;
+        await this.processPost(post, query, diag);
+        if (++read >= this.pacing.fbMaxPosts) return report(`Stopped at ${this.pacing.fbMaxPosts} posts for "${query}".`);
       }
       const before = await this.op(() => this.fb.resultsState(page));
-      if (before.end) {
-        this.ending = `End of the results for "${query}".`;
-        return;
-      }
+      // Facebook's own end marker; with posts on screen that were all read.
+      if (before.end) return report(`End of the results for "${query}".`);
       this.progress('loading more posts');
       await this.op(() => (stalls ? this.fb.nudge(page) : this.fb.scrollResults(page)));
       const after = await this.op(() => this.fb.waitForMore(page, before, { timeout: this.pacing.fbLoad }));
@@ -140,9 +158,8 @@ class FacebookSession extends SearchSession {
         continue;
       }
       if (++stalls > this.pacing.fbStallRetries) {
-        this.ending = `No more posts loaded for "${query}" after ${this.pacing.fbStallRetries} tries.`;
         this.progress('no more posts loaded');
-        return;
+        return report(`No more posts loaded for "${query}" after ${this.pacing.fbStallRetries} tries.`);
       }
       this.progress(`waiting for more posts (try ${stalls} of ${this.pacing.fbStallRetries})`);
       // Facebook may only load while its window is visible: shown once.
@@ -151,44 +168,64 @@ class FacebookSession extends SearchSession {
     }
   }
 
-  // Reads one post (no extra page is opened). Only valid numbers that the
-  // post itself shows are saved; nothing is filled in when there is none.
-  async processPost(post) {
+  // Reads one post (no extra page is opened): the numbers in its text and
+  // links, and in its visible comments (credited to the commenter). Valid
+  // numbers and numbers to check are saved; nothing is filled in when there
+  // is none. A post without its own address (Facebook didn't show one) is
+  // still read, and linked to the search it came from.
+  async processPost(post, query = this.keyword, diag = null) {
     this.stats.processed++;
-    this.stats.facebook.posts++;
+    const f = this.stats.facebook;
+    f.posts++;
     const who = post.author || 'a Facebook user';
-    if (!post.url) {
-      this.stats.skipped++;
-      return this.status('running', `Facebook: skipped a post by ${who} without its own link`);
-    }
-    if (this.store.hasFacebookPost(post.url)) return this.status('running', `Facebook: already saved a post by ${who}`);
-    const phones = this.fb.extractPhones(post.text, post.links, this.country);
-    if (!phones.length) return this.status('running', `Facebook: no phone number in a post by ${who}`);
-    this.stats.facebook.numbers += phones.length;
+    const postUrl = post.url || `${this.fb.searchUrl(query)}#lf-${post.key.replace(/^text:/, '').slice(0, 16)}`;
+    if (this.store.hasFacebookPost(postUrl)) return this.status('running', `Facebook: already saved a post by ${who}`);
+    const items = [{ text: post.text, links: post.links, author: post.author, pageUrl: post.pageUrl }, ...(post.comments || []).map((c) => ({ ...c, links: [] }))];
+    let found = 0;
     let added = 0;
-    for (const ph of phones) {
-      const saved = this.saveFacebook({
-        phone: ph.phone,
-        country: ph.country,
-        raw: ph.raw,
-        name: post.author,
-        contactName: post.author,
-        postUrl: post.url,
-        pageUrl: post.pageUrl,
-        text: post.text,
-        keyword: this.keyword,
-        categoryId: this.categoryId,
-      });
-      if (!saved.lead) continue;
-      this.stats.leads++;
-      this.stats.facebook.leads++;
-      if (saved.isNewLead) {
-        added++;
-        this.stats.newLeads++;
-        this.stats.facebook.newLeads++;
+    const seen = new Set();
+    for (const item of items) {
+      const { phones, stats } = this.fb.readPhones(item.text, item.links, this.country);
+      f.detected += stats.candidates - stats.rejected;
+      if (diag) for (const [k, v] of Object.entries(stats.reasons)) diag.rejected[k] = (diag.rejected[k] || 0) + v;
+      for (const ph of phones) {
+        if (seen.has(ph.phone)) continue;
+        seen.add(ph.phone);
+        found++;
+        if (ph.status === 'valid') f.numbers++;
+        else f.unverified++;
+        let saved;
+        try {
+          saved = this.saveFacebook({
+            phone: ph.phone,
+            status: ph.status,
+            country: ph.country,
+            raw: ph.raw,
+            name: item.author || post.author,
+            contactName: item.author || post.author,
+            postUrl,
+            pageUrl: item.pageUrl || post.pageUrl,
+            text: post.text,
+            keyword: this.keyword,
+            categoryId: this.categoryId,
+          });
+        } catch (err) {
+          if (err instanceof FatalSearchError) throw err;
+          f.failures++;
+          continue;
+        }
+        if (!saved.lead) continue;
+        this.stats.leads++;
+        f.leads++;
+        if (saved.isNewLead) {
+          added++;
+          this.stats.newLeads++;
+          f.newLeads++;
+        } else f.duplicates++;
+        this.emit('lead', saved.lead);
       }
-      this.emit('lead', saved.lead);
     }
+    if (!found) return this.status('running', `Facebook: no phone number in a post by ${who}`);
     this.status('running', added ? `Facebook lead found: ${who}` : `Facebook: ${who}'s number is already a lead`);
   }
 
@@ -196,6 +233,7 @@ class FacebookSession extends SearchSession {
     try {
       return this.store.saveFacebookLead(r);
     } catch (err) {
+      if (err?.code === 'invalid_lead') throw err; // this number only; the search goes on
       throw new FatalSearchError(`Could not save to the local database (${String(err?.message || err).split('\n')[0]}).`);
     }
   }

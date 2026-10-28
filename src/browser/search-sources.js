@@ -2,35 +2,35 @@
 
 // Runs one search over its lead sources.
 //
-// Facebook Lead Search off: exactly the Google Maps search (every event
-// passes through unchanged).
+// Facebook and LinkedIn Lead Search off: exactly the Google Maps search
+// (every event passes through unchanged).
 //
-// On: the Google Maps and Facebook workers start together and run side by
-// side, each in its own Chrome pages (Maps in its tabs, Facebook in a window
-// of its own), saving leads to the same database as they find them. Each
-// has its own progress (status.workers.maps / .facebook: running, paused,
-// completed, failed or stopped); one failing never stops the other. Stop
-// ends both. The overall search finishes when both have: completed if
-// either completed, failed only if both failed.
+// Either on: Google Maps and the sources that are on start together and run
+// side by side, each in its own Chrome pages (Maps in its tabs, Facebook and
+// LinkedIn in windows of their own), saving leads to the same database as
+// they find them. Each has its own progress (status.workers.<source>:
+// running, paused, completed, failed or stopped); one failing never stops
+// the others. Stop ends all. The overall search finishes when all have:
+// completed if any completed, failed only if all failed.
 
 const WORKER_STATE = { connecting: 'running', running: 'running', paused: 'paused', stopping: 'running', done: 'completed', error: 'failed', stopped: 'stopped' };
+const LABEL = { maps: 'Google Maps', facebook: 'Facebook', linkedin: 'LinkedIn' };
 
-// send(event, payload): 'status' | 'lead'. createMaps(emit) and
-// createFacebook(emit) build the sessions. Returns the combined stats.
-async function runSources({ withFacebook, signal, send, createMaps, createFacebook }) {
-  if (!withFacebook) return createMaps(send).run();
+// send(event, payload): 'status' | 'lead'. createMaps(emit),
+// createFacebook(emit) and createLinkedIn(emit) build the sessions.
+// Returns the combined stats.
+async function runSources({ withFacebook, withLinkedIn = false, signal, send, createMaps, createFacebook, createLinkedIn }) {
+  if (!withFacebook && !withLinkedIn) return createMaps(send).run();
 
-  const workers = {
-    maps: { state: 'running', message: 'Starting', processed: 0, leads: 0, newLeads: 0, skipped: 0 },
-    facebook: { state: 'running', message: 'Starting', processed: 0, leads: 0, newLeads: 0, skipped: 0 },
-  };
+  const extra = [...(withFacebook ? ['facebook'] : []), ...(withLinkedIn ? ['linkedin'] : [])];
+  const workers = Object.fromEntries(['maps', ...extra].map((k) => [k, { state: 'running', message: 'Starting', processed: 0, leads: 0, newLeads: 0, skipped: 0 }]));
   let finished = false;
   const totals = () => {
     const t = { processed: 0, leads: 0, newLeads: 0, skipped: 0 };
     for (const w of Object.values(workers)) for (const k of Object.keys(t)) t[k] += w[k] || 0;
     return t;
   };
-  // While running, the overall state is running (paused only when neither
+  // While running, the overall state is running (paused only when no
   // worker is making progress); after Stop it stays "stopping".
   const overall = () => {
     if (signal.aborted) return 'stopping';
@@ -46,14 +46,14 @@ async function runSources({ withFacebook, signal, send, createMaps, createFacebo
       phase: payload.phase || 'search',
       step: payload.step,
       source,
-      message: `${source === 'maps' ? 'Google Maps' : 'Facebook'}: ${payload.message}`,
+      message: `${LABEL[source]}: ${payload.message}`,
       workers: snapshot(workers),
     });
   };
   const update = (source, payload) => {
     const w = workers[source];
     for (const k of ['processed', 'leads', 'newLeads', 'skipped']) if (typeof payload[k] === 'number') w[k] = payload[k];
-    if (payload.facebook) w.facebook = payload.facebook;
+    if (payload[source]) w[source] = payload[source];
     if (payload.message) w.message = payload.message;
     if (payload.state) w.state = WORKER_STATE[payload.state] || w.state;
     if (payload.phase) w.phase = payload.phase;
@@ -65,16 +65,21 @@ async function runSources({ withFacebook, signal, send, createMaps, createFacebo
   };
 
   const maps = createMaps(emitFor('maps'));
-  const fb = createFacebook(emitFor('facebook'));
-  const [mapsStats, outcome] = await Promise.all([maps.run(), fb.run()]);
+  const sessions = { facebook: withFacebook ? createFacebook(emitFor('facebook')) : null, linkedin: withLinkedIn ? createLinkedIn(emitFor('linkedin')) : null };
+  const [mapsStats, ...outcomes] = await Promise.all([maps.run(), ...extra.map((k) => sessions[k].run())]);
 
-  // Facebook reports its end as an outcome rather than a status.
-  update('facebook', { ...fb.stats, state: { done: 'done', stopped: 'stopped' }[outcome.state] || 'error', message: outcome.message });
-  workers.facebook.kind = outcome.kind || null;
+  // Facebook and LinkedIn report their end as an outcome rather than a status.
+  const ends = {};
+  extra.forEach((k, i) => {
+    const outcome = outcomes[i];
+    update(k, { ...sessions[k].stats, state: { done: 'done', stopped: 'stopped' }[outcome.state] || 'error', message: outcome.message });
+    workers[k].kind = outcome.kind || null;
+    ends[k] = { ...sessions[k].stats[k], state: outcome.state, kind: outcome.kind || null, message: outcome.message };
+  });
   update('maps', mapsStats || {});
   finished = true;
 
-  const stats = { ...totals(), facebook: fb.stats.facebook };
+  const stats = { ...totals(), ...Object.fromEntries(extra.map((k) => [k, sessions[k].stats[k]])) };
   const states = Object.values(workers).map((w) => w.state);
   const state = signal.aborted || states.every((s) => s === 'stopped') ? 'stopped' : states.includes('completed') ? 'done' : 'error';
   const failedMaps = workers.maps.state === 'failed';
@@ -84,9 +89,9 @@ async function runSources({ withFacebook, signal, send, createMaps, createFacebo
     // A failed Maps search keeps its phase (e.g. the Chrome connection).
     phase: failedMaps && state === 'error' ? workers.maps.phase || 'search' : 'search',
     source: null,
-    facebook: { ...fb.stats.facebook, state: outcome.state, kind: outcome.kind || null, message: outcome.message },
+    ...ends,
     workers: snapshot(workers),
-    message: state === 'stopped' ? 'Search stopped' : `Google Maps: ${trimDot(workers.maps.message)}. Facebook: ${outcome.message}`,
+    message: state === 'stopped' ? 'Search stopped' : [`Google Maps: ${trimDot(workers.maps.message)}.`, ...extra.map((k) => `${LABEL[k]}: ${ends[k].message}`)].join(' '),
   });
   return stats;
 }

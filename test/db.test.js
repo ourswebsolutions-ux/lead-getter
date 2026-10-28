@@ -66,7 +66,7 @@ test('version 8 removes the old subscription device key and nothing else', () =>
   s.db.exec('PRAGMA user_version = 7');
   s.close();
   s = new LeadStore(file);
-  assert.equal(s.db.prepare('PRAGMA user_version').get().user_version, 8);
+  assert.equal(s.db.prepare('PRAGMA user_version').get().user_version, 9);
   assert.equal(s.getState('device_key'), null, 'the subscription key is gone');
   assert.deepEqual([s.getState('lastSearch'), s.getState('outreach.ack')], [{ keyword: 'kept' }, 123], 'other settings stay');
   assert.deepEqual(s.listLeads().map((l) => [l.name, l.campaign]), [['Kept Lead', 'seen']], 'leads and campaign history stay');

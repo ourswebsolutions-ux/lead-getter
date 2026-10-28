@@ -42,7 +42,7 @@ test('scrolls, waits for each new batch, reads every post once, until the end of
   const { outcome, stats, store, statuses } = await run(t, { pages: 5 });
   assert.equal(outcome.state, 'done', outcome.message);
   // 5 batches of 3, loaded one after another while scrolling.
-  assert.deepEqual(stats, { posts: 15, numbers: 10, leads: 10, newLeads: 10 });
+  assert.deepEqual(stats, { posts: 15, detected: 10, numbers: 10, unverified: 0, leads: 10, newLeads: 10, duplicates: 0, failures: 0 });
   assert.equal(store.listLeads().length, 10);
   assert.ok(store.listLeads().every((l) => /^\+9230010000\d\d$/.test(l.phone) && l.source === 'facebook'));
   assert.equal(outcome.message, '15 posts read, 10 valid numbers, 10 new leads. End of the results for "garments Lahore".');

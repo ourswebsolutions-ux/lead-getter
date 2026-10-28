@@ -35,6 +35,11 @@ contextBridge.exposeInMainWorld('leadFinder', {
   stopSearch: () => ipcRenderer.invoke('search:stop'),
   facebookSearch: () => ipcRenderer.invoke('facebook:get'),
   setFacebookSearch: (on) => ipcRenderer.invoke('facebook:set', Boolean(on)),
+  linkedinSearch: () => ipcRenderer.invoke('linkedin:get'),
+  setLinkedInSearch: (on) => ipcRenderer.invoke('linkedin:set', Boolean(on)),
+  // The country local numbers ("0300 1234567") are read with; null = automatic.
+  phoneCountry: () => ipcRenderer.invoke('phoneCountry:get'),
+  setPhoneCountry: (code) => ipcRenderer.invoke('phoneCountry:set', code === null ? null : String(code ?? '')),
   getStatus: () => ipcRenderer.invoke('search:status'),
   // scope: 'filtered' (leads matching filter) or 'all'
   exportCsv: (scope, filter) => ipcRenderer.invoke('export:csv', scope === 'all' ? 'all' : 'filtered', filter),

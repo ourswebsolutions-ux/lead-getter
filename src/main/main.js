@@ -4,11 +4,12 @@ const path = require('node:path');
 const fs = require('node:fs/promises');
 const { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage, shell } = require('electron');
 const { LeadStore, DATE_RE, formatCategory } = require('../database/db');
-const { E164 } = require('../database/phone');
+const { E164, resolvePhoneCountry, phoneCountries } = require('../database/phone');
 const { leadsToCsv } = require('../export/csv');
 const { ChromeConnection, ChromeError, ConnectCancelled } = require('../browser/chrome');
 const { SearchSession, WEBSITE_FILTERS } = require('../browser/search-session');
 const { FacebookSession } = require('../browser/facebook-session');
+const { LinkedInSession } = require('../browser/linkedin-session');
 const { runSources } = require('../browser/search-sources');
 const { AppLock } = require('./applock');
 const { Activation } = require('./activation');
@@ -58,7 +59,7 @@ const chrome = new ChromeConnection({
     return response === 0;
   },
 });
-const tabs = { main: null, check: null, detail: null, facebook: null };
+const tabs = { main: null, check: null, detail: null, facebook: null, linkedin: null };
 let lastStatus = { state: 'idle', message: 'Ready' };
 let interrupted = null; // last search, if the app ended while it was running
 
@@ -258,7 +259,7 @@ function validateFilter(raw) {
     if (typeof f[k] === 'string' && DATE_RE.test(f[k])) out[k] = f[k];
   }
   if (f.campaign === 'seen' || f.campaign === 'unseen') out.campaign = f.campaign;
-  if (f.source === 'maps' || f.source === 'facebook') out.source = f.source;
+  if (['maps', 'facebook', 'linkedin'].includes(f.source)) out.source = f.source;
   if (typeof f.search === 'string' && f.search.trim()) out.search = f.search.trim().slice(0, 100);
   return out;
 }
@@ -266,16 +267,18 @@ function validateFilter(raw) {
 // --- Chrome tabs -----------------------------------------------------------
 
 // Google Maps works in the tabs of one window (main, check, detail);
-// Facebook has a window of its own. Each search worker only ever uses its
-// own pages, so neither navigates, hides or slows down the other's page.
+// Facebook and LinkedIn each have a window of their own. Each search worker
+// only ever uses its own pages, so none navigates, hides or slows down
+// another's page.
 const MAPS_TABS = ['main', 'check', 'detail'];
 const FACEBOOK_TABS = ['facebook'];
+const LINKEDIN_TABS = ['linkedin'];
 
 async function tab(name) {
   const t = tabs[name];
   if (t && !t.isClosed()) return t;
   if (!chrome.connected) throw new Error('Target page, context or browser has been closed');
-  tabs[name] = name === 'facebook' ? await chrome.newWindowPage() : await newMapsTab();
+  tabs[name] = name === 'facebook' || name === 'linkedin' ? await chrome.newWindowPage() : await newMapsTab();
   return tabs[name];
 }
 
@@ -285,7 +288,7 @@ async function tab(name) {
 async function newMapsTab() {
   const beside = MAPS_TABS.map((k) => tabs[k]).find((p) => p && !p.isClosed());
   if (beside) return chrome.newTabBeside(beside);
-  if (tabs.facebook && !tabs.facebook.isClosed()) return chrome.newWindowPage();
+  if ((tabs.facebook && !tabs.facebook.isClosed()) || (tabs.linkedin && !tabs.linkedin.isClosed())) return chrome.newWindowPage();
   return chrome.context.newPage();
 }
 
@@ -335,9 +338,11 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
     return { ok: false, error: `Could not save the category: ${err.message}` };
   }
 
-  // Facebook Lead Search (the switch above the Leads table), as it is when
-  // the search starts.
+  // Facebook and LinkedIn Lead Search (the switches above the Leads table),
+  // as they are when the search starts.
   const withFacebook = facebookSearchOn();
+  const withLinkedIn = linkedinSearchOn();
+  const sources = ['maps', ...(withFacebook ? ['facebook'] : []), ...(withLinkedIn ? ['linkedin'] : [])];
   const controller = new AbortController();
   search = { controller };
   // Remembered so a search cut short by a crash can be resumed.
@@ -346,7 +351,7 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
   let expectedProfilePath = null;
   const startedAt = new Date().toISOString();
   let stats = null;
-  sendStatus({ state: 'connecting', phase: 'connection', step: 'connecting', keyword, category: category.name, sources: withFacebook ? ['maps', 'facebook'] : ['maps'], source: 'maps', facebook: null, workers: null, processed: 0, leads: 0, newLeads: 0, skipped: 0, message: 'Connecting to Chrome' });
+  sendStatus({ state: 'connecting', phase: 'connection', step: 'connecting', keyword, category: category.name, sources, source: 'maps', facebook: null, linkedin: null, workers: null, processed: 0, leads: 0, newLeads: 0, skipped: 0, message: 'Connecting to Chrome' });
 
   search.promise = (async () => {
     try {
@@ -360,6 +365,7 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
         check: () => tab('check'),
         detail: () => tab('detail'),
         facebook: () => tab('facebook'),
+        linkedin: () => tab('linkedin'),
         open: () => newMapsTab(),
         adopt: (name, page) => adoptTab(name, page),
       };
@@ -397,8 +403,12 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
             return true;
           }),
       });
+      // How local numbers are read (Facebook posts, LinkedIn pages, websites).
+      const country = phoneCountry();
+      const diagnose = searchDiagnostics(keyword);
       stats = await runSources({
         withFacebook,
+        withLinkedIn,
         signal: controller.signal,
         send: (event, payload) => {
           if (event === 'status') return sendStatus(payload);
@@ -411,12 +421,24 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite) {
             keyword,
             categoryId: category.id,
             categoryName: category.name,
-            // Local numbers in posts: the country of most leads, else this computer's region.
-            country: store.commonPhoneCountry() || app.getLocaleCountryCode() || null,
+            country,
             store,
             signal: controller.signal,
             pages,
             recovery: recoveryFor(FACEBOOK_TABS),
+            diagnose,
+            emit,
+          }),
+        createLinkedIn: (emit) =>
+          new LinkedInSession({
+            keyword,
+            categoryId: category.id,
+            country,
+            store,
+            signal: controller.signal,
+            pages,
+            recovery: recoveryFor(LINKEDIN_TABS),
+            diagnose,
             emit,
           }),
       });
@@ -472,6 +494,46 @@ function setFacebookSearch(on) {
   if (typeof on !== 'boolean') return { ok: false, error: 'Invalid value' };
   store.setState('facebookSearch', on);
   return { ok: true, on };
+}
+
+function linkedinSearchOn() {
+  return store.getState('linkedinSearch') === true;
+}
+
+function setLinkedInSearch(on) {
+  if (typeof on !== 'boolean') return { ok: false, error: 'Invalid value' };
+  store.setState('linkedinSearch', on);
+  return { ok: true, on };
+}
+
+// The country local numbers are read with: the user's choice, else the
+// country of most leads, else this computer's time zone, else its region.
+function phoneCountry() {
+  return resolvePhoneCountry({
+    setting: store.getState('phoneCountry'),
+    common: store.commonPhoneCountry(),
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    locale: app.getLocaleCountryCode(),
+  });
+}
+
+function phoneCountrySettings() {
+  return { setting: store.getState('phoneCountry') || null, effective: phoneCountry(), countries: phoneCountries() };
+}
+
+function setPhoneCountry(code) {
+  if (code !== null && !phoneCountries().some((c) => c.code === code)) return { ok: false, error: 'Unknown country' };
+  store.setState('phoneCountry', code);
+  return { ok: true, ...phoneCountrySettings() };
+}
+
+// Search diagnostics (userData/search-diagnostics.log): counts and reasons
+// per Facebook query and LinkedIn company, to find out why posts or pages
+// gave no numbers. No cookies, account details, post text or numbers.
+let diagLog = null;
+function searchDiagnostics(keyword) {
+  diagLog ||= fileLog(path.join(app.getPath('userData'), 'search-diagnostics.log'));
+  return (record) => diagLog({ keyword, ...record });
 }
 
 function stopSearch() {
@@ -875,8 +937,8 @@ async function deleteFiltered(rawFilter) {
 }
 
 function openListing(url) {
-  // Only Google Maps listings and Facebook posts or pages are opened, in the
-  // user's default browser.
+  // Only Google Maps listings, Facebook posts or pages and LinkedIn company,
+  // job or post pages are opened, in the user's default browser.
   let u;
   try {
     u = new URL(String(url));
@@ -885,7 +947,8 @@ function openListing(url) {
   }
   const maps = /^(www\.)?google\.[a-z.]+$/.test(u.hostname) && u.pathname.startsWith('/maps/');
   const facebook = /^(www|m|web)\.facebook\.com$/.test(u.hostname);
-  if (u.protocol !== 'https:' || !(maps || facebook)) {
+  const linkedin = /^([a-z]{2,3}\.|www\.)?linkedin\.com$/.test(u.hostname) && /^\/(company|jobs\/view|feed\/update|posts)\//.test(u.pathname);
+  if (u.protocol !== 'https:' || !(maps || facebook || linkedin)) {
     return { ok: false };
   }
   shell.openExternal(u.toString());
@@ -1013,6 +1076,10 @@ app.whenReady().then(() => {
   handle('search:stop', () => stopSearch());
   handle('facebook:get', () => ({ on: facebookSearchOn() }));
   handle('facebook:set', (on) => setFacebookSearch(on));
+  handle('linkedin:get', () => ({ on: linkedinSearchOn() }));
+  handle('linkedin:set', (on) => setLinkedInSearch(on));
+  handle('phoneCountry:get', () => phoneCountrySettings());
+  handle('phoneCountry:set', (code) => setPhoneCountry(code === null ? null : String(code || '').toUpperCase()));
   handle('search:status', () => lastStatus);
   handle('export:csv', (scope, filter) => exportCsv(scope === 'all' ? 'all' : 'filtered', filter));
   handle('lead:open', (url) => openListing(url));

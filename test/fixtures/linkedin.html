@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8" /><title>LinkedIn (test fixture)</title>
+<style>body{font:14px sans-serif;margin:0} li{min-height:120px}</style></head>
+<body>
+<main id="main"></main>
+<script>
+  // LinkedIn pages in the shapes they are rendered for a logged-in member:
+  // jobs search (job cards with a /jobs/view/ link, the company name only as
+  // text), a job's page (company link, description), a company's About page
+  // (dt/dd pairs, website through LinkedIn's redirect), post search (activity
+  // URNs) and company search. window.CONFIG can turn pages into a login wall.
+  const C = window.CONFIG || {};
+  const JOBS = [
+    { id: 4001, title: 'Full Stack Developer', company: 'Acme Soft', slug: 'acme-soft', location: 'Lahore, Punjab, Pakistan' },
+    { id: 4002, title: 'Senior Full Stack Engineer', company: 'Beta Labs', slug: 'beta-labs', location: 'Islamabad, Pakistan' },
+    { id: 4003, title: 'Full Stack Developer (React/Node)', company: 'Gamma Traders', slug: 'gamma-traders', location: 'Karachi, Sindh, Pakistan' },
+    { id: 4004, title: 'Full Stack Developer', company: 'Acme Soft', slug: 'acme-soft', location: 'Lahore, Punjab, Pakistan' },
+  ];
+  const COMPANIES = {
+    'acme-soft': { name: 'Acme Soft (Pvt) Ltd', website: 'https://www.acmesoft.com/', phone: '042 35761234', hq: 'Lahore, Punjab' },
+    'beta-labs': { name: 'Beta Labs', website: 'https://betalabs.io', hq: 'Islamabad, Islamabad Capital Territory' },
+    'gamma-traders': { name: 'Gamma Traders', hq: 'Karachi, Sindh' },
+    'delta-digital': { name: 'Delta Digital', hq: 'Lahore, Punjab' },
+    'epsilon-co': { name: 'Epsilon Co', website: 'https://epsilon.example.org', hq: 'Faisalabad, Punjab' },
+  };
+  const main = document.getElementById('main');
+  const p = location.pathname;
+  let m;
+  if (C.authwall && (C.authwall === 'all' || p.startsWith(C.authwall))) {
+    main.innerHTML = '<form class="authwall-join-form"><input id="session_key"><button>Sign in</button></form>';
+  } else if (p.startsWith('/jobs/search')) {
+    main.innerHTML = '<ul class="jobs-list">' + JOBS.map((j) => `<li data-occludable-job-id="${j.id}">
+      <div class="job-card-container"><a class="job-card-container__link" href="/jobs/view/${j.id}/?trk=public_jobs&refId=x" aria-label="${j.title}"><strong>${j.title}</strong></a>
+      <div class="artdeco-entity-lockup__subtitle"><span>${j.company}</span></div>
+      <ul class="artdeco-entity-lockup__caption"><li>${j.location}</li></ul></div></li>`).join('') + '</ul>';
+  } else if ((m = p.match(/^\/jobs\/view\/(\d+)/))) {
+    const j = JOBS.find((x) => String(x.id) === m[1]);
+    main.innerHTML = `<div class="jobs-unified-top-card"><h1 class="job-details-jobs-unified-top-card__job-title">${j.title}</h1>
+      <div class="job-details-jobs-unified-top-card__company-name"><a href="https://www.linkedin.com/company/${j.slug}/life/">${j.company}</a></div>
+      <div class="job-details-jobs-unified-top-card__tertiary-description-container"><span>${j.location}</span> · 2 days ago</div></div>
+      <div id="job-details">We are hiring a ${j.title} to build our web platform. Apply via LinkedIn.</div>`;
+  } else if ((m = p.match(/^\/company\/([^/]+)\/about/))) {
+    const c = COMPANIES[m[1]];
+    main.innerHTML = `<h1>${c.name}</h1><section><h2>Overview</h2><p>${c.name} builds software.</p><dl>
+      ${c.website ? `<dt><h3>Website</h3></dt><dd><a href="https://www.linkedin.com/redir/redirect?url=${encodeURIComponent(c.website)}&urlhash=x">${c.website}</a></dd>` : ''}
+      ${c.phone ? `<dt><h3>Phone</h3></dt><dd><a href="tel:${c.phone}"><span>${c.phone}</span></a><span class="visually-hidden">Phone number is a link</span></dd>` : ''}
+      <dt><h3>Industry</h3></dt><dd>Software Development</dd>
+      <dt><h3>Headquarters</h3></dt><dd>${c.hq}</dd></dl></section>`;
+  } else if (p.startsWith('/search/results/content')) {
+    main.innerHTML = `
+      <div data-urn="urn:li:activity:7001"><div class="update-components-actor__container"><a class="update-components-actor__meta-link" href="https://www.linkedin.com/company/delta-digital/posts/"><span class="update-components-actor__title"><span aria-hidden="true">Delta Digital</span></span></a></div>
+        <div class="update-components-text">We're hiring! Looking for a Full Stack Developer for a new web app project. Send CVs to careers@deltadigital.pk</div></div>
+      <div data-urn="urn:li:activity:7002"><div class="update-components-actor__container"><a class="update-components-actor__meta-link" href="https://www.linkedin.com/in/someone/"><span class="update-components-actor__title"><span aria-hidden="true">Some One</span></span></a></div>
+        <div class="update-components-text">Happy to share I started a new position as Full Stack Developer!</div></div>
+      <div data-urn="urn:li:activity:7003"><div class="update-components-actor__container"><a class="update-components-actor__meta-link" href="https://www.linkedin.com/in/recruiter/"><span class="update-components-actor__title"><span aria-hidden="true">Rida Recruiter</span></span></a></div>
+        <div class="update-components-text">Need a freelance full stack developer for an outsourcing project. WhatsApp 0321 7654321</div></div>`;
+  } else if (p.startsWith('/search/results/companies')) {
+    main.innerHTML = '<ul><li><a href="https://www.linkedin.com/company/epsilon-co/">Epsilon Co</a><div>IT Services · Faisalabad</div></li></ul>';
+  }
+</script>
+</body>
+</html>

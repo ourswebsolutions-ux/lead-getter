@@ -6,7 +6,7 @@
 // block; it reports them and stops the Facebook part of the search.
 
 const crypto = require('node:crypto');
-const { parsePhoneNumberFromString, findPhoneNumbersInText } = require('libphonenumber-js/max');
+const { findPhones } = require('../database/phone');
 
 const FB_HOME = 'https://www.facebook.com/';
 const NAV_TIMEOUT = 45_000;
@@ -79,44 +79,19 @@ function cleanProfileUrl(href) {
 
 // --- phone numbers -----------------------------------------------------------
 
-// Arabic-Indic and Persian digits as 0-9, so "۰۳۰۰" is read like "0300".
-function asciiDigits(text) {
-  return String(text || '').replace(/[٠-٩۰-۹]/g, (d) => String((d.charCodeAt(0) & 0xf) % 10));
+// Numbers in a post: tel: and WhatsApp (wa.me) links, and numbers in the
+// text (any country; see findPhones). Local numbers ("0300 1234567") are
+// read with `country`; without it, with a country the post's own
+// international numbers show; otherwise they are kept as unverified (the
+// text as written), never guessed. Returns { phones: [{ phone, country,
+// raw, status }], stats }.
+function readPhones(text, links = [], country = null) {
+  return findPhones(text, { country, links: links.map((h) => unwrap(h) || h), max: MAX_PHONES_PER_POST });
 }
 
-// Valid numbers in a post: tel: and WhatsApp (wa.me) links, and numbers in
-// the text. Local numbers ("0300 1234567") are read with `country` (the
-// country of the user's other leads); without it only numbers written in
-// international form are kept. Numbers that are not valid for their country
-// are dropped, never guessed. Returns [{ phone (E.164), country, raw }].
+// The validated numbers only (E.164), as before: [{ phone, country, raw }].
 function extractPhones(text, links = [], country = null) {
-  const out = new Map();
-  const add = (parsed, raw) => {
-    if (parsed?.isValid() && !out.has(parsed.number)) out.set(parsed.number, { phone: parsed.number, country: parsed.country || null, raw: String(raw).trim() });
-  };
-  for (const href of links) {
-    const target = unwrap(href) || href;
-    const tel = /^tel:(.+)$/i.exec(target);
-    if (tel) {
-      const raw = decodeURIComponent(tel[1]);
-      add(parsePhoneNumberFromString(asciiDigits(raw), country || undefined), raw);
-      continue;
-    }
-    try {
-      const u = new URL(target);
-      const wa = /^(www\.)?wa\.me$/i.test(u.hostname) ? u.pathname.slice(1) : /(^|\.)whatsapp\.com$/i.test(u.hostname) ? u.searchParams.get('phone') : null;
-      // WhatsApp links always carry the number in international form.
-      const digits = String(wa || '').replace(/\D/g, '');
-      if (digits.length >= 8) add(parsePhoneNumberFromString(`+${digits}`), `+${digits}`);
-    } catch {}
-  }
-  // Numbers listed with commas ("0300 1234567, 0321 7654321") are read
-  // one by one; the matcher otherwise stops at the first.
-  const plain = asciiDigits(text).replace(/[,;|،]/g, '\n');
-  for (const m of findPhoneNumbersInText(plain, country ? { defaultCountry: country } : undefined)) {
-    add(m.number, plain.slice(m.startsAt, m.endsAt));
-  }
-  return [...out.values()].slice(0, MAX_PHONES_PER_POST);
+  return readPhones(text, links, country).phones.filter((p) => p.status === 'valid').map(({ phone, country: c, raw }) => ({ phone, country: c, raw }));
 }
 
 // --- page state ----------------------------------------------------------------
@@ -184,14 +159,32 @@ async function openSearch(page, query, { timeout = 25_000 } = {}) {
 function collectInPage() {
   const sel = '[role="article"], div[aria-posinset]';
   const posts = [...document.querySelectorAll(sel)].filter((el) => !el.parentElement?.closest(sel));
+  // The post's own text: its message block when Facebook marks one, else
+  // the post without its comments (comments are read separately).
+  const ownText = (el) => {
+    const message = el.querySelector('[data-ad-preview="message"], [data-ad-comet-preview="message"], [data-ad-rendering-role="story_message"]');
+    if (message) return message.innerText;
+    const copy = el.cloneNode(true);
+    for (const c of copy.querySelectorAll(sel)) c.remove();
+    document.body.appendChild(copy);
+    copy.style.cssText = 'position:absolute;left:-99999px;top:0;width:600px';
+    const t = copy.innerText;
+    copy.remove();
+    return t;
+  };
   return posts.map((el) => {
-    const message = el.querySelector('[data-ad-preview="message"], [data-ad-comet-preview="message"]');
     const author = el.querySelector('h2 a[href], h3 a[href], h4 a[href], strong a[href]');
+    const comments = [...el.querySelectorAll(sel)].slice(0, 15).map((c) => {
+      const who = c.querySelector('a[href] span, a[href]');
+      const link = c.querySelector('a[href]');
+      return { text: (c.innerText || '').slice(0, 1500), author: who ? who.textContent.trim().slice(0, 200) : '', authorUrl: link ? link.href : '' };
+    });
     return {
-      text: (message || el).innerText.slice(0, 4000),
+      text: ownText(el).slice(0, 4000),
       author: author ? author.innerText.trim().slice(0, 200) : '',
       authorUrl: author ? author.href : '',
       hrefs: [...el.querySelectorAll('a[href]')].map((a) => a.href).slice(0, 100),
+      comments,
     };
   });
 }
@@ -209,7 +202,44 @@ function parsePost(raw) {
   const links = hrefs.map((h) => unwrap(h) || h).filter((h) => /^tel:|wa\.me\/|whatsapp\.com\/send/i.test(h));
   const text = String(raw.text || '').trim();
   const key = url || (text ? `text:${crypto.createHash('sha1').update(`${pageUrl}\n${text}`).digest('hex')}` : '');
-  return { key, url, pageUrl, author: String(raw.author || '').trim(), text, links };
+  const comments = (raw.comments || [])
+    .map((c) => ({ text: String(c.text || '').trim(), author: String(c.author || '').trim(), pageUrl: cleanProfileUrl(c.authorUrl) }))
+    .filter((c) => c.text);
+  return { key, url, pageUrl, author: String(raw.author || '').trim(), text, links, comments };
+}
+
+// Facebook often leaves a post's own link (its date) empty until the
+// pointer is over it. For posts without one, the date links are hovered so
+// Facebook fills them in, the way it does for a person reading. Returns how
+// many were hovered.
+async function revealPostLinks(page, { max = 12 } = {}) {
+  const n = await page
+    .evaluate((limit) => {
+      const sel = '[role="article"], div[aria-posinset]';
+      const posts = [...document.querySelectorAll(sel)].filter((el) => !el.parentElement?.closest(sel));
+      const isPost = (h) => /\/posts\/|\/permalink|story_fbid|\/photo|\/videos\/|\/reel\//.test(h || '');
+      let i = 0;
+      for (const post of posts) {
+        if (i >= limit) break;
+        if ([...post.querySelectorAll('a[href]')].some((a) => isPost(a.getAttribute('href')))) continue;
+        const own = [...post.querySelectorAll('a')].filter((a) => !a.closest(sel + ' ' + sel) || a.closest(sel) === post);
+        const cand = own.find((a) => {
+          const h = a.getAttribute('href');
+          return (!h || h === '#' || h.startsWith('#')) && a.offsetParent !== null;
+        });
+        if (cand) cand.setAttribute('data-lf-reveal', String(i++));
+      }
+      return i;
+    }, max)
+    .catch(() => 0);
+  for (let i = 0; i < n; i++) {
+    const a = page.locator(`[data-lf-reveal="${i}"]`).first();
+    await a.hover({ timeout: 1500, force: true }).catch(() => {});
+    await a.focus({ timeout: 500 }).catch(() => {});
+  }
+  if (n) await page.waitForTimeout(300);
+  await page.evaluate(() => document.querySelectorAll('[data-lf-reveal]').forEach((a) => a.removeAttribute('data-lf-reveal'))).catch(() => {});
+  return n;
 }
 
 // Opens Facebook's "See more" on long posts so their full text (and number)
@@ -321,6 +351,8 @@ module.exports = {
   cleanPostUrl,
   cleanProfileUrl,
   extractPhones,
+  readPhones,
+  revealPostLinks,
   detectState,
   loggedIn,
   openSearch,

@@ -33,9 +33,14 @@ test('valid numbers are read from post text and WhatsApp/tel links; nothing is i
   assert.deepEqual(fb.extractPhones('Looking for suppliers, budget 25000, call me!', [], 'PK'), []);
   // Too short / not a real number for the country: dropped, never "fixed".
   assert.deepEqual(fb.extractPhones('Call 0300 12345', [], 'PK'), []);
-  // Without a known country a local number cannot be validated, so only
-  // numbers in international form are kept.
-  assert.deepEqual(fb.extractPhones('Call 0300 1234567 or +44 20 7946 0958', [], null).map((p) => p.phone), ['+442079460958']);
+  // Without a known country a local number cannot be validated: only the
+  // international one counts as valid; the local one is kept to check.
+  assert.deepEqual(fb.extractPhones('Call 0300 1234567 or +1 212 555 0123', [], null).map((p) => p.phone), ['+12125550123']);
+  const r = fb.readPhones('Call 0300 1234567', [], null);
+  assert.deepEqual(r.phones.map((p) => [p.status, p.phone]), [['unverified', '0300 1234567']]);
+  // A country the post's own international numbers show is used for its
+  // local numbers (here the UK, where 0300 numbers exist).
+  assert.deepEqual(fb.extractPhones('Call 0300 1234567 or +44 20 7946 0958', [], null).map((p) => p.phone).sort(), ['+442079460958', '+443001234567']);
   // At most 5 numbers from one post (a list of numbers is not one business).
   const many = Array.from({ length: 8 }, (_, i) => `0300 12345${60 + i}`).join(', ');
   assert.equal(fb.extractPhones(many, [], 'PK').length, 5);
@@ -86,10 +91,13 @@ test('Facebook DOM: posts, See more, scrolling, login and block pages', { skip: 
     author: 'Ali Garments Wholesale',
     text: 'Wholesale garments available in Lahore. Call 0300 1234567 for rates.',
     links: [],
+    comments: [],
   });
   assert.equal(posts[1].url, 'https://www.facebook.com/groups/778899/posts/2002');
   assert.equal(posts[1].pageUrl, 'https://www.facebook.com/profile.php?id=555');
   assert.deepEqual(fb.extractPhones(posts[1].text, posts[1].links, 'PK'), [], "a commenter's number is not the poster's");
+  // Visible comments are read separately (their numbers credited to the commenter).
+  assert.ok(posts[1].comments.length >= 1 && posts[1].comments.some((c) => /\d{4}/.test(c.text)), 'the comment and its number are read');
   assert.equal(posts[2].url, 'https://www.facebook.com/permalink.php?story_fbid=3003&id=444');
   assert.deepEqual(posts[2].links, ['https://wa.me/923217654321'], 'the See more text and its WhatsApp link were read');
   assert.equal(posts[3].url, '', 'a post without its own link');
@@ -160,7 +168,7 @@ test('a Facebook post with a number becomes a structured lead in the same table'
   assert.equal(s.listLeads({ search: 'Wholesale' }).length, 1);
   assert.equal(s.listLeads({ search: '1234567' })[0].source, 'facebook');
   assert.equal(s.listLeads({ campaign: 'unseen' }).length, 2);
-  assert.throws(() => s.saveFacebookLead(fbLead({ phone: '0300 1234567' })), /validated international/);
+  assert.throws(() => s.saveFacebookLead(fbLead({ phone: '0300 1234567' })), /Not a phone number/);
 });
 
 test('the same number from either source never makes a second lead; campaign history stays', () => {
@@ -244,7 +252,7 @@ test('upgrading a version 6 database keeps every lead and adds the Facebook fiel
   s.db.exec('DROP TABLE lead_sources; PRAGMA user_version = 6;');
   for (const c of ['fb_post_url', 'fb_page_url', 'contact_name', 'description']) s.db.exec(`ALTER TABLE businesses DROP COLUMN ${c}`);
   s.migrate();
-  assert.equal(s.db.prepare('PRAGMA user_version').get().user_version, 8);
+  assert.equal(s.db.prepare('PRAGMA user_version').get().user_version, 9);
   const l = s.listLeads()[0];
   assert.deepEqual([l.name, l.sources, l.fbPostUrl], ['Ali Garments', ['maps'], '']);
 });
@@ -299,6 +307,8 @@ function mockFacebook({ pagesOfPosts = [], mode = 'list', fail = null, gate = as
     calls,
     buildQueries: fb.buildQueries,
     extractPhones: fb.extractPhones,
+    readPhones: fb.readPhones,
+    searchUrl: fb.searchUrl,
     async openSearch(page, query) {
       on(page);
       calls.openSearch.push(query);
@@ -400,7 +410,7 @@ test('Facebook Lead Search ON: both sources start together and run side by side'
   assert.deepEqual(all.map((l) => l.phone).sort(), ['+923001111111', '+923001234567', '+923002222222', '+923217654321']);
   assert.ok(!all.some((l) => l.description === 'Need suppliers, budget 25000'), 'no lead without a number');
   assert.equal(on.leads.length, 4, 'each lead reached the table as it was found');
-  assert.deepEqual(stats.facebook, { posts: 3, numbers: 2, leads: 2, newLeads: 2 });
+  assert.deepEqual(stats.facebook, { posts: 3, detected: 2, numbers: 2, unverified: 0, leads: 2, newLeads: 2, duplicates: 0, failures: 0 });
   assert.equal(stats.newLeads, 4);
   assert.deepEqual(facebook.calls.openSearch, ['garment shops in Lahore', 'Garments Lahore']);
   // Each worker only touched its own pages.
