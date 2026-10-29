@@ -124,9 +124,9 @@ A business keeps the leads it has already become. One skipped earlier only becau
 
 | Plan | Price | Length |
 |---|---:|---|
-| Monthly | PKR 3,000 | 1 month |
-| 6 Months | PKR 10,000 | 6 months |
-| Lifetime | PKR 20,000 | never expires |
+| Monthly | PKR 4,500 | 1 month |
+| 6 Months | PKR 15,000 | 6 months |
+| Lifetime | PKR 50,000 | never expires |
 
 Searching (Google Maps, Facebook, LinkedIn and podcasts), CSV export, WhatsApp linking/checks/sending and live campaigns need an active plan. Without one, saved leads can still be viewed, filtered and deleted, and test campaigns still run.
 

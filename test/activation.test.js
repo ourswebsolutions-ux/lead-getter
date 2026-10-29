@@ -41,7 +41,7 @@ test('Activate: a random 6-digit code is emailed only to the administrator with 
   assert.equal(m.to, 'admin@example.com');
   assert.match(m.text, new RegExp(`Activation ID: ${act.activationId}`));
   assert.match(m.text, /Plan: 6 Months/);
-  assert.match(m.text, /Price: PKR 10,000/);
+  assert.match(m.text, /Price: PKR 15,000/);
   assert.match(lastCode(mail), /^\d{6}$/);
   // The code is not in the status the window gets, nor stored in plain text.
   const st = act.status();
@@ -291,7 +291,7 @@ test('real SMTP: delivered to the administrator only; refused login and unreacha
     const m = server.messages[0];
     assert.deepEqual(m.to, ['admin@example.com']);
     assert.match(m.text, /Plan: Lifetime/);
-    assert.match(m.text, /Price: PKR 20,000/);
+    assert.match(m.text, /Price: PKR 50,000/);
     assert.match(m.text, new RegExp(act.activationId));
     const code = m.text.match(/Activation code \(OTP\): (\d{6})/)[1];
     assert.equal((await act.verify(code, 'lifetime')).ok, true);

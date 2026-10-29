@@ -78,9 +78,9 @@ test('activation: Activate -> SMTP email -> code entry -> Verify & Activate, wit
   assert.match(id, /^LF-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}$/);
   const opts = await P().locator('.plan-opt').allInnerTexts();
   assert.equal(opts.length, 3);
-  assert.match(opts[0], /Monthly[\s\S]*PKR 3,000/);
-  assert.match(opts[1], /6 Months[\s\S]*PKR 10,000/);
-  assert.match(opts[2], /Lifetime[\s\S]*Never expires[\s\S]*PKR 20,000/);
+  assert.match(opts[0], /Monthly[\s\S]*PKR 4,500/);
+  assert.match(opts[1], /6 Months[\s\S]*PKR 15,000/);
+  assert.match(opts[2], /Lifetime[\s\S]*Never expires[\s\S]*PKR 50,000/);
   if (shots) await win.screenshot({ path: path.join(shots, 'activation-choose.png') });
 
   // ---- Email failure: the user is told; no code entry, nothing to enter.
@@ -96,12 +96,12 @@ test('activation: Activate -> SMTP email -> code entry -> Verify & Activate, wit
 
   // ---- Activate: the code is emailed to the administrator only, with ID, plan and price.
   await P().getByRole('button', { name: 'Activate Monthly' }).click();
-  await P().getByRole('heading', { name: /Request sent: Monthly \(PKR 3,000\)/ }).waitFor({ timeout: 30_000 });
+  await P().getByRole('heading', { name: /Request sent: Monthly \(PKR 4,500\)/ }).waitFor({ timeout: 30_000 });
   const m = smtp.messages.at(-1);
   assert.deepEqual(m.to, ['admin@example.com']);
   assert.match(m.text, new RegExp(`Activation ID: ${id}`));
   assert.match(m.text, /Plan: Monthly/);
-  assert.match(m.text, /Price: PKR 3,000/);
+  assert.match(m.text, /Price: PKR 4,500/);
   const codeA = await codeFor(id);
   assert.match(codeA, /^\d{6}$/);
   // The window shows how to get the code, never the code.
@@ -119,7 +119,7 @@ test('activation: Activate -> SMTP email -> code entry -> Verify & Activate, wit
   assert.match(opened[0], /^https:\/\/wa\.me\/923245237429\?text=/);
   const msg = decodeURIComponent(opened[0].split('text=')[1]);
   assert.ok(msg.includes(id));
-  assert.match(msg, /Plan: Monthly \(PKR 3,000\)/);
+  assert.match(msg, /Plan: Monthly \(PKR 4,500\)/);
   assert.equal(opened[1], 'tel:+923245237429');
 
   // ---- A wrong code: refused, tries counted.
@@ -143,9 +143,9 @@ test('activation: Activate -> SMTP email -> code entry -> Verify & Activate, wit
   await win.locator('.plan-pill').click();
   await P().locator('.plan-opt', { hasText: '6 Months' }).click();
   await P().getByRole('button', { name: 'Activate 6 Months' }).click();
-  await P().getByRole('heading', { name: /Request sent: 6 Months \(PKR 10,000\)/ }).waitFor({ timeout: 30_000 });
+  await P().getByRole('heading', { name: /Request sent: 6 Months \(PKR 15,000\)/ }).waitFor({ timeout: 30_000 });
   const codeB = await codeFor(id);
-  assert.match(smtp.messages.at(-1).text, /Plan: 6 Months[\s\S]*Price: PKR 10,000/);
+  assert.match(smtp.messages.at(-1).text, /Plan: 6 Months[\s\S]*Price: PKR 15,000/);
   await app.close();
   ({ app, win } = await launch(env));
   win.on('pageerror', (e) => errors.push(e.message));

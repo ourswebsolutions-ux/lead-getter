@@ -35,9 +35,9 @@ const { execFileSync } = require('node:child_process');
 const { fallbackCode, newReference, validPattern } = require('./fallback-code');
 
 const PLANS = [
-  { id: 'monthly', name: 'Monthly', priceLabel: 'PKR 3,000', months: 1 },
-  { id: 'six_months', name: '6 Months', priceLabel: 'PKR 10,000', months: 6 },
-  { id: 'lifetime', name: 'Lifetime', priceLabel: 'PKR 20,000', months: null },
+  { id: 'monthly', name: 'Monthly', priceLabel: 'PKR 4,500', months: 1 },
+  { id: 'six_months', name: '6 Months', priceLabel: 'PKR 15,000', months: 6 },
+  { id: 'lifetime', name: 'Lifetime', priceLabel: 'PKR 50,000', months: null },
 ];
 const DAY = 86_400_000;
 const CODE_TTL = 10 * 60 * 1000;
