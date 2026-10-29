@@ -5,8 +5,8 @@ import AgentCard from './AgentCard.jsx';
 import Celebration from './Celebration.jsx';
 import CategoryManager from './CategoryManager.jsx';
 import WhatsAppPanel from './WhatsAppPanel.jsx';
-import ChatsView from './ChatsView.jsx';
 import OutreachView from './OutreachView.jsx';
+import PodcastsView from './PodcastsView.jsx';
 import Composer from './Composer.jsx';
 import { currentTheme, setTheme } from './theme.js';
 import Activation, { planNeeded, planPill, statusLine } from './Activation.jsx';
@@ -198,14 +198,22 @@ const LeadRow = memo(function LeadRow({ lead: l, fresh, selected, pastView, onTo
       </td>
       <td className="name" dir="auto">
         {l.name}
-        {(l.email || l.jobTitle) && (
+        {(l.email || l.jobTitle || l.podcastHost) && (
           <span className="name-extra">
             {l.email && (
-              <a href={`mailto:${l.email}`} title="Business email">
+              <a
+                href={`mailto:${l.email}`}
+                title="Business email"
+                onClick={(e) => {
+                  e.preventDefault(); // the window never navigates: the mail app opens
+                  api.openPodcastLink(`mailto:${l.email}`);
+                }}
+              >
                 {l.email}
               </a>
             )}
             {l.jobTitle && <span title="LinkedIn job">{l.jobTitle}</span>}
+            {l.podcastHost && <span title="Podcast host">{l.podcastHost}</span>}
           </span>
         )}
       </td>
@@ -239,6 +247,17 @@ const LeadRow = memo(function LeadRow({ lead: l, fresh, selected, pastView, onTo
             onClick={() => api.openListing(l.jobUrl || l.linkedinUrl || l.linkedinPostUrl)}
           >
             LinkedIn
+          </button>
+        )}
+        {(l.sources || []).includes('podcast') && (
+          <button
+            type="button"
+            className="chip src-podcast"
+            title={`Podcast${l.podcastHost ? ` by ${l.podcastHost}` : ''}${l.rssUrl ? `\nRSS: ${l.rssUrl}` : ''}${l.discovery ? `\n${l.discovery}` : ''}`}
+            aria-label={`Open ${l.name} on Apple Podcasts`}
+            onClick={() => api.openListing(l.podcastUrl)}
+          >
+            Podcast
           </button>
         )}
       </td>
@@ -447,7 +466,7 @@ export default function App({ onLock }) {
   const [siteView, setSiteView] = useState('all'); // table: all | without | with
   const [waView, setWaView] = useState('all'); // all | available | unavailable (WhatsApp's own check)
   const [campaignView, setCampaignView] = useState('all'); // all | seen | unseen
-  const [sourceView, setSourceView] = useState('all'); // all | maps | facebook | linkedin
+  const [sourceView, setSourceView] = useState('all'); // all | maps | facebook | linkedin | podcast
   const [mapsOn, setMapsOn] = useState(true); // Google Maps search (stored in the app)
   const [facebookOn, setFacebookOn] = useState(false); // Facebook Lead Search (stored in the app)
   const [liKeyword, setLiKeyword] = useState(() => {
@@ -469,7 +488,7 @@ export default function App({ onLock }) {
   // keeps each one's place (scroll, open chat, unsaved templates).
   const [workspace, setWorkspaceState] = useState(() => {
     try {
-      return ['leads', 'chats', 'outreach'].includes(localStorage.getItem('workspace')) ? localStorage.getItem('workspace') : 'leads';
+      return ['leads', 'podcasts', 'outreach'].includes(localStorage.getItem('workspace')) ? localStorage.getItem('workspace') : 'leads';
     } catch {
       return 'leads';
     }
@@ -814,7 +833,7 @@ export default function App({ onLock }) {
         <nav className="segmented workspace-switch" aria-label="Workspace">
           {[
             ['leads', 'Leads', 'inbox'],
-            ['chats', 'Chats', 'chat'],
+            ['podcasts', 'Podcasts', 'mic'],
             ['outreach', 'Outreach', 'send'],
           ].map(([id, label, icon]) => (
             <button key={id} type="button" className={workspace === id ? 'on' : ''} aria-pressed={workspace === id} onClick={() => setWorkspace(id)}>
@@ -840,7 +859,7 @@ export default function App({ onLock }) {
         <LockMenu onLock={onLock} onChangePin={() => setChangePin(true)} />
       </header>
 
-      {visited.has('chats') && <ChatsView wa={wa} notify={notify} hidden={workspace !== 'chats'} />}
+      {visited.has('podcasts') && <PodcastsView notify={notify} hidden={workspace !== 'podcasts'} categories={catData.categories} />}
       {visited.has('outreach') && <OutreachView wa={wa} notify={notify} hidden={workspace !== 'outreach'} />}
       <main className="content" hidden={workspace !== 'leads'}>
         <section className="panel search-panel">
@@ -1131,6 +1150,7 @@ export default function App({ onLock }) {
                 <option value="maps">Google Maps</option>
                 <option value="facebook">Facebook</option>
                 <option value="linkedin">LinkedIn</option>
+                <option value="podcast">Podcasts</option>
               </select>
             </label>
             <label className="table-search">

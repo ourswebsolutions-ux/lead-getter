@@ -127,6 +127,7 @@ export default function Activation({ status: st, notice, onClose, notify }) {
         'Hello, I would like to activate Lead Finder.',
         `Activation ID: ${st.activationId}`,
         `Plan: ${planInfo.name} (${planInfo.priceLabel})`,
+        st.pending?.reference && st.pending.plan === plan ? `Reference: ${st.pending.reference}` : null,
         st.state === 'active' && st.expiresAt ? `My current plan ends on ${st.expiresAt.slice(0, 10)}.` : null,
       ].filter(Boolean).join('\n')
     : '';
@@ -267,12 +268,31 @@ export default function Activation({ status: st, notice, onClose, notify }) {
           {stage === 'code' && (
             <form className="act-form" noValidate onSubmit={verify}>
               <div className="act-sent" role="status">
-                <h3>
-                  Request sent: {pending.planName} ({planInfo?.priceLabel})
-                </h3>
-                <p>
-                  Contact us on <b>WhatsApp {st.contact?.phone}</b> or call to pay and receive your 6-digit code. Send your Activation ID <span className="mono">{st.activationId}</span> and plan.
-                </p>
+                {pending.reference ? (
+                  <>
+                    <h3>
+                      Contact us to activate: {pending.planName} ({planInfo?.priceLabel})
+                    </h3>
+                    <p>
+                      Your request could not be sent automatically. Contact us on <b>WhatsApp {st.contact?.phone}</b> or call to pay and receive your 6-digit code. Send your Activation ID <span className="mono">{st.activationId}</span>, plan and this reference:
+                    </p>
+                    <p className="act-id">
+                      <span className="mono" data-testid="activation-reference">{pending.reference}</span>
+                      <button type="button" className="icon-btn" aria-label="Copy reference" title="Copy" onClick={() => copy(pending.reference, 'Reference', notify)}>
+                        <Icon name="copy" size={13} />
+                      </button>
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <h3>
+                      Request sent: {pending.planName} ({planInfo?.priceLabel})
+                    </h3>
+                    <p>
+                      Contact us on <b>WhatsApp {st.contact?.phone}</b> or call to pay and receive your 6-digit code. Send your Activation ID <span className="mono">{st.activationId}</span> and plan.
+                    </p>
+                  </>
+                )}
                 <p className={`act-timer ${codeExpired ? 'expired' : ''}`}>
                   {codeExpired ? 'This code has expired. Send a new code below.' : `The code expires at ${fmtTime(pending.expiresAt)} (${minsLeft} min) · ${pending.triesLeft} ${pending.triesLeft === 1 ? "try" : "tries"} left`}
                 </p>
@@ -285,8 +305,8 @@ export default function Activation({ status: st, notice, onClose, notify }) {
                   <button type="button" className="btn btn-sm" onClick={() => contact('call')}>
                     Call
                   </button>
-                  <button type="button" className="btn btn-sm btn-ghost" onClick={() => copy(message, 'Activation ID and plan', notify)}>
-                    <Icon name="copy" size={13} /> Copy ID & plan
+                  <button type="button" className="btn btn-sm btn-ghost" onClick={() => copy(message, pending.reference ? 'Activation ID, plan and reference' : 'Activation ID and plan', notify)}>
+                    <Icon name="copy" size={13} /> {pending.reference ? 'Copy ID, plan & reference' : 'Copy ID & plan'}
                   </button>
                 </div>
               )}

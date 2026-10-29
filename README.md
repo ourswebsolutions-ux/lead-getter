@@ -128,7 +128,7 @@ A business keeps the leads it has already become. One skipped earlier only becau
 | 6 Months | PKR 10,000 | 6 months |
 | Lifetime | PKR 20,000 | never expires |
 
-Searching (Google Maps and Facebook), CSV export, WhatsApp linking/checks/sending, chats and live campaigns need an active plan. Without one, saved leads can still be viewed, filtered and deleted, and test campaigns still run.
+Searching (Google Maps, Facebook, LinkedIn and podcasts), CSV export, WhatsApp linking/checks/sending and live campaigns need an active plan. Without one, saved leads can still be viewed, filtered and deleted, and test campaigns still run.
 
 **Activating:**
 1. The customer clicks **Activate** at the top, chooses a plan and clicks **Activate**.
@@ -148,6 +148,8 @@ Searching (Google Maps and Facebook), CSV export, WhatsApp linking/checks/sendin
 - Turning the computer's clock back changes nothing. When online, the app also takes the time from an HTTPS response.
 
 **Setup:** see [tools/activation](tools/activation/README.md). The secret, administrator email and SMTP login are **never committed**: local builds read the git-ignored `src/main/activation-secret.json`, and GitHub release builds read the `ACTIVATION_CONFIG` repository secret. A release fails without them.
+
+If the activation email cannot be sent (the email server is down or refuses), the app does not fail: it shows a **reference** to send us with the Activation ID and plan, and we give the code for that request after payment (administrator: tools/activation/README.md). That code works only for that request, once, for 30 minutes, with 3 tries; a failed email never activates anything by itself, and every plan check still applies.
 
 ### Limitations (no server)
 
@@ -260,7 +262,7 @@ For example: *"phone: found (Google Maps); email: not published (checked: Linked
 - **Saving:** a company is kept even when a phone or email couldn't be found: it still has a website, or the job or post itself. Contact details are never made up. Each lead records the job title, job URL, post URL, LinkedIn company URL, website, email and location.
 - **One lead per business:** a company already saved (same phone, LinkedIn company page, website or email), from any source, gets this source added instead of a second lead. A LinkedIn lead later found on Google Maps becomes that listing. Jobs and posts already read aren't read again.
 - **Limits:** every job results page (a safety stop at 100 pages), up to 60 posts, a few seconds between LinkedIn pages, website timeouts with one retry, and Stop at any point (what was saved stays). A long search can take hours: each company takes about 10 to 30 seconds.
-- **Problems:** a login page, security check or limit message stops the LinkedIn pages only. Lead Finder never logs in or works around them. Companies already found are still completed from their websites and Google Maps, and the status says what happened. Without a LinkedIn login, the public job pages may still work, but company pages and post search usually need one.
+- **Problems:** a security check or limit message stops the LinkedIn pages; a login page stops the pages that need a login (company pages, posts, company search) but **not LinkedIn's public job results**, which go on page after page until there are no more. Lead Finder never logs in or works around them. Companies are still completed from Google Maps and their websites, and each lead's status lists what was checked and what could not be (for example "email: not found (checked: Google Maps, website); could not check: LinkedIn page (login)").
 - **Leads table:** a *LinkedIn* source chip (opens the job, company or post), the business email and job title under the name, a *LinkedIn* option in the Source filter, and *Email, Website, LinkedIn Company URL, LinkedIn Job URL, LinkedIn Post URL, Job Title, Discovery* in the CSV export. WhatsApp campaigns use only leads with a validated phone, as before.
 - **LinkedIn's terms:** the [LinkedIn User Agreement](https://www.linkedin.com/legal/user-agreement) prohibits automated access and scraping. Lead Finder reads only what your own account is shown, slowly and in small numbers, but LinkedIn may still restrict accounts that use automation. You're responsible for how you use it.
 
@@ -276,6 +278,52 @@ For example: *"phone: found (Google Maps); email: not published (checked: Linked
 | Permanently closed | Excluded |
 
 Lead Finder never fetches a business's website itself, so a site that is temporarily down can't make a business look website-less. Directory and listing sites (Zameen, Yelp, OLX, Google listings, and so on) never count as the business's own website. Matching domains to names is a heuristic that errs toward excluding a business.
+
+## Podcasts
+
+The **Podcasts** tab finds podcasts and their public contact emails, and keeps every podcast found as a lead. Type a topic or a podcast name (or paste a podcast link or website) and press **Search**. **Stop** ends a search.
+
+### Platforms
+
+Each platform has its own switch; any one, several or all can be on (at least one stays on).
+
+| Platform | How | Needs |
+|---|---|---|
+| Apple Podcasts | Apple's public search and lookup API (results for the exact keyword; feeds listed) | nothing |
+| YouTube | Data API v3 (playlists YouTube marks as podcasts; other playlists are counted as rejected) | a free API key (Settings) |
+| Spotify | **opens Spotify's search** (`open.spotify.com/search/<keyword>`) in your Chrome, in a window of its own | nothing; Chrome may ask you to Allow |
+| Amazon Music | **opens Amazon Music's search** (`music.amazon.com/search/<keyword>?filter=IsLibrary%7Cfalse`) in your Chrome, in a window of its own | nothing; Chrome may ask you to Allow |
+
+**Spotify and Amazon Music are never read automatically.** Spotify offers no permitted way to read its search, and Amazon's Conditions of Use do not allow robots or data extraction, so Lead Finder only opens their search pages for you. When you open a podcast there, only that page's address is used:
+
+- an **Amazon Music podcast page** you open (its address ends with the podcast's name) is added, and its RSS feed is found by exact title on Apple Podcasts;
+- a **podcast website** you open from the Spotify or Amazon Music window is added and read like a pasted website.
+
+Both are added to this search, under its keyword. Nothing else from those sites is read, counted or saved. (Spotify's "/search/<keyword>/podcasts" address is not a results page; it shows "No Podcasts found". Some Spotify accounts and countries show no podcasts in Spotify's search at all.)
+
+**Pasted links:** Apple Podcasts; YouTube channels and playlists (channels need no key); Amazon Music podcast links that end with the podcast's name; Spotify show links (opened in Chrome); and any podcast website (its RSS feed link and contact pages).
+
+**Websites are read only where they permit it** (robots.txt: rules for `LeadFinder`, else for every reader). A page a site disallows is not fetched, and the lead says the site could not be checked.
+
+### Every podcast is saved
+
+Each podcast is saved the moment it is found, with **email discovery pending**, then updated when discovery finishes, so a stopped or failed search loses nothing, and podcasts without an email are kept too. One lead per podcast (same Apple id, RSS feed or platform link); a deleted podcast is not added back.
+
+Every search is recorded with its keyword, platforms, start and end, and every podcast it found (platform, source address, time, and whether it was **new** or **already saved**). A podcast found by several searches carries all their keywords. The search shows its real counts as it runs: **new**, **duplicate** (already saved, or the same podcast on two platforms), **saved**, and **rejected** (results that are not podcasts, or deleted before). A platform with no results says why.
+
+### Email discovery
+
+For each podcast, automatically: its RSS feed (from Apple, a website's feed link, or by exact title on Apple for YouTube and Amazon Music); emails in the feed's owner fields, show description, every episode's notes and the platform's own description; a YouTube channel's video feed; then the podcast's website (Contact, About, Guest booking pages) and public link-in-bio pages. The best email comes first; one named in a single episode (often a guest's) is listed last; hosting-platform and Apple private-relay addresses are kept but never counted as the podcast's own. Nothing is guessed.
+
+Email status: **Email found**, **No public email** (everything that could be checked was), **Platform address only**, **Could not check** (a feed or site failed or refused), **Discovery pending**.
+
+### The podcast library
+
+All podcast leads, as **cards** (cover art, name, publisher, description, platform and keyword badges, email status, email with copy, website, details) or a **table**. Filters: **All leads**, **Email found**, **No email**, **Pending** (with their counts), a search (any earlier search, or all), a platform, and text; sort by newest, oldest, name or email status; pages of 24 (cards) or 25 (table). **Retry** looks for a lead's email again (or for every lead shown without one), keeping any email found before.
+
+**Managing podcast leads:** tick podcasts (cards or table rows), the page, or **Select all N matching** (every lead the current filters match, across pages); the selection stays while you change pages or filters, and the bar says how many are selected and how many are not on the page. **Export selected** / **Export all** write a CSV (the same columns as the Leads export; commas, quotes, line breaks and non-Latin text are escaped). **Delete selected** / **Delete all** ask first (Cancel deletes nothing) and only ever remove podcast leads; Google Maps, Facebook and LinkedIn leads are not affected. Deleted podcasts are not added again by later searches.
+
+**Settings** sets the results per platform (25, 50, 100 or 200; default 50) and holds the YouTube key (checked with YouTube, stored encrypted with the OS keychain). The CSV export includes each lead's search keyword and email status.
 
 ## Categories, Today and Past leads
 
@@ -344,24 +392,9 @@ Click a **green** number. The composer shows the lead, the number, and when you 
 - The main process checks again before sending that the lead exists, the number is confirmed on WhatsApp, WhatsApp is connected, and the text is 1–4000 characters. It also enforces at least 8 seconds between messages.
 - "Sent" appears only when WhatsApp returns a message ID; otherwise the composer shows WhatsApp's error and keeps your text. Every attempt is recorded in `whatsapp_messages` (lead, number, text, WhatsApp message ID, result).
 
-### Chats
+### Workspaces and incoming messages
 
-The **Leads | Chats | Outreach** switch in the header changes the workspace. Each view keeps its place when you switch: filters, the open chat, unsaved templates.
-
-**Chats** is a WhatsApp Web-style view of your linked account.
-
-- **Chat list:** contact name, number, the lead it matches (when the number is a lead), the last message, its time, unread count and profile picture. Avatars appear only when the contact shares one; otherwise initials are shown.
-- **Conversation:** messages in order, with day separators and delivery ticks (sending, sent, delivered, read, not sent) as reported by WhatsApp.
-- **Sending:** Enter sends and Shift+Enter starts a new line. Opening a chat sends read receipts, as WhatsApp Web does.
-- **Search:** by name, number or message text.
-
-What WhatsApp makes available, and what it doesn't:
-
-- **New messages** (incoming, and sent from this app or your phone) arrive live while WhatsApp is connected.
-- **History:** WhatsApp sends a device its **recent chats only when it is linked**. A device linked before this version needs to be linked again (WhatsApp menu → Unlink device → Link WhatsApp) to load past chats. **Older messages** of a chat can be requested with *Older messages*; whether and how many arrive is up to WhatsApp and your phone.
-- **Groups**, channels and status updates aren't shown. Photos, voice notes and documents show as a label with their caption; media files aren't downloaded.
-- **Privacy IDs:** some contacts appear under a WhatsApp privacy ID instead of a number. When WhatsApp shares the number, the chat is filed under it; otherwise the number shows as *not shared*.
-- **Storage:** message text is stored **encrypted** with the OS keychain in the lead database (`wa_chats`, `wa_chat_messages`).
+The **Leads | Podcasts | Outreach** switch in the header changes the workspace; each view keeps its place when you switch. There is no chat view: incoming WhatsApp messages are still received in the background, so outreach knows a contact's name and stops a sequence when the contact replies. Message text is stored **encrypted** with the OS keychain (`wa_chats`, `wa_chat_messages`).
 
 ### Real-estate outreach
 

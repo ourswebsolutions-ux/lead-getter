@@ -138,9 +138,9 @@ test('categories, today/past views, filters, exports and deletion through the re
   await win.getByRole('button', { name: /^Export CSV/ }).click();
   await win.locator('.notice.ok').first().waitFor();
   let csv = fs.readFileSync(out1, 'utf8').slice(1).trim().split('\r\n');
-  assert.equal(csv[0], 'Business Name,Phone,Phone Status,Address,Google Maps URL,Website Status,WhatsApp,Category,Date Discovered,Source,Facebook Post URL,Facebook Page URL,Contact Name,Post Text,Email,Website,LinkedIn Company URL,LinkedIn Job URL,LinkedIn Post URL,Job Title,Discovery');
+  assert.equal(csv[0], 'Business Name,Phone,Phone Status,Address,Google Maps URL,Website Status,WhatsApp,Category,Date Discovered,Source,Facebook Post URL,Facebook Page URL,Contact Name,Post Text,Email,Website,LinkedIn Company URL,LinkedIn Job URL,LinkedIn Post URL,Job Title,Discovery,Podcast Host,Apple Podcasts URL,RSS Feed URL,All Emails,Podcast Platforms,Search Keyword,Email Status');
   assert.equal(csv.length, 2);
-  assert.match(csv[1], new RegExp(`^Past Soft C,.*,Software House,${localDate(daysAgo(1))} 12:00,Google Maps,,,,,,,,,,,$`));
+  assert.match(csv[1], new RegExp(`^Past Soft C,.*,Software House,${localDate(daysAgo(1))} 12:00,Google Maps,,,,,,,,,,,,,,,,,,$`));
 
   // Date range (all categories) covering 3 days ago .. yesterday
   await catFilter.selectOption('all');

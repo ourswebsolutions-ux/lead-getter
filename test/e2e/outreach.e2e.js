@@ -1,8 +1,7 @@
 'use strict';
-// WhatsApp chats and real-estate outreach in the real Electron app, with a
-// scripted WhatsApp (test/e2e/fake-baileys.js): chat list and history, live
-// messages, replies and receipts, the outreach campaign in test and live
-// mode, reply handling, and the schedule surviving a restart.
+// Real-estate outreach in the real Electron app, with a scripted WhatsApp
+// (test/e2e/fake-baileys.js): no Chats tab, the outreach campaign in test
+// and live mode, reply handling, and the schedule surviving a restart.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -38,7 +37,7 @@ async function launch(env) {
   return { app, win };
 }
 
-test('WhatsApp chats and outreach: history, live messages, campaign, replies, restart', async (t) => {
+test('WhatsApp outreach: no Chats tab, campaign, replies, restart', async (t) => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lf-outreach-e2e-'));
   const userData = path.join(tmp, 'app');
   fs.mkdirSync(userData);
@@ -69,37 +68,10 @@ test('WhatsApp chats and outreach: history, live messages, campaign, replies, re
   const ws = win.getByRole('navigation', { name: 'Workspace' });
   assert.equal(await ws.getByRole('button', { name: 'Leads' }).getAttribute('aria-pressed'), 'true');
   await win.getByRole('tab', { name: 'Past leads' }).click();
-  await ws.getByRole('button', { name: 'Chats' }).click();
-
-  // --- Chats: the synced history is listed, unread, newest message first.
-  const list = win.getByRole('listbox', { name: 'Chats' });
-  const hist = list.getByRole('option').filter({ hasText: 'History Contact' });
-  await hist.waitFor({ timeout: 20_000 });
-  assert.match(await hist.innerText(), /Theek hai/);
-  assert.match(await hist.innerText(), /\b1\b/, 'unread badge');
-  await hist.getByRole('button').click();
-  const pane = win.locator('.chat-pane');
-  await pane.getByRole('heading', { name: 'History Contact' }).waitFor();
-  const bubbles = pane.locator('.bubble .bubble-text');
-  await win.waitForFunction(() => document.querySelectorAll('.chat-pane .bubble').length === 3);
-  assert.deepEqual(await bubbles.allInnerTexts(), ['Plot ka rate kya hai?', 'Kal batata hoon.', 'Theek hai']);
-  assert.equal(await pane.locator('.bubble.mine .ticks-read').count(), 1, 'read status from WhatsApp');
-  await win.waitForFunction(() => !document.querySelector('.chat-item.on .unread-badge'));
-  // Reply from the composer.
-  await pane.getByLabel('Message').fill('Rate 1.2 crore hai.');
-  await pane.getByRole('button', { name: 'Send' }).click();
-  await win.waitForFunction(() => [...document.querySelectorAll('.chat-pane .bubble.mine .bubble-text')].some((b) => b.textContent === 'Rate 1.2 crore hai.'));
-  assert.deepEqual(sends(log).map((s) => [s.jid, s.text]), [['923005556667@s.whatsapp.net', 'Rate 1.2 crore hai.']]);
-  // A receipt for it turns into double ticks.
-  const sentId = sends(log)[0].id;
-  await app.evaluate((_e, id) => globalThis.__fakeWA.receipt('923005556667@s.whatsapp.net', id, 3), sentId);
-  await win.waitForFunction(() => document.querySelectorAll('.chat-pane .bubble.mine .ticks-delivered').length === 1);
-  // A new incoming message from someone else appears in the list, unread.
+  // --- No Chats tab; incoming WhatsApp messages still reach outreach (the
+  // contact's name, replies).
+  assert.equal(await ws.getByRole('button', { name: 'Chats' }).count(), 0);
   await app.evaluate(() => globalThis.__fakeWA.incoming('923001234567', 'Assalam o alaikum', 'Zahid'));
-  const zahidChat = list.getByRole('option').filter({ hasText: 'Zahid' });
-  await zahidChat.waitFor();
-  assert.match(await zahidChat.innerText(), /Lead|Zahid Properties/, 'matched to the lead');
-  if (shots) await win.screenshot({ path: path.join(shots, 'chats.png') });
 
   // --- Back to Leads: still on "Past".
   await ws.getByRole('button', { name: 'Leads' }).click();
@@ -151,7 +123,7 @@ test('WhatsApp chats and outreach: history, live messages, campaign, replies, re
   const simGap = (sim[0].sentAt - sim[1].sentAt) / 1000;
   assert.ok(simGap >= 55 && simGap <= 100, `test run: message 2 ${simGap}s after message 1`);
   assert.equal(sim[0].phone, sim[1].phone, 'the same lead');
-  assert.equal(sends(log).length, 1, 'nothing reached WhatsApp (only the manual chat reply)');
+  assert.equal(sends(log).length, 0, 'nothing reached WhatsApp');
   // OFF: scheduling stops.
   await sw().click();
   await win.waitForFunction(() => document.querySelector('.campaign-list [role=switch]')?.getAttribute('aria-checked') === 'false');
@@ -179,7 +151,7 @@ test('WhatsApp chats and outreach: history, live messages, campaign, replies, re
   await ack.getByRole('checkbox').check();
   await ack.getByRole('button', { name: 'Start sending' }).click();
   await win.waitForFunction(() => document.querySelectorAll('.campaign-sent tbody tr').length === 1, null, { timeout: 15_000 });
-  const live = sends(log).slice(1);
+  const live = sends(log);
   assert.equal(live.length, 1, 'exactly one campaign message');
   assert.deepEqual([live[0].jid, live[0].text], ['923001234567@s.whatsapp.net', 'Assalam-o-Alaikum Zahid bhai.']);
   const facts = await out.locator('.campaign-facts').innerText();
@@ -226,7 +198,7 @@ test('WhatsApp chats and outreach: history, live messages, campaign, replies, re
   const nextDue = replyState.nextDueAt;
   const gap = (nextDue - live[0].at) / 60_000;
   assert.ok(gap >= 45 && gap <= 60.1, `next contact in ${gap.toFixed(1)} minutes: ${JSON.stringify({ status: replyState.status, waiting: replyState.waiting, current: replyState.current, nextDueAt: nextDue, live0: live[0].at, contacts: replyState.contacts.map((c) => [c.phone, c.state, c.stage, c.lastSentAt]), sends: replyState.sends.map((x) => [x.phone, x.stage, x.status, x.sentAt]) })}`);
-  assert.equal(sends(log).length, 2, 'no further message to Zahid');
+  assert.equal(sends(log).length, 1, 'no further message to Zahid');
 
   // --- Restart: still running, same count and next time; nothing re-sent.
   await app.close();
@@ -239,7 +211,7 @@ test('WhatsApp chats and outreach: history, live messages, campaign, replies, re
   assert.equal(after.nextDueAt, nextDue, 'the next send time survived the restart');
   assert.equal(after.today.recipients, 1);
   await new Promise((r) => setTimeout(r, 5000)); // a few scheduler ticks
-  assert.equal(sends(log).length, 2, 'nothing sent again after the restart');
+  assert.equal(sends(log).length, 1, 'nothing sent again after the restart');
   assert.ok(!sends(log).some((x) => x.jid === '923007654321@s.whatsapp.net'), 'the excluded contact was never messaged');
 
   // --- Delete the campaign: Zahid stays Seen and never re-enters a queue,
@@ -261,6 +233,6 @@ test('WhatsApp chats and outreach: history, live messages, campaign, replies, re
   assert.match(await out2.getByRole('table', { name: 'Previously contacted' }).innerText(), /Zahid Properties[\s\S]*\+923001234567/);
   await row2().getByRole('switch').click();
   if (shots) await win.screenshot({ path: path.join(shots, 'campaigns.png') });
-  assert.equal(sends(log).length, 2, 'still nothing more sent');
+  assert.equal(sends(log).length, 1, 'still nothing more sent');
   assert.deepEqual(errors, []);
 });

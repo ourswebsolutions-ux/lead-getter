@@ -153,6 +153,85 @@ class LeadStore {
     this.migrateV7();
     this.migrateV8();
     this.migrateV9();
+    this.migrateV10();
+    this.migrateV11();
+  }
+
+  // Version 11: podcast searches and email status. Every podcast found is
+  // saved at once with its email discovery pending; each search is recorded
+  // (keyword, platforms, when, counts) with every podcast it found (platform,
+  // source address, time, new or already saved). Existing podcast leads get
+  // their status from what was saved.
+  migrateV11() {
+    if (this.db.prepare('PRAGMA user_version').get().user_version >= 11) return;
+    this.transaction(() => {
+      const has = (col) => this.db.prepare("SELECT 1 FROM pragma_table_info('businesses') WHERE name = ?").get(col);
+      for (const col of ['email_status', 'artwork_url']) if (!has(col)) this.db.exec(`ALTER TABLE businesses ADD COLUMN ${col} TEXT`);
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS searches (
+          id          INTEGER PRIMARY KEY,
+          kind        TEXT NOT NULL,
+          keyword     TEXT NOT NULL,
+          platforms   TEXT NOT NULL,
+          started_at  TEXT NOT NULL,
+          finished_at TEXT,
+          state       TEXT NOT NULL DEFAULT 'running',
+          stats       TEXT
+        );
+        CREATE TABLE IF NOT EXISTS search_hits (
+          search_id   INTEGER NOT NULL REFERENCES searches(id) ON DELETE CASCADE,
+          business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+          platform    TEXT NOT NULL,
+          source_url  TEXT,
+          found_at    TEXT NOT NULL,
+          outcome     TEXT NOT NULL,
+          rank        INTEGER,
+          PRIMARY KEY (search_id, business_id)
+        );
+        CREATE INDEX IF NOT EXISTS search_hits_business ON search_hits (business_id);
+        UPDATE businesses SET email_status = CASE
+            WHEN email IS NOT NULL THEN 'found'
+            WHEN discovery LIKE 'email: Not checked%' THEN 'failed'
+            WHEN discovery LIKE '%could not check%' THEN 'failed'
+            ELSE 'none' END
+          WHERE place_key LIKE 'pc:%' AND email_status IS NULL;
+        PRAGMA user_version = 11;`);
+    });
+  }
+
+  // Version 10: podcasts as a lead source (Podcast Lead Finder). A podcast
+  // lead keeps its Apple Podcasts and RSS feed addresses, its links on other
+  // platforms (Spotify, YouTube, Amazon Music, Podcast Index), its host and
+  // every public email found (with where); lead_sources also records podcasts.
+  migrateV10() {
+    if (this.db.prepare('PRAGMA user_version').get().user_version >= 10) return;
+    this.transaction(() => {
+      const has = (col) => this.db.prepare("SELECT 1 FROM pragma_table_info('businesses') WHERE name = ?").get(col);
+      for (const col of ['podcast_url', 'rss_url', 'host_name', 'emails', 'podcast_links']) {
+        if (!has(col)) this.db.exec(`ALTER TABLE businesses ADD COLUMN ${col} TEXT`);
+      }
+      this.db.exec(`
+        CREATE TABLE lead_sources_v10 (
+          id          INTEGER PRIMARY KEY,
+          business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+          source      TEXT NOT NULL CHECK (source IN ('facebook', 'linkedin', 'podcast')),
+          url         TEXT NOT NULL,
+          page_url    TEXT,
+          author      TEXT,
+          text        TEXT,
+          phone       TEXT NOT NULL,
+          found_at    TEXT NOT NULL,
+          kind        TEXT,
+          title       TEXT,
+          UNIQUE (source, url, phone)
+        );
+        INSERT INTO lead_sources_v10 SELECT id, business_id, source, url, page_url, author, text, phone, found_at, kind, title FROM lead_sources;
+        DROP TABLE lead_sources;
+        ALTER TABLE lead_sources_v10 RENAME TO lead_sources;
+        CREATE INDEX IF NOT EXISTS lead_sources_business ON lead_sources (business_id);
+        CREATE INDEX IF NOT EXISTS businesses_podcast ON businesses (podcast_url);
+        PRAGMA user_version = 10;`);
+    });
   }
 
   // Version 8: the subscription system is gone. Its only local data, the
@@ -591,9 +670,10 @@ class LeadStore {
     }
     // Source: found on Google Maps (Facebook leads have a 'fb:' key) and/or
     // in a Facebook post.
-    if (filter.source === 'maps') clauses.push("b.place_key NOT LIKE 'fb:%' AND b.place_key NOT LIKE 'li:%'");
+    if (filter.source === 'maps') clauses.push("b.place_key NOT LIKE 'fb:%' AND b.place_key NOT LIKE 'li:%' AND b.place_key NOT LIKE 'pc:%'");
     else if (filter.source === 'facebook') clauses.push('b.fb_post_url IS NOT NULL');
     else if (filter.source === 'linkedin') clauses.push('(b.li_company_url IS NOT NULL OR b.li_job_url IS NOT NULL OR b.li_post_url IS NOT NULL)');
+    else if (filter.source === 'podcast') clauses.push("b.place_key LIKE 'pc:%'");
     if (filter.website === 'without') clauses.push("b.website_status IN ('no_website', 'social_only')");
     else if (filter.website === 'with') clauses.push("b.website_status IN ('has_website', 'possible_website')");
     // Campaign status: Seen = a campaign message to this number was sent
@@ -928,6 +1008,239 @@ class LeadStore {
     );
   }
 
+  // --- Podcasts --------------------------------------------------------------------
+
+  // Saves a podcast (processPodcast's result, plus links { platform: url },
+  // keyword, categoryId, artwork, searchId and platform). r.pending: just
+  // found, its email not looked for yet (a new lead is saved with email
+  // status 'pending'; an existing one keeps what it had). r.searchId records
+  // this search's hit (new or already saved). One lead per podcast (its Apple Podcasts id,
+  // else its RSS feed, else its first platform link; also matched by any of
+  // these): the same podcast found again, on any platform, updates its lead
+  // (new platform links are added; a newly found email, website or feed is
+  // kept; one found before is never lost to a failed check). A deleted
+  // podcast is not added back.
+  // Returns { lead, isNewLead } or { lead: null, skipped }.
+  savePodcastLead(r, now = new Date().toISOString()) {
+    const links = Object.fromEntries(Object.entries(r.links || {}).filter(([k, v]) => /^[a-z]{2,20}$/.test(k) && typeof v === 'string' && /^https?:\/\//.test(v)));
+    if (r.appleUrl && !links.apple) links.apple = r.appleUrl;
+    const firstLink = Object.values(links)[0];
+    const ident = r.id ? `apple:${r.id}` : r.rssUrl ? `rss:${feedIdent(r.rssUrl)}` : firstLink ? `link:${firstLink}` : null;
+    if (!ident || !String(r.title || '').trim()) throw Object.assign(new Error('A podcast lead needs a podcast.'), { code: 'invalid_lead' });
+    const key = `pc:${crypto.createHash('sha256').update(ident).digest('hex').slice(0, 32)}`;
+    const host = siteHost(r.website);
+    const ph = r.phone && r.phone.phone ? r.phone : null;
+    const emails = Array.isArray(r.emails) && r.emails.length ? JSON.stringify(r.emails.map((e) => ({ email: e.email, kind: e.kind, from: e.from, url: e.url || '' })).slice(0, 30)) : null;
+    const text = r.description ? String(r.description).slice(0, 2000) : null;
+    return this.withRetry(() =>
+      this.transaction(() => {
+        const marker = this.stmt.get.get(key);
+        if (marker && !marker.qualified) return { lead: null, skipped: 'deleted' };
+        const q = (sql, ...a) => this.db.prepare(sql).get(...a);
+        const byLink = (url) => q("SELECT id, qualified FROM businesses WHERE place_key LIKE 'pc:%' AND (podcast_url = ? OR podcast_links LIKE ? ESCAPE '\\') ORDER BY qualified DESC, id LIMIT 1", url, `%${JSON.stringify(url).replace(/[\\%_]/g, '\\$&')}%`);
+        const existing =
+          marker ||
+          (r.rssUrl && q("SELECT id, qualified FROM businesses WHERE place_key LIKE 'pc:%' AND rss_url = ? ORDER BY qualified DESC, id LIMIT 1", r.rssUrl)) ||
+          Object.values(links).map(byLink).find(Boolean);
+        // A deleted podcast (found again under another link) stays deleted.
+        if (existing && existing.qualified === 0) return { lead: null, skipped: 'deleted' };
+        const known = existing ? parseLinks(q('SELECT podcast_links FROM businesses WHERE id = ?', existing.id)?.podcast_links) : {};
+        const allLinks = JSON.stringify({ ...links, ...known });
+        // The email status a finished check gives (an email found before is kept).
+        const status = r.pending ? null : r.email ? 'found' : EMAIL_STATUS[r.status] || 'none';
+        let id;
+        if (existing && r.pending) {
+          id = existing.id;
+          this.db
+            .prepare(
+              `UPDATE businesses SET podcast_links = ?, podcast_url = COALESCE(podcast_url, ?), rss_url = COALESCE(rss_url, ?), host_name = COALESCE(host_name, ?),
+                 description = COALESCE(description, ?), artwork_url = COALESCE(artwork_url, ?), category_id = COALESCE(category_id, ?) WHERE id = ?`,
+            )
+            .run(allLinks, links.apple || null, r.rssUrl || null, r.host || null, text, r.artwork || null, r.categoryId ?? null, id);
+        } else if (existing) {
+          id = existing.id;
+          this.db
+            .prepare(
+              `UPDATE businesses SET name = ?, email = COALESCE(?, email), emails = COALESCE(?, emails), website_url = COALESCE(?, website_url),
+                 podcast_url = COALESCE(?, podcast_url), rss_url = COALESCE(?, rss_url), host_name = COALESCE(?, host_name),
+                 description = COALESCE(?, description), category_id = COALESCE(category_id, ?), checked_at = ?,
+                 discovery = CASE WHEN ? IS NOT NULL OR email IS NULL THEN ? ELSE discovery END, podcast_links = ?,
+                 website_status = CASE WHEN ? IS NOT NULL THEN 'has_website' ELSE website_status END,
+                 website_detail = COALESCE(?, website_detail), artwork_url = COALESCE(artwork_url, ?),
+                 email_status = CASE WHEN ? IS NOT NULL THEN 'found' WHEN email IS NOT NULL THEN 'found' ELSE ? END
+               WHERE id = ?`,
+            )
+            .run(r.title, r.email || null, emails, r.website || null, links.apple || null, r.rssUrl || null, r.host || null, text, r.categoryId ?? null, now, r.email || null, r.discovery || null, allLinks, host, host, r.artwork || null, r.email || null, status, id);
+          if (ph) {
+            this.db
+              .prepare('UPDATE businesses SET phone = ?, phone_raw = ?, phone_status = ?, phone_country = ? WHERE id = ? AND phone IS NULL')
+              .run(ph.phone, ph.raw || ph.phone, ph.status, ph.country || null, id);
+          }
+        } else {
+          const ins = this.stmt.insert.run({
+            place_key: key,
+            maps_url: firstLink || r.rssUrl || '',
+            name: r.title,
+            phone: ph?.phone ?? null,
+            phone_raw: ph ? ph.raw || ph.phone : null,
+            phone_status: ph?.status ?? null,
+            phone_country: ph?.country ?? null,
+            address: null,
+            website_status: host ? 'has_website' : 'no_website',
+            website_detail: host,
+            qualified: 1,
+            keyword: r.keyword || null,
+            category_id: r.categoryId ?? null,
+            now,
+            today: localDate(new Date(now)),
+          });
+          id = Number(ins.lastInsertRowid);
+          this.db
+            .prepare('UPDATE businesses SET email = ?, emails = ?, website_url = ?, podcast_url = ?, rss_url = ?, host_name = ?, description = ?, discovery = ?, podcast_links = ?, artwork_url = ?, email_status = ? WHERE id = ?')
+            .run(r.email || null, emails, r.website || null, links.apple || null, r.rssUrl || null, r.host || null, text, r.pending ? null : r.discovery || null, allLinks, r.artwork || null, status || 'pending', id);
+        }
+        if (r.searchId) {
+          this.db
+            .prepare('INSERT INTO search_hits (search_id, business_id, platform, source_url, found_at, outcome, rank) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING')
+            .run(r.searchId, id, r.platform || Object.keys(links)[0] || 'unknown', r.sourceUrl || firstLink || r.rssUrl || null, now, existing ? 'duplicate' : 'new', Number.isInteger(r.rank) ? r.rank : null);
+        }
+        const url = firstLink || r.rssUrl;
+        if (url) {
+          this.db
+            .prepare(
+              `INSERT INTO lead_sources (business_id, source, url, page_url, author, text, phone, found_at, kind, title)
+               VALUES (?, 'podcast', ?, ?, ?, ?, '', ?, 'podcast', ?) ON CONFLICT(source, url, phone) DO NOTHING`,
+            )
+            .run(id, url, r.rssUrl || null, r.host || null, text, now, r.title);
+        }
+        return { lead: toLead(this.db.prepare(`${LEAD_SELECT} WHERE b.id = ?`).get(id)), isNewLead: !existing };
+      }),
+    );
+  }
+
+  // --- Podcast searches and the podcast library ------------------------------------
+
+  startSearch({ kind = 'podcast', keyword, platforms = [] }, now = new Date().toISOString()) {
+    return Number(this.withRetry(() => this.db.prepare('INSERT INTO searches (kind, keyword, platforms, started_at) VALUES (?, ?, ?, ?)').run(kind, String(keyword).slice(0, 300), JSON.stringify(platforms), now).lastInsertRowid));
+  }
+
+  finishSearch(id, state, stats, now = new Date().toISOString()) {
+    this.withRetry(() => this.db.prepare('UPDATE searches SET state = ?, stats = ?, finished_at = ? WHERE id = ?').run(state, JSON.stringify(stats || {}), now, id));
+  }
+
+  // Recent podcast searches (newest first), with how many podcasts each found.
+  podcastSearches(limit = 30) {
+    return this.withRetry(() =>
+      this.db
+        .prepare(
+          `SELECT s.id, s.keyword, s.platforms, s.started_at AS startedAt, s.finished_at AS finishedAt, s.state, s.stats,
+             (SELECT COUNT(*) FROM search_hits h JOIN businesses b ON b.id = h.business_id AND b.qualified = 1 WHERE h.search_id = s.id) AS found
+           FROM searches s WHERE s.kind = 'podcast' ORDER BY s.id DESC LIMIT ?`,
+        )
+        .all(limit)
+        .map((r) => ({ ...r, platforms: parseJson(r.platforms, []), stats: parseJson(r.stats, {}) })),
+    );
+  }
+
+  // Podcast leads: { status: 'all' | 'found' | 'none' | 'pending', searchId,
+  // platform, search (text), sort: 'found' | 'name' | 'status', dir, page,
+  // pageSize, ids } -> { rows, total, counts: { all, found, none, pending } }.
+  // Counts are for the same search/platform/text, before the status filter.
+  podcastLeads(f = {}) {
+    const clauses = ["b.qualified = 1", "b.place_key LIKE 'pc:%'"];
+    const params = [];
+    if (Number.isInteger(f.searchId)) {
+      clauses.push('EXISTS (SELECT 1 FROM search_hits h WHERE h.business_id = b.id AND h.search_id = ?)');
+      params.push(f.searchId);
+    }
+    if (typeof f.platform === 'string' && /^[a-z]{2,20}$/.test(f.platform)) {
+      clauses.push('b.podcast_links LIKE ?');
+      params.push(`%"${f.platform}":%`);
+    }
+    const q = typeof f.search === 'string' ? f.search.trim().slice(0, 100) : '';
+    if (q) {
+      const like = `%${q.replace(/[\\%_]/g, '\\$&')}%`;
+      clauses.push("(b.name LIKE ? ESCAPE '\\' OR b.host_name LIKE ? ESCAPE '\\' OR b.email LIKE ? ESCAPE '\\' OR b.website_url LIKE ? ESCAPE '\\')");
+      params.push(like, like, like, like);
+    }
+    if (Array.isArray(f.ids)) {
+      const ids = f.ids.filter(Number.isInteger).slice(0, 500);
+      clauses.push(ids.length ? `b.id IN (${ids.map(() => '?').join(', ')})` : '0');
+      params.push(...ids);
+    }
+    const base = clauses.join(' AND ');
+    const statusSql = { found: "b.email_status = 'found'", pending: "b.email_status = 'pending'", none: "COALESCE(b.email_status, 'none') IN ('none', 'platform', 'failed')" }[f.status];
+    const where = statusSql ? `${base} AND ${statusSql}` : base;
+    // Best match: the podcast's place in its platform's results for that search.
+    const rankSql = Number.isInteger(f.searchId) ? `(SELECT h.rank FROM search_hits h WHERE h.business_id = b.id AND h.search_id = ${Number(f.searchId)})` : null;
+    const order = { name: 'b.name COLLATE NOCASE', status: "CASE b.email_status WHEN 'found' THEN 0 WHEN 'pending' THEN 1 WHEN 'failed' THEN 3 ELSE 2 END, b.discovered_at DESC", rank: rankSql ? `${rankSql} IS NULL, ${rankSql}, b.discovered_at DESC` : null, found: 'b.discovered_at' }[f.sort] || 'b.discovered_at';
+    const dir = f.dir === 'asc' ? 'ASC' : 'DESC';
+    const pageSize = Math.min(Math.max(Number(f.pageSize) || 25, 1), 200);
+    const page = Math.max(Number(f.page) || 1, 1);
+    return this.withRetry(() => {
+      const c = this.db
+        .prepare(
+          `SELECT COUNT(*) AS total, SUM(b.email_status = 'found') AS found, SUM(b.email_status = 'pending') AS pending,
+             SUM(COALESCE(b.email_status, 'none') IN ('none', 'platform', 'failed')) AS none
+           FROM businesses b WHERE ${base}`,
+        )
+        .get(...params);
+      const total = this.db.prepare(`SELECT COUNT(*) AS n FROM businesses b WHERE ${where}`).get(...params).n;
+      const rows = this.db
+        .prepare(
+          `${LEAD_SELECT.replace('FROM businesses b', `,
+             (SELECT json_group_array(json_object('searchId', h.search_id, 'keyword', s.keyword, 'platform', h.platform, 'sourceUrl', h.source_url, 'foundAt', h.found_at, 'outcome', h.outcome))
+                FROM search_hits h JOIN searches s ON s.id = h.search_id WHERE h.business_id = b.id) AS hits_json
+           FROM businesses b`)} WHERE ${where} ORDER BY ${order === 'b.discovered_at' ? `b.discovered_at ${dir}` : order.includes(',') ? order : `${order} ${dir}`}, b.id DESC LIMIT ? OFFSET ?`,
+        )
+        .all(...params, pageSize, (page - 1) * pageSize)
+        .map((row) => ({ ...toLead(row), hits: parseJson(row.hits_json, []).sort((a, b) => String(b.foundAt).localeCompare(String(a.foundAt))) }));
+      return { rows, total, page, pageSize, counts: { all: c.total || 0, found: c.found || 0, none: c.none || 0, pending: c.pending || 0 } };
+    });
+  }
+
+  // Ids of the podcast leads matching a library filter (all pages), for
+  // "select all matching".
+  podcastLeadIds(f = {}) {
+    const all = [];
+    for (let page = 1; ; page++) {
+      const { rows, total } = this.podcastLeads({ ...f, page, pageSize: 200 });
+      all.push(...rows.map((r) => r.id));
+      if (!rows.length || all.length >= total) return all;
+    }
+  }
+
+  // Deletes podcast leads only: the given ids (other kinds of leads among
+  // them are left alone), or every podcast lead. Like other deletions, a
+  // deleted podcast is not added again by later searches. Returns how many.
+  deletePodcastLeads({ ids = null, all = false } = {}) {
+    return this.withRetry(() =>
+      this.transaction(() => {
+        let list;
+        if (all) list = this.db.prepare("SELECT id FROM businesses WHERE qualified = 1 AND place_key LIKE 'pc:%'").all().map((r) => r.id);
+        else {
+          const want = [...new Set((ids || []).map(Number).filter(Number.isInteger))];
+          list = [];
+          for (let i = 0; i < want.length; i += 500) {
+            const chunk = want.slice(i, i + 500);
+            list.push(...this.db.prepare(`SELECT id FROM businesses WHERE qualified = 1 AND place_key LIKE 'pc:%' AND id IN (${chunk.map(() => '?').join(', ')})`).all(...chunk).map((r) => r.id));
+          }
+        }
+        if (list.length) this.tombstone(list);
+        return list.length;
+      }),
+    );
+  }
+
+  // Podcast leads as full leads (for the CSV export): the given ids, or all.
+  podcastLeadsForExport({ ids = null, all = false } = {}) {
+    if (all) return this.listLeads({ source: 'podcast' });
+    const want = [...new Set((ids || []).map(Number).filter(Number.isInteger))];
+    const out = [];
+    for (let i = 0; i < want.length; i += 1000) out.push(...this.listLeads({ source: 'podcast', ids: want.slice(i, i + 1000) }));
+    return out;
+  }
+
   // A LinkedIn job or post already recorded as a source (not read again).
   hasLinkedInSource(url) {
     return Boolean(this.withRetry(() => this.db.prepare("SELECT 1 FROM lead_sources WHERE source = 'linkedin' AND url = ? LIMIT 1").get(url)));
@@ -1099,9 +1412,10 @@ function toLead(row) {
     // number; campaignDelivery is the best receipt (sent/delivered/read).
     campaign: row.camp_rank > 0 ? 'seen' : 'unseen',
     // Where the lead was found: Google Maps, a Facebook post and/or LinkedIn.
-    source: String(row.place_key).startsWith('fb:') ? 'facebook' : String(row.place_key).startsWith('li:') ? 'linkedin' : 'maps',
+    source: { fb: 'facebook', li: 'linkedin', pc: 'podcast' }[String(row.place_key).slice(0, 2)] || 'maps',
     sources: [
-      ...(/^(fb|li):/.test(String(row.place_key)) ? [] : ['maps']),
+      ...(/^(fb|li|pc):/.test(String(row.place_key)) ? [] : ['maps']),
+      ...(String(row.place_key).startsWith('pc:') ? ['podcast'] : []),
       ...(row.fb_post_url ? ['facebook'] : []),
       ...(row.li_company_url || row.li_job_url || row.li_post_url ? ['linkedin'] : []),
     ],
@@ -1112,6 +1426,13 @@ function toLead(row) {
     linkedinPostUrl: row.li_post_url || '',
     jobTitle: row.job_title || '',
     discovery: row.discovery || '',
+    podcastUrl: row.podcast_url || '',
+    rssUrl: row.rss_url || '',
+    podcastHost: row.host_name || '',
+    podcastLinks: parseLinks(row.podcast_links),
+    emailStatus: row.email_status || (String(row.place_key).startsWith('pc:') ? (row.email ? 'found' : 'none') : ''),
+    artworkUrl: row.artwork_url || '',
+    emails: parseEmails(row.emails),
     // What contact details the lead has.
     contacts: { phone: Boolean(row.phone), email: Boolean(row.email), website: Boolean(row.website_url || ['has_website', 'possible_website'].includes(row.website_status)) },
     fbPostUrl: row.fb_post_url || '',
@@ -1131,7 +1452,42 @@ const LEAD_SELECT = `SELECT b.*, c.name AS category_name, w.status AS wa_status,
 
 const TOMBSTONE = `qualified = 0, website_status = 'deleted', website_detail = NULL, name = '', phone = NULL, phone_raw = NULL,
   phone_status = NULL, phone_country = NULL, address = NULL, maps_url = '', fb_post_url = NULL, fb_page_url = NULL, contact_name = NULL, description = NULL,
-  email = NULL, website_url = NULL, li_job_url = NULL, li_post_url = NULL, job_title = NULL, discovery = NULL`;
+  email = NULL, website_url = NULL, li_job_url = NULL, li_post_url = NULL, job_title = NULL, discovery = NULL,
+  host_name = NULL, emails = NULL`;
+
+// Email status of a finished check (processPodcast's status).
+const EMAIL_STATUS = { found: 'found', platform_only: 'platform', not_found: 'none', incomplete: 'failed', failed: 'failed' };
+
+function parseJson(text, fallback) {
+  try {
+    return text ? JSON.parse(text) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function parseLinks(json) {
+  try {
+    const o = JSON.parse(json || '{}');
+    return o && typeof o === 'object' && !Array.isArray(o) ? o : {};
+  } catch {
+    return {};
+  }
+}
+
+// An RSS feed address compared without scheme, "www." and trailing slash.
+function feedIdent(url) {
+  return String(url).trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/+$/, '');
+}
+
+function parseEmails(json) {
+  try {
+    const list = JSON.parse(json || '[]');
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
 
 // A website's host without "www." (for matching the same company), or null.
 function siteHost(url) {

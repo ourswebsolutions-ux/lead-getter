@@ -9,6 +9,14 @@
 //      payment; if it matches (same computer, same plan, unexpired, unused,
 //      within 5 tries) the plan starts at once.
 //
+// When the email cannot be sent (and the build has a private fallback code
+// form, fallback-code.js), step 1 instead makes a request reference that the
+// customer sends to the administrator by WhatsApp or phone; the
+// administrator works out that request's code with tools/activation. Such a
+// code is kept the same way (a salted hash, for this computer, plan and
+// reference only), for 30 minutes and 3 tries; at most 3 such requests and
+// 6 wrong codes in 24 hours. A failed email alone never activates anything.
+//
 // Stored in the lead database's app_state (kept across restarts and
 // updates): 'activation' (the plan), 'activation.pending' (the code's hash),
 // 'activation.requests' (send times, for the rate limit), 'activation.seen'
@@ -24,6 +32,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const { execFileSync } = require('node:child_process');
+const { fallbackCode, newReference, validPattern } = require('./fallback-code');
 
 const PLANS = [
   { id: 'monthly', name: 'Monthly', priceLabel: 'PKR 3,000', months: 1 },
@@ -36,6 +45,11 @@ const MAX_TRIES = 5;
 const RESEND_GAP = 60 * 1000;
 const MAX_PER_HOUR = 6;
 const CLOCK_SLACK = 60 * 60 * 1000;
+// Requests made when the email could not be sent (see above).
+const FALLBACK_TTL = 30 * 60 * 1000;
+const FALLBACK_TRIES = 3;
+const FALLBACK_PER_DAY = 3;
+const FALLBACK_WRONG_PER_DAY = 6;
 const SCRYPT = { N: 2 ** 15, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
 const B32 = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'; // Crockford: no I, L, O, U
 
@@ -88,8 +102,8 @@ class Activation {
   // config: { secret (base64), adminEmail, contact: { whatsapp, phone } };
   // mailer: { send({ to, subject, text }) } or null when SMTP isn't set up;
   // mailError(err) -> a safe description of a failed send.
-  constructor({ store, config, mailer = null, mailError = () => 'the email could not be sent', machineId = readMachineId, clock = () => Date.now(), random = (n) => crypto.randomInt(n) }) {
-    Object.assign(this, { store, mailer, mailError, clock, random });
+  constructor({ store, config, mailer = null, mailError = () => 'the email could not be sent', machineId = readMachineId, clock = () => Date.now(), random = (n) => crypto.randomInt(n), randomBytes = crypto.randomBytes }) {
+    Object.assign(this, { store, mailer, mailError, clock, random, randomBytes });
     this.config = config || {};
     this.netOffset = null;
     const secret = Buffer.from(String(this.config.secret || ''), 'base64');
@@ -164,14 +178,32 @@ class Activation {
   // The code waiting to be entered, if it is still valid.
   pending(now = this.now()) {
     const p = this.load('pending', 'activation.pending');
-    return p && now < p.expiresAt && p.tries < MAX_TRIES ? p : null;
+    return p && now < p.expiresAt && p.tries < (p.maxTries || MAX_TRIES) ? p : null;
+  }
+
+  // Whether this build can make a request when its email fails.
+  get fallbackReady() {
+    return Boolean(this.secret) && validPattern(this.config.fallbackPattern);
+  }
+
+  // Times (last 24 hours) from a sealed list: requests made without email,
+  // or wrong codes entered for them.
+  recent(key, now) {
+    const rec = this.load('times', key);
+    return (rec?.times || []).filter((t) => t > now - DAY && t <= now);
+  }
+
+  note(key, now) {
+    this.save('times', key, { times: [...this.recent(key, now), now] });
   }
 
   status() {
     const now = this.now();
     const base = { activationId: this.activationId, configured: this.configured, missing: this.missing(), contact: this.config.contact || null, plans: PLANS, busy: this.busy };
     const p = this.pending(now);
-    base.pending = p ? { plan: p.plan, planName: PLANS.find((x) => x.id === p.plan).name, expiresAt: new Date(p.expiresAt).toISOString(), triesLeft: MAX_TRIES - p.tries } : null;
+    base.pending = p
+      ? { plan: p.plan, planName: PLANS.find((x) => x.id === p.plan).name, expiresAt: new Date(p.expiresAt).toISOString(), triesLeft: (p.maxTries || MAX_TRIES) - p.tries, reference: p.reference || null }
+      : null;
     const c = this.current();
     if (!c) return { ...base, state: 'none', plan: null };
     const expired = c.expiresAt !== null && now >= c.expiresAt;
@@ -233,7 +265,9 @@ class Activation {
         // Nothing is kept: a code that wasn't delivered can't be used. A
         // failed send doesn't count towards the wait between requests.
         this.store.setState('activation.requests', sent);
-        return fail('email', `The activation request could not be sent: ${this.mailError(err)}. Please try again, or contact us by WhatsApp or phone.`);
+        const reason = this.mailError(err);
+        const offline = await this.requestWithoutEmail(p, sent, now);
+        return offline || fail('email', `The activation request could not be sent: ${reason}. Please try again, or contact us by WhatsApp or phone.`);
       }
       // Replaces (and so cancels) any earlier code.
       this.save('pending', 'activation.pending', { plan, salt, hash, createdAt: now, expiresAt, tries: 0 });
@@ -241,6 +275,26 @@ class Activation {
     } finally {
       this.busy = null;
     }
+  }
+
+  // The email could not be sent: a request the customer passes on with its
+  // reference instead (when the build allows it and its limits do). The
+  // request's code is never shown or stored, only its salted hash. Returns
+  // the result, or null to report the failed email as before.
+  async requestWithoutEmail(p, sent, now) {
+    if (!this.fallbackReady) return null;
+    if (this.recent('activation.fallbacks', now).length >= FALLBACK_PER_DAY) return null;
+    if (this.recent('activation.fallbackWrong', now).length >= FALLBACK_WRONG_PER_DAY) return null;
+    const reference = newReference(this.randomBytes);
+    const code = fallbackCode(this.secret, this.config.fallbackPattern, { activationId: this.activationId, plan: p.id, reference });
+    const salt = crypto.randomBytes(16).toString('base64');
+    const hash = (await scrypt(code, salt)).toString('base64');
+    const expiresAt = now + FALLBACK_TTL;
+    this.store.setState('activation.requests', [...sent, now]);
+    this.note('activation.fallbacks', now);
+    // Replaces (and so cancels) any earlier code.
+    this.save('pending', 'activation.pending', { plan: p.id, salt, hash, createdAt: now, expiresAt, tries: 0, maxTries: FALLBACK_TRIES, reference });
+    return { ok: true, plan: p.id, planName: p.name, expiresAt: new Date(expiresAt).toISOString(), reference };
   }
 
   // Step 2: the code the administrator passed on. Starts (or extends) the
@@ -256,8 +310,13 @@ class Activation {
       const now = this.now();
       const p = this.load('pending', 'activation.pending');
       if (!p) return fail('none', 'There is no code to enter. Choose a plan and click Activate first.');
+      const maxTries = p.maxTries || MAX_TRIES;
       if (now >= p.expiresAt) return fail('expired', 'This code has expired. Click Activate to get a new one.');
-      if (p.tries >= MAX_TRIES) return fail('tries', 'Too many wrong codes. Click Activate to get a new one.');
+      if (p.tries >= maxTries) return fail('tries', 'Too many wrong codes. Click Activate to get a new one.');
+      if (p.reference && this.recent('activation.fallbackWrong', now).length >= FALLBACK_WRONG_PER_DAY) {
+        this.store.setState('activation.pending', null);
+        return fail('tries', 'Too many wrong codes. Please try again tomorrow, or contact us.');
+      }
       const planName = PLANS.find((x) => x.id === p.plan).name;
       if (plan !== p.plan) return fail('plan', `The code was requested for the ${planName} plan. Choose ${planName}, or click Activate for a new code.`);
       // The try is counted before the check, so stopping the app midway
@@ -266,8 +325,9 @@ class Activation {
       this.save('pending', 'activation.pending', { ...p, mac: undefined, tries });
       const got = await scrypt(code, p.salt);
       if (!crypto.timingSafeEqual(got, Buffer.from(p.hash, 'base64'))) {
-        if (tries >= MAX_TRIES) this.store.setState('activation.pending', null);
-        return fail('wrong', tries >= MAX_TRIES ? 'Wrong code. That was the last try: click Activate to get a new code.' : `Wrong code. ${MAX_TRIES - tries} ${MAX_TRIES - tries === 1 ? 'try' : 'tries'} left.`);
+        if (p.reference) this.note('activation.fallbackWrong', now);
+        if (tries >= maxTries) this.store.setState('activation.pending', null);
+        return fail('wrong', tries >= maxTries ? 'Wrong code. That was the last try: click Activate to get a new code.' : `Wrong code. ${maxTries - tries} ${maxTries - tries === 1 ? 'try' : 'tries'} left.`);
       }
       // Used once: removed before the plan is saved.
       this.store.setState('activation.pending', null);
@@ -283,4 +343,4 @@ class Activation {
   }
 }
 
-module.exports = { Activation, PLANS, CODE_TTL, MAX_TRIES, activationIdFor, addMonths, readMachineId };
+module.exports = { Activation, PLANS, CODE_TTL, MAX_TRIES, FALLBACK_TTL, FALLBACK_TRIES, FALLBACK_PER_DAY, FALLBACK_WRONG_PER_DAY, activationIdFor, addMonths, readMachineId };

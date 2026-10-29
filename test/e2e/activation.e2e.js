@@ -11,7 +11,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { _electron } = require('playwright-core');
 const { LeadStore } = require('../../src/database/db');
-const { unlock, activationEnv, codeFor, mail } = require('./helpers');
+const { unlock, activationEnv, activationConfig, codeFor, mail } = require('./helpers');
 
 const root = path.join(__dirname, '..', '..');
 const shots = process.env.LEAD_FINDER_SCREENSHOTS;
@@ -71,7 +71,7 @@ test('activation: Activate -> SMTP email -> code entry -> Verify & Activate, wit
   await win.getByRole('button', { name: 'Start Search' }).click();
   await P().waitFor();
   assert.match(await P().locator('.sub-notice').textContent(), /needs an active plan/);
-  for (const call of [() => window.leadFinder.exportCsv('all', {}), () => window.leadFinder.whatsappConnect(), () => window.leadFinder.whatsappSend(1, 'hi'), () => window.leadFinder.whatsappRecheck('+923001234567'), () => window.leadFinder.chatsSend('923001234567@s.whatsapp.net', 'hi')]) {
+  for (const call of [() => window.leadFinder.exportCsv('all', {}), () => window.leadFinder.whatsappConnect(), () => window.leadFinder.whatsappSend(1, 'hi'), () => window.leadFinder.whatsappRecheck('+923001234567'), () => window.leadFinder.searchPodcasts('true crime', 'Podcasts')]) {
     assert.equal((await win.evaluate(call)).subscription, 'none', String(call));
   }
   const id = (await P().getByTestId('activation-id').textContent()).trim();
@@ -187,5 +187,59 @@ test('activation: Activate -> SMTP email -> code entry -> Verify & Activate, wit
   const r = await win.evaluate(() => window.leadFinder.startSearch('Real Estate Lahore', 'Real Estate'));
   assert.equal(r.subscription, 'expired');
   assert.match(r.error, /6 Months plan has ended/);
+  assert.deepEqual(errors, []);
+});
+
+test('activation when the email cannot be sent: a reference to send us; only that request’s code activates; nothing about the code is shown', async (t) => {
+  const smtp = await mail;
+  const { fallbackCode } = require('../../src/main/fallback-code');
+  const FORM = '4x1xx9'; // stand-in for the private form
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lf-activation-fb-'));
+  const userData = path.join(tmp, 'app');
+  fs.mkdirSync(userData);
+  const cfg = { ...activationConfig, fallbackPattern: FORM };
+  const env = { ...process.env, ...activationEnv, LEAD_FINDER_ACTIVATION_CONFIG: JSON.stringify(cfg), LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome'), LEAD_FINDER_NO_UPDATES: '1' };
+  delete env.ELECTRON_RUN_AS_NODE;
+  const { app, win } = await launch(env);
+  const errors = [];
+  win.on('pageerror', (e) => errors.push(e.message));
+  t.after(async () => {
+    smtp.setMode('accept');
+    await app.close().catch(() => {});
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+  const P = () => win.getByRole('dialog', { name: 'Subscription' });
+  const typeCode = async (code) => {
+    await P().getByLabel('Digit 1').click();
+    await win.keyboard.type(code, { delay: 25 });
+  };
+  await win.locator('.plan-pill', { hasText: 'Activate' }).click();
+  await P().waitFor();
+  const id = (await P().getByTestId('activation-id').textContent()).trim();
+
+  smtp.setMode('auth-fail');
+  await P().getByRole('button', { name: 'Activate Monthly' }).click();
+  await P().getByRole('heading', { name: /Contact us to activate: Monthly/ }).waitFor({ timeout: 30_000 });
+  const reference = (await P().getByTestId('activation-reference').textContent()).trim();
+  assert.match(reference, /^[0-9A-Z]{4}-[0-9A-Z]{4}$/);
+  const code = fallbackCode(Buffer.from(cfg.secret, 'base64'), FORM, { activationId: id, plan: 'monthly', reference });
+  // Nothing about the code reaches the window: not the code, its form, or a hint.
+  const shown = `${await win.content()}${JSON.stringify(await win.evaluate(() => window.leadFinder.activationStatus()))}`;
+  assert.ok(!shown.includes(code) && !shown.includes(FORM) && !/fallback|pattern/i.test(shown));
+  assert.match(await P().locator('.act-sent').innerText(), /could not be sent automatically[\s\S]*reference/);
+
+  // A code of the same form that is not this request's: refused, generically.
+  const wrong = code === '401009' ? '402009' : '401009';
+  await typeCode(wrong);
+  await P().getByRole('button', { name: 'Verify & Activate' }).click();
+  await P().locator('.sub-error').filter({ hasText: /^Wrong code\. 2 tries left\.$/ }).waitFor({ timeout: 20_000 });
+  assert.equal((await win.evaluate(() => window.leadFinder.activationStatus())).state, 'none');
+  // This request's code (from the administrator): activated.
+  await typeCode(code);
+  await P().getByRole('button', { name: 'Verify & Activate' }).click();
+  await P().getByRole('heading', { name: 'Monthly plan activated' }).waitFor({ timeout: 20_000 });
+  const st = await win.evaluate(() => window.leadFinder.activationStatus());
+  assert.equal(st.state, 'active');
+  assert.equal(st.plan, 'monthly');
   assert.deepEqual(errors, []);
 });

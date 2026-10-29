@@ -7,9 +7,12 @@ const HEADER = [
   'Business Name', 'Phone', 'Phone Status', 'Address', 'Google Maps URL', 'Website Status', 'WhatsApp', 'Category', 'Date Discovered', 'Source',
   'Facebook Post URL', 'Facebook Page URL', 'Contact Name', 'Post Text',
   'Email', 'Website', 'LinkedIn Company URL', 'LinkedIn Job URL', 'LinkedIn Post URL', 'Job Title', 'Discovery',
+  'Podcast Host', 'Apple Podcasts URL', 'RSS Feed URL', 'All Emails', 'Podcast Platforms', 'Search Keyword', 'Email Status',
 ];
 
-const SOURCE_TEXT = { maps: 'Google Maps', facebook: 'Facebook', linkedin: 'LinkedIn' };
+const PLATFORM_TEXT = { apple: 'Apple Podcasts', spotify: 'Spotify', youtube: 'YouTube', amazon: 'Amazon Music', podcastindex: 'Podcast Index', website: 'Website' };
+const EMAIL_STATUS_TEXT = { found: 'Email found', none: 'No public email', platform: 'Platform address only', failed: 'Could not check', pending: 'Discovery pending' };
+const SOURCE_TEXT = { maps: 'Google Maps', facebook: 'Facebook', linkedin: 'LinkedIn', podcast: 'Podcast' };
 
 // Cells that a spreadsheet would evaluate as a formula get a leading
 // apostrophe. Phone numbers such as "+92 300 1234567" are left alone.
@@ -51,7 +54,7 @@ function leadsToCsv(leads) {
       phoneStatusText(l),
       l.address,
       // A lead found only on Facebook or LinkedIn has no Maps listing.
-      l.source === 'facebook' || l.source === 'linkedin' ? '' : l.mapsUrl,
+      l.source === 'facebook' || l.source === 'linkedin' || l.source === 'podcast' ? '' : l.mapsUrl,
       l.websiteStatus,
       // Earlier manual marks are not a confirmed result.
       (l.whatsappMethod !== 'manual' && WHATSAPP_TEXT[l.whatsapp]) || 'Not checked',
@@ -69,6 +72,15 @@ function leadsToCsv(leads) {
       l.linkedinPostUrl || '',
       l.jobTitle || '',
       l.discovery || '',
+      l.podcastHost || '',
+      l.podcastUrl || '',
+      l.rssUrl || '',
+      // Every email found, with where (hosting-platform addresses marked).
+      (l.emails || []).map((e) => `${e.email}${e.kind === 'platform' ? ' (hosting platform)' : ''} [${e.from}]`).join('; '),
+      // The podcast on each platform it was found on.
+      Object.entries(l.podcastLinks || {}).map(([k, u]) => `${PLATFORM_TEXT[k] || k}: ${u}`).join('; '),
+      l.keyword || '',
+      EMAIL_STATUS_TEXT[l.emailStatus] || '',
     ]);
   }
   return '﻿' + rows.map((r) => r.map(escapeCell).join(',')).join('\r\n') + '\r\n';

@@ -8,6 +8,7 @@
   },
   "scripts": {
     "setup": "node setup.js",
-    "check-smtp": "node check-smtp.js"
+    "check-smtp": "node check-smtp.js",
+    "fallback-code": "node fallback-code.js"
   }
 }

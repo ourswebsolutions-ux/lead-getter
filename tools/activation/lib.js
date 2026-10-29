@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { validPattern } = require('../../src/main/fallback-code');
 
 const ENV_FILE = process.env.ACTIVATION_ENV_FILE || path.join(__dirname, '.env');
 
@@ -24,12 +25,18 @@ const EMAIL_RE = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
 function appSettings(env) {
   const missing = ['ADMIN_EMAIL', 'SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'ACTIVATION_SECRET'].filter((k) => !env[k]);
   if (env.ADMIN_EMAIL && !EMAIL_RE.test(env.ADMIN_EMAIL)) missing.push('ADMIN_EMAIL (not an email address)');
+  // Optional: the private form of codes for requests made when the email
+  // cannot be sent (src/main/fallback-code.js). Without it, a failed email
+  // is reported as before.
+  const fallback = (env.FALLBACK_CODE_PATTERN || '').trim().toLowerCase();
+  if (fallback && !validPattern(fallback)) missing.push('FALLBACK_CODE_PATTERN (6 characters: digits and at least three x)');
   return {
     missing,
     settings: {
       secret: env.ACTIVATION_SECRET,
       adminEmail: env.ADMIN_EMAIL,
       smtp: { host: env.SMTP_HOST, port: Number(env.SMTP_PORT), user: env.SMTP_USER, pass: env.SMTP_PASS, from: env.SMTP_FROM || env.SMTP_USER },
+      ...(fallback ? { fallbackPattern: fallback } : {}),
     },
   };
 }

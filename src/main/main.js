@@ -11,6 +11,15 @@ const { SearchSession, WEBSITE_FILTERS } = require('../browser/search-session');
 const { FacebookSession } = require('../browser/facebook-session');
 const { LinkedInSession } = require('../browser/linkedin-session');
 const { runSources } = require('../browser/search-sources');
+const podcastLib = require('../browser/podcasts');
+const { PodcastSearch } = require('../browser/podcast-search');
+const { PLATFORMS, ADAPTERS, browserFindOf } = require('../browser/podcast-platforms');
+const { robotsChecker } = require('../browser/robots');
+
+// Requests from here (Apple Podcasts, feeds, websites) try IPv6 and IPv4
+// side by side; Node gives each address only 250ms to connect, so a slow
+// connection (or no IPv6 at all) fails at random. Each gets 2.5 seconds.
+require('node:net').setDefaultAutoSelectFamilyAttemptTimeout(2500);
 const { AppLock } = require('./applock');
 const { Activation } = require('./activation');
 const { Updater, fileLog } = require('./updater');
@@ -59,7 +68,7 @@ const chrome = new ChromeConnection({
     return response === 0;
   },
 });
-const tabs = { main: null, check: null, detail: null, facebook: null, linkedin: null };
+const tabs = { main: null, check: null, detail: null, facebook: null, linkedin: null, spotify: null, amazon: null };
 let lastStatus = { state: 'idle', message: 'Ready' };
 let interrupted = null; // last search, if the app ended while it was running
 
@@ -148,6 +157,7 @@ function activationConfig() {
     if (settings.secret) config.secret = settings.secret;
     if (settings.adminEmail) config.adminEmail = settings.adminEmail;
     if (settings.smtp.host) config.smtp = settings.smtp;
+    if (settings.fallbackPattern) config.fallbackPattern = settings.fallbackPattern;
     if (env.CONTACT_WHATSAPP || env.CONTACT_PHONE) config.contact = { whatsapp: (env.CONTACT_WHATSAPP || '').replace(/\D/g, ''), phone: (env.CONTACT_PHONE || '').replace(/[^\d+]/g, '') };
   }
   // Tests use their own settings (and a local mail server); never honoured
@@ -259,7 +269,7 @@ function validateFilter(raw) {
     if (typeof f[k] === 'string' && DATE_RE.test(f[k])) out[k] = f[k];
   }
   if (f.campaign === 'seen' || f.campaign === 'unseen') out.campaign = f.campaign;
-  if (['maps', 'facebook', 'linkedin'].includes(f.source)) out.source = f.source;
+  if (['maps', 'facebook', 'linkedin', 'podcast'].includes(f.source)) out.source = f.source;
   if (typeof f.search === 'string' && f.search.trim()) out.search = f.search.trim().slice(0, 100);
   return out;
 }
@@ -267,7 +277,8 @@ function validateFilter(raw) {
 // --- Chrome tabs -----------------------------------------------------------
 
 // Google Maps works in the tabs of one window (main, check, detail);
-// Facebook and LinkedIn each have a window of their own. Each search worker
+// Facebook and LinkedIn each have a window of their own, and so does
+// Spotify (only ever opened for the user to look at; never read). Each search worker
 // only ever uses its own pages, so none navigates, hides or slows down
 // another's page.
 const MAPS_TABS = ['main', 'check', 'detail'];
@@ -278,7 +289,7 @@ async function tab(name) {
   const t = tabs[name];
   if (t && !t.isClosed()) return t;
   if (!chrome.connected) throw new Error('Target page, context or browser has been closed');
-  tabs[name] = name === 'facebook' || name === 'linkedin' ? await chrome.newWindowPage() : await newMapsTab();
+  tabs[name] = ['facebook', 'linkedin', 'spotify', 'amazon'].includes(name) ? await chrome.newWindowPage() : await newMapsTab();
   return tabs[name];
 }
 
@@ -288,7 +299,7 @@ async function tab(name) {
 async function newMapsTab() {
   const beside = MAPS_TABS.map((k) => tabs[k]).find((p) => p && !p.isClosed());
   if (beside) return chrome.newTabBeside(beside);
-  if ((tabs.facebook && !tabs.facebook.isClosed()) || (tabs.linkedin && !tabs.linkedin.isClosed())) return chrome.newWindowPage();
+  if (['facebook', 'linkedin', 'spotify', 'amazon'].some((k) => tabs[k] && !tabs[k].isClosed())) return chrome.newWindowPage();
   return chrome.context.newPage();
 }
 
@@ -681,7 +692,6 @@ function initChatsAndOutreach(cipher) {
     canSend: async () => activation.active,
     nameFor: (lead) => require('../whatsapp/templates').pickName({ contactName: chatStore.chat(jidOfPhone(lead.phone))?.name, businessName: lead.name }).name,
   });
-  chats.on('update', (u) => send('chats:update', u));
   chats.on('incoming', (m) => outreach.onIncoming({ phone: m.phone, text: m.text }));
   chats.on('manual', ({ phone }) => phone && outreach.onManualMessage(phone));
   chats.on('status', (st) => outreach.onStatus(st.id, st.status));
@@ -693,7 +703,6 @@ function initChatsAndOutreach(cipher) {
 }
 
 const isPhone = (v) => typeof v === 'string' && /^\+\d{6,15}$/.test(v);
-const isJid = (v) => typeof v === 'string' && v.length < 100 && /^[\w.:+-]+@(s\.whatsapp\.net|lid)$/.test(v);
 const unavailable = () => ({ ok: false, error: waInitError || 'WhatsApp is not available on this computer.' });
 
 const campaignId = (v) => (Number.isInteger(Number(v)) && Number(v) > 0 ? Number(v) : null);
@@ -978,6 +987,45 @@ async function deleteLeads(ids) {
   return { ok: true, deleted: store.deleteLeads(clean) };
 }
 
+// Podcast leads: the selected ids, or all of them ({ all: true }). Only
+// podcast leads are ever touched. Asks first (a dialog the window cannot
+// answer for the user).
+function podcastScope(raw) {
+  const r = raw && typeof raw === 'object' ? raw : {};
+  if (r.all === true) return { all: true };
+  const ids = Array.isArray(r.ids) ? r.ids.filter((x) => Number.isInteger(x) && x > 0).slice(0, 100_000) : [];
+  return ids.length ? { ids } : null;
+}
+
+async function deletePodcasts(raw) {
+  const scope = podcastScope(raw);
+  if (!scope) return { ok: false, error: 'No podcast leads are selected.' };
+  const count = scope.all ? store.podcastLeads({ pageSize: 1 }).counts.all : store.podcastLeadsForExport(scope).length;
+  if (!count) return { ok: false, error: scope.all ? 'There are no podcast leads to delete.' : 'The selected podcast leads no longer exist.' };
+  const msg = scope.all ? `Delete all ${count} podcast lead${count === 1 ? '' : 's'}?` : count === 1 ? 'Delete this podcast lead?' : `Delete ${count} selected podcast leads?`;
+  const detail = scope.all ? 'Every podcast lead will be removed. Leads from Google Maps, Facebook and LinkedIn are not affected.' : `Only the ${count === 1 ? 'selected podcast lead' : `${count} selected podcast leads`} will be removed.`;
+  if (!(await confirmDelete(msg, detail))) return { ok: false, canceled: true };
+  return { ok: true, deleted: store.deletePodcastLeads(scope) };
+}
+
+async function exportPodcasts(raw) {
+  const plan = requirePlan();
+  if (!plan.ok) return plan;
+  const scope = podcastScope(raw);
+  if (!scope) return { ok: false, error: 'No podcast leads are selected.' };
+  const leads = store.podcastLeadsForExport(scope);
+  if (!leads.length) return { ok: false, error: scope.all ? 'There are no podcast leads to export.' : 'The selected podcast leads no longer exist.' };
+  const stamp = new Date().toISOString().slice(0, 10);
+  const { canceled, filePath } = await dialog.showSaveDialog(win, {
+    title: scope.all ? 'Export all podcast leads' : `Export ${leads.length} selected podcast leads`,
+    defaultPath: path.join(app.getPath('documents'), `lead-finder-podcasts-${scope.all ? 'all' : 'selected'}-${stamp}.csv`),
+    filters: [{ name: 'CSV', extensions: ['csv'] }],
+  });
+  if (canceled || !filePath) return { ok: false, canceled: true };
+  await fs.writeFile(filePath, leadsToCsv(leads), 'utf8');
+  return { ok: true, count: leads.length, filePath };
+}
+
 async function deleteFiltered(rawFilter) {
   const filter = validateFilter(rawFilter);
   const count = store.countLeads(filter);
@@ -987,6 +1035,321 @@ async function deleteFiltered(rawFilter) {
     return { ok: false, canceled: true };
   }
   return { ok: true, deleted: store.deleteFiltered(filter) };
+}
+
+// --- podcasts ------------------------------------------------------------------
+// Podcast Lead Finder: the selected platforms are searched (or a pasted link
+// looked up), and every podcast found is checked for public contact emails
+// at once and saved to the leads (podcast-search.js). Plain requests only
+// (no Chrome); it runs on its own, beside a lead search.
+
+const PODCAST_PLATFORMS = Object.keys(PLATFORMS).filter((k) => !PLATFORMS[k].hidden);
+const KEYED_PLATFORMS = Object.keys(PLATFORMS).filter((k) => PLATFORMS[k].keys.length);
+const PODCAST_LIMITS = [25, 50, 100, 200];
+const podcastFeeds = podcastLib.feedCacheOf();
+const podcastLinks = new Set(); // addresses shown for podcasts (the only ones podcast:open opens)
+let podcastRun = null; // { controller, promise }
+let sessionKeys = null; // platform keys when there is no OS keychain (this session only)
+
+function rememberLinks(...urls) {
+  for (const u of urls.flat()) if (typeof u === 'string' && /^https?:\/\//i.test(u)) podcastLinks.add(u);
+  if (podcastLinks.size > 20_000) podcastLinks.clear();
+}
+
+function podcastPlatformsOn() {
+  const saved = store.getState('podcastPlatforms') || {};
+  const on = Object.fromEntries(PODCAST_PLATFORMS.map((k) => [k, typeof saved[k] === 'boolean' ? saved[k] : k === 'apple']));
+  // Only a removed platform was on (Podcast Index): Apple Podcasts again.
+  if (!Object.values(on).some(Boolean)) on.apple = true;
+  return on;
+}
+
+// Platform keys (Spotify, YouTube, Podcast Index): encrypted with the OS
+// keychain; never sent to the window.
+function podcastKeys() {
+  if (sessionKeys) return sessionKeys;
+  const saved = store.getState('podcastKeys');
+  const cipher = keychainCipher();
+  if (!saved?.enc || !cipher) return {};
+  try {
+    const all = JSON.parse(cipher.decrypt(Buffer.from(saved.enc, 'base64')));
+    return Object.fromEntries(Object.entries(all).filter(([k]) => KEYED_PLATFORMS.includes(k)));
+  } catch {
+    return {};
+  }
+}
+function savePodcastKeys(keys) {
+  const cipher = keychainCipher();
+  if (!cipher) {
+    sessionKeys = keys;
+    return false;
+  }
+  store.setState('podcastKeys', { enc: cipher.encrypt(JSON.stringify(keys)).toString('base64') });
+  return true;
+}
+
+// Keys of platforms that no longer use them (Spotify, Podcast Index, from
+// earlier versions) are deleted from this computer.
+function dropUnusedPodcastKeys() {
+  const saved = store.getState('podcastKeys');
+  const cipher = keychainCipher();
+  if (!saved?.enc || !cipher) return;
+  try {
+    const all = JSON.parse(cipher.decrypt(Buffer.from(saved.enc, 'base64')));
+    if (Object.keys(all).some((k) => !KEYED_PLATFORMS.includes(k))) savePodcastKeys(podcastKeys());
+  } catch {}
+  const notes = store.getState('podcastKeyNotes');
+  if (notes && Object.keys(notes).some((k) => !KEYED_PLATFORMS.includes(k))) store.setState('podcastKeyNotes', Object.fromEntries(Object.entries(notes).filter(([k]) => KEYED_PLATFORMS.includes(k))));
+}
+
+function podcastSettings() {
+  const keys = podcastKeys();
+  const limit = store.getState('podcastLimit');
+  return {
+    platforms: podcastPlatformsOn(),
+    keys: Object.fromEntries(KEYED_PLATFORMS.map((k) => [k, Boolean(keys[k])])),
+    // Keys saved but limited by the platform (what it said).
+    keyNotes: Object.fromEntries(Object.entries(store.getState('podcastKeyNotes') || {}).filter(([k]) => keys[k])),
+    limit: PODCAST_LIMITS.includes(limit) ? limit : 50,
+    keychain: Boolean(keychainCipher()),
+    running: Boolean(podcastRun),
+  };
+}
+
+function setPodcastSettings(raw) {
+  if (!raw || typeof raw !== 'object') return { ok: false, error: 'Invalid value' };
+  if (raw.platforms && typeof raw.platforms === 'object') {
+    const next = Object.fromEntries(PODCAST_PLATFORMS.map((k) => [k, raw.platforms[k] === true]));
+    if (!Object.values(next).some(Boolean)) return { ok: false, error: 'Keep at least one platform on.' };
+    store.setState('podcastPlatforms', next);
+  }
+  if (raw.limit !== undefined) {
+    if (!PODCAST_LIMITS.includes(raw.limit)) return { ok: false, error: 'Invalid number of results.' };
+    store.setState('podcastLimit', raw.limit);
+  }
+  return { ok: true, ...podcastSettings() };
+}
+
+// A pasted key without what copying adds by accident: spaces, line breaks,
+// invisible characters and quotes.
+function cleanKey(v) {
+  return typeof v === 'string' ? v.replace(/[\s​-‍⁠﻿]+/g, '').replace(/^["'“”‘’]+|["'“”‘’]+$/g, '').slice(0, 300) : '';
+}
+
+// Checks the keys with the platform itself before saving them; empty values
+// remove them. Keys the platform accepts but whose account it limits (e.g.
+// Spotify without Premium) are saved with that note, so searches work as
+// soon as the account allows them. Errors never include the keys.
+async function setPodcastKeys(platform, raw) {
+  const def = PLATFORMS[platform];
+  if (!def || !def.keys.length) return { ok: false, error: 'This platform has no keys.' };
+  const values = Object.fromEntries(def.keys.map((k) => [k, cleanKey(raw?.[k])]));
+  const keys = { ...podcastKeys() };
+  const notes = { ...(store.getState('podcastKeyNotes') || {}) };
+  let warning = null;
+  if (def.keys.every((k) => !values[k])) {
+    delete keys[platform];
+    delete notes[platform];
+  } else {
+    if (def.keys.some((k) => !values[k])) return { ok: false, error: 'Fill in every field.' };
+    try {
+      await ADAPTERS[platform].check(values, { signal: AbortSignal.timeout(30_000) });
+      delete notes[platform];
+    } catch (err) {
+      if (err.code !== 'account') return { ok: false, error: err.message, code: err.code || 'failed' };
+      warning = err.message;
+      notes[platform] = err.message;
+    }
+    keys[platform] = values;
+  }
+  const stored = savePodcastKeys(keys);
+  store.setState('podcastKeyNotes', notes);
+  return { ok: true, stored, warning, ...podcastSettings() };
+}
+
+function startPodcastSearch(rawQuery, rawCategory) {
+  if (podcastRun) return { ok: false, error: 'A podcast search is already running.' };
+  const plan = requirePlan();
+  if (!plan.ok) return plan;
+  const query = typeof rawQuery === 'string' ? rawQuery.replace(/\s+/g, ' ').trim() : '';
+  if (query.length < 2) return { ok: false, error: 'Enter a podcast name, a topic or a podcast link.' };
+  if (query.length > 300 || /[\u0000-\u001f\u007f]/.test(query)) return { ok: false, error: 'The search is too long or contains invalid characters.' };
+  const cat = validateCategory(rawCategory);
+  if (cat.error) return { ok: false, error: cat.error };
+  let category;
+  try {
+    category = store.ensureCategory(cat.category);
+  } catch (err) {
+    return { ok: false, error: `Could not save the category: ${err.message}` };
+  }
+  const settings = podcastSettings();
+  const platforms = PODCAST_PLATFORMS.filter((k) => settings.platforms[k]);
+  // Podcasts opened later from this search's Spotify / Amazon Music window
+  // are saved under its keyword and category.
+  if (platforms.some((k) => PLATFORMS[k].browser)) browserSearch = { keyword: query, categoryId: category.id };
+  return { ok: true, category: category.name, platforms, runId: runPodcasts({ query, platforms, categoryId: category.id }) };
+}
+
+// Checks saved podcast leads again (Retry): ids of podcast leads.
+function retryPodcasts(rawIds) {
+  if (podcastRun) return { ok: false, error: 'A podcast search is running. Try again when it has finished.' };
+  const plan = requirePlan();
+  if (!plan.ok) return plan;
+  const ids = (Array.isArray(rawIds) ? rawIds : []).map(Number).filter(Number.isInteger).slice(0, 500);
+  const leads = ids.length ? store.podcastLeads({ ids, pageSize: 500 }).rows : [];
+  if (!leads.length) return { ok: false, error: 'Choose podcasts to check again.' };
+  const seed = leads.map((l) => ({
+    leadId: l.id,
+    title: l.name,
+    host: l.podcastHost,
+    description: '',
+    appleId: /\/id(\d+)/.exec(l.podcastUrl || '')?.[1] || '',
+    appleUrl: l.podcastUrl,
+    feedUrl: l.rssUrl,
+    feedFrom: l.rssUrl ? 'saved feed' : '',
+    website: l.websiteUrl,
+    links: l.podcastLinks,
+    platforms: Object.keys(l.podcastLinks),
+    platform: Object.keys(l.podcastLinks)[0] || 'website',
+    url: Object.values(l.podcastLinks)[0] || l.websiteUrl,
+    artwork: l.artworkUrl,
+  }));
+  return { ok: true, runId: runPodcasts({ query: 'retry', seed, categoryId: leads[0].categoryId }) };
+}
+
+function runPodcasts({ query, platforms = [], categoryId, seed = null, extraLinks = null, keyword }) {
+  const controller = new AbortController();
+  const settings = podcastSettings();
+  const run = new PodcastSearch({
+    openInBrowser: openPodcastPage,
+    allow: robotsChecker({ signal: controller.signal }),
+    query,
+    keyword: keyword ?? query,
+    platforms,
+    seed,
+    extraLinks,
+    creds: podcastKeys(),
+    store,
+    categoryId,
+    country: phoneCountry(),
+    signal: controller.signal,
+    feedCache: podcastFeeds,
+    limit: settings.limit,
+    emit: (event, payload) => {
+      if (event === 'lead') return send('leads:added', payload);
+      if (event === 'item') {
+        rememberLinks(Object.values(payload.links || {}), payload.website);
+        const r = payload.result;
+        if (r) rememberLinks(r.rssUrl, r.website, r.socials || [], r.profiles || [], (r.emails || []).map((e) => e.url));
+      }
+      send(`podcast:${event}`, { ...payload, retry: Boolean(seed) });
+    },
+  });
+  podcastRun = { controller, runId: run.runId };
+  podcastRun.promise = run
+    .run()
+    .catch((err) => send('podcast:status', { runId: run.runId, state: 'failed', ...run.stats, message: `The podcast search failed: ${err.message}` }))
+    .finally(() => {
+      podcastRun = null;
+      setImmediate(drainBrowserFinds);
+    });
+  return run.runId;
+}
+
+// --- podcasts opened in the browser (Spotify, Amazon Music) ------------------------
+// Lead Finder never reads Spotify's or Amazon's pages. When the user opens a
+// podcast there, only that page's address is used: an Amazon Music podcast
+// page (its address names the podcast), or a podcast website opened from
+// either window (read like a pasted website, where its robots.txt permits).
+
+let browserSearch = { keyword: '', categoryId: null };
+const browserSeen = new Set();
+const browserQueue = [];
+
+function watchBrowserWindow(page, platform) {
+  if (page.__leadFinderWatched) return;
+  page.__leadFinderWatched = true;
+  page.on('framenavigated', (frame) => {
+    if (frame !== page.mainFrame()) return;
+    const found = browserFindOf(frame.url(), platform);
+    if (found?.platform === 'amazon') browserFind(found.url, 'amazon', null);
+  });
+  const onNewTab = async (tabPage) => {
+    if (tabPage.__leadFinderSeen) return;
+    tabPage.__leadFinderSeen = true;
+    const openerUrl = page.url();
+    // The new tab's address once it has one (it starts blank).
+    for (let i = 0; i < 40 && !/^https?:/.test(tabPage.url()); i++) await new Promise((r) => setTimeout(r, 250));
+    const found = browserFindOf(tabPage.url(), platform, openerUrl);
+    if (found) browserFind(found.url, found.platform, found.extraLinks || null);
+  };
+  page.on('popup', onNewTab);
+  // Tabs opened from this window that the popup event misses (links a page
+  // opens itself): any new tab whose opener is this window.
+  page.context().on('page', async (tabPage) => {
+    const opener = await tabPage.opener().catch(() => null);
+    if (opener === page) onNewTab(tabPage);
+  });
+}
+
+function browserFind(url, platform, extraLinks) {
+  const key = url.replace(/[?#].*$/, '').replace(/\/+$/, '').toLowerCase();
+  if (browserSeen.has(key)) return;
+  browserSeen.add(key);
+  if (browserSeen.size > 2000) browserSeen.clear();
+  browserQueue.push({ url, platform, extraLinks });
+  send('podcast:browser', { url, platform, state: 'queued', from: extraLinks ? Object.keys(extraLinks)[0] : platform });
+  drainBrowserFinds();
+}
+
+function drainBrowserFinds() {
+  if (podcastRun || !browserQueue.length || !requirePlan().ok) return;
+  const next = browserQueue.shift();
+  send('podcast:browser', { url: next.url, platform: next.platform, state: 'checking' });
+  runPodcasts({ query: next.url, extraLinks: next.extraLinks, keyword: browserSearch.keyword || next.url, categoryId: browserSearch.categoryId });
+}
+
+// A browser platform's page (Spotify) in the user's Chrome, in its own
+// window, for the user to look through. Chrome is connected the same way as
+// for a lead search (it may ask the user to Allow); the page is never read.
+async function openPodcastPage(url, signal, platform = 'spotify') {
+  if (!chrome.connected) {
+    const profile = await chrome.connect({ signal });
+    if (!search) resetTabs(profile);
+    sendStatus({ profile: profileLabel(profile) });
+  }
+  const page = await tab(platform === 'amazon' ? 'amazon' : 'spotify');
+  watchBrowserWindow(page, platform);
+  const res = await page.goto(url, { waitUntil: 'commit', timeout: 30_000 });
+  await page.bringToFront().catch(() => {});
+  // Where Chrome actually is (only the address; nothing on the page is read).
+  return { url: page.url(), status: res?.status() ?? null };
+}
+
+function stopPodcastSearch() {
+  podcastRun?.controller.abort();
+  return { ok: true };
+}
+
+// A podcast's platform page, feed, website, profile or the page an email
+// was found on: only addresses Podcast Lead Finder showed.
+function openPodcastLink(url) {
+  // An email address: the user's mail app.
+  const mail = /^mailto:([^@\s?&/]+@[^@\s?&/]+\.[a-z]{2,24})$/i.exec(String(url));
+  if (mail) {
+    shell.openExternal(`mailto:${mail[1]}`);
+    return { ok: true };
+  }
+  let u;
+  try {
+    u = new URL(String(url));
+  } catch {
+    return { ok: false };
+  }
+  const apple = u.protocol === 'https:' && u.hostname === 'podcasts.apple.com';
+  if (!apple && !(/^https?:$/.test(u.protocol) && podcastLinks.has(String(url)))) return { ok: false };
+  shell.openExternal(u.toString());
+  return { ok: true };
 }
 
 function openListing(url) {
@@ -1001,7 +1364,13 @@ function openListing(url) {
   const maps = /^(www\.)?google\.[a-z.]+$/.test(u.hostname) && u.pathname.startsWith('/maps/');
   const facebook = /^(www|m|web)\.facebook\.com$/.test(u.hostname);
   const linkedin = /^([a-z]{2,3}\.|www\.)?linkedin\.com$/.test(u.hostname) && /^\/(company|jobs\/view|feed\/update|posts)\//.test(u.pathname);
-  if (u.protocol !== 'https:' || !(maps || facebook || linkedin)) {
+  // A podcast's page on Apple Podcasts, Spotify, YouTube or Amazon Music.
+  const podcast =
+    (u.hostname === 'podcasts.apple.com' && /\/id\d+/.test(u.pathname)) ||
+    (u.hostname === 'open.spotify.com' && /^\/show\//.test(u.pathname)) ||
+    (/^(www\.)?youtube\.com$/.test(u.hostname) && /^\/(playlist|channel\/|@)/.test(u.pathname)) ||
+    (/^music\.amazon\.[a-z.]+$/.test(u.hostname) && /^\/podcasts\//.test(u.pathname));
+  if (u.protocol !== 'https:' || !(maps || facebook || linkedin || podcast)) {
     return { ok: false };
   }
   shell.openExternal(u.toString());
@@ -1014,6 +1383,7 @@ app.whenReady().then(() => {
   try {
     store = new LeadStore(path.join(app.getPath('userData'), 'leads.db'));
     appLock = new AppLock({ store, cipher: keychainCipher() });
+    dropUnusedPodcastKeys();
     activation = createActivation();
     // The subscription system's request log, from earlier versions.
     require('node:fs').rmSync(path.join(app.getPath('userData'), 'licence.log'), { force: true });
@@ -1071,16 +1441,6 @@ app.whenReady().then(() => {
   handle('whatsapp:send', (leadId, text) => waSend(leadId, text));
   handle('whatsapp:lastMessage', (leadId) => waLastMessage(leadId));
   // Chats (WhatsApp Web-style view)
-  handle('chats:list', (search) => (chats ? { ok: true, chats: chats.list(typeof search === 'string' ? search.slice(0, 100) : '') } : unavailable()));
-  handle('chats:open', (jid) => (!chats ? unavailable() : isJid(jid) ? chats.open(jid) : { ok: false, error: 'Invalid chat.' }));
-  handle('chats:loadOlder', (jid) => (!chats ? unavailable() : isJid(jid) ? chats.loadOlder(jid) : { ok: false, error: 'Invalid chat.' }));
-  handle('chats:send', async (jid, text) => {
-    if (!chats) return unavailable();
-    if (!isJid(jid)) return { ok: false, error: 'Invalid chat.' };
-    const plan = requirePlan();
-    if (!plan.ok) return plan;
-    return chats.send(jid, text);
-  });
   // Outreach campaign
   const withCampaign = (fn) => (id, ...args) => {
     if (!outreach) return unavailable();
@@ -1138,6 +1498,41 @@ app.whenReady().then(() => {
   handle('phoneCountry:get', () => phoneCountrySettings());
   handle('phoneCountry:set', (code) => setPhoneCountry(code === null ? null : String(code || '').toUpperCase()));
   handle('search:status', () => lastStatus);
+  handle('podcast:settings', () => podcastSettings());
+  handle('podcast:setSettings', (raw) => setPodcastSettings(raw));
+  handle('podcast:setKeys', (platform, values) => setPodcastKeys(String(platform), values));
+  handle('podcast:search', (q, category) => startPodcastSearch(q, category));
+  handle('podcast:stop', () => stopPodcastSearch());
+  handle('podcast:retry', (ids) => retryPodcasts(ids));
+  handle('podcast:leads', (raw) => {
+    const f = raw && typeof raw === 'object' ? raw : {};
+    const out = store.podcastLeads({
+      status: ['all', 'found', 'none', 'pending'].includes(f.status) ? f.status : 'all',
+      searchId: Number.isInteger(f.searchId) ? f.searchId : undefined,
+      platform: typeof f.platform === 'string' ? f.platform : undefined,
+      search: typeof f.search === 'string' ? f.search : '',
+      sort: ['found', 'name', 'status', 'rank'].includes(f.sort) ? f.sort : 'found',
+      dir: f.dir === 'asc' ? 'asc' : 'desc',
+      page: Number.isInteger(f.page) ? f.page : 1,
+      pageSize: [12, 24, 25, 48, 50, 100].includes(f.pageSize) ? f.pageSize : 24,
+      ids: Array.isArray(f.ids) ? f.ids.filter(Number.isInteger) : undefined,
+    });
+    for (const l of out.rows) rememberLinks(Object.values(l.podcastLinks || {}), l.websiteUrl, l.rssUrl, (l.emails || []).map((e) => e.url), l.hits.map((h) => h.sourceUrl));
+    return out;
+  });
+  handle('podcast:searches', () => store.podcastSearches(30));
+  handle('podcast:ids', (raw) => {
+    const f = raw && typeof raw === 'object' ? raw : {};
+    return store.podcastLeadIds({
+      status: ['all', 'found', 'none', 'pending'].includes(f.status) ? f.status : 'all',
+      searchId: Number.isInteger(f.searchId) ? f.searchId : undefined,
+      platform: typeof f.platform === 'string' ? f.platform : undefined,
+      search: typeof f.search === 'string' ? f.search : '',
+    });
+  });
+  handle('podcast:delete', (scope) => deletePodcasts(scope));
+  handle('podcast:export', (scope) => exportPodcasts(scope));
+  handle('podcast:open', (url) => openPodcastLink(url));
   handle('export:csv', (scope, filter) => exportCsv(scope === 'all' ? 'all' : 'filtered', filter));
   handle('lead:open', (url) => openListing(url));
   handle('activation:status', () => sendActivation());
@@ -1200,8 +1595,8 @@ app.on('before-quit', (e) => {
   e.preventDefault();
   // Stop automation and detach from Chrome without closing it.
   search?.controller.abort();
-  Promise.resolve(search?.promise)
-    .catch(() => {})
+  podcastRun?.controller.abort();
+  Promise.all([search?.promise, podcastRun?.promise].map((p) => Promise.resolve(p).catch(() => {})))
     .then(() => outreach?.dispose())
     .then(() => chrome.disconnect())
     .then(() => wa?.disconnect()) // closes the connection; the linked session is kept

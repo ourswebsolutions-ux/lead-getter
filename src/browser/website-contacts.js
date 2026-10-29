@@ -68,7 +68,7 @@ function contactsFromHtml(html, baseUrl, { country = null } = {}) {
   const { phones } = findPhones(text, { country, links: tels, max: 5 });
   const host = hostOf(baseUrl);
   const contactPages = links
-    .filter((l) => hostOf(l.href) === host && /contact|about|reach|support|get-in-touch|enquir|inquir/i.test(`${l.href} ${l.text}`))
+    .filter((l) => hostOf(l.href) === host && /contact|about|reach|support|get-in-touch|enquir|inquir|guest|booking|be-on|advertis|sponsor|press|media-kit|work-with|partner/i.test(`${l.href} ${l.text}`))
     .map((l) => l.href.split('#')[0])
     .filter((h, i, a) => h && a.indexOf(h) === i);
   return { emails: [...emails].filter((e) => !NOT_AN_EMAIL.test(e)), phones, contactPages };
@@ -120,24 +120,30 @@ async function fetchPage(url, { fetchImpl = globalThis.fetch, timeout = 12_000, 
 
 // { emails: [best first], phones: [{ phone, raw, status, country }],
 //   pages: [urls read], error }.
-async function findContacts(website, { country = null, fetchImpl, signal, maxPages = 3, timeout } = {}) {
+// allow(url) -> Promise<boolean>: pages it refuses are not read (robots.txt).
+async function findContacts(website, { country = null, fetchImpl, signal, maxPages = 3, timeout, allow } = {}) {
+  if (allow && !(await allow(website))) return { emails: [], phones: [], pages: [], error: 'its robots.txt does not permit automated reading' };
   const home = await fetchPage(website, { fetchImpl, signal, timeout });
   if (!home.ok) return { emails: [], phones: [], pages: [], error: home.error || `HTTP ${home.status || 'error'}` };
   const pages = [home.url];
   const first = contactsFromHtml(home.html, home.url, { country });
   const emails = [...first.emails];
   const phones = [...first.phones];
+  // The page each email was first seen on.
+  const emailPages = Object.fromEntries(first.emails.map((e) => [e, home.url]));
   for (const url of first.contactPages.slice(0, maxPages - 1)) {
+    if (allow && !(await allow(url))) continue;
     const p = await fetchPage(url, { fetchImpl, signal, timeout });
     if (!p.ok) continue;
     pages.push(p.url);
     const c = contactsFromHtml(p.html, p.url, { country });
     emails.push(...c.emails);
+    for (const e of c.emails) emailPages[e] ||= p.url;
     for (const ph of c.phones) if (!phones.some((x) => x.phone === ph.phone)) phones.push(ph);
   }
   // Validated numbers first.
   phones.sort((a, b) => (a.status === 'valid' ? 0 : 1) - (b.status === 'valid' ? 0 : 1));
-  return { emails: rankEmails(emails, home.url), phones, pages, error: null };
+  return { emails: rankEmails(emails, home.url), phones, pages, emailPages, error: null };
 }
 
 // The same, read in a browser tab: for sites that refuse a plain request
@@ -174,4 +180,4 @@ async function findContactsInPage(page, website, { country = null, maxPages = 3,
   return { emails: rankEmails(emails, home.url), phones, pages, error: null, via: 'browser' };
 }
 
-module.exports = { findContacts, findContactsInPage, contactsFromHtml, rankEmails, textOf, fetchPage };
+module.exports = { findContacts, findContactsInPage, contactsFromHtml, rankEmails, textOf, fetchPage, NOT_AN_EMAIL };

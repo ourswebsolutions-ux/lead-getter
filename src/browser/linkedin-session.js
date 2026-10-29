@@ -157,12 +157,16 @@ class LinkedInSession extends SearchSession {
 
   // A LinkedIn page; a login page, check or limit ends the LinkedIn pages
   // (not the search). Returns the result, or null when LinkedIn is closed.
-  async liPage(page, fn) {
-    if (this.blocked) return null;
+  // isPublic: LinkedIn's public job results, which need no login: a login
+  // page elsewhere (a company page) does not stop them; a security check or
+  // a limit does.
+  async liPage(page, fn, { isPublic = false } = {}) {
+    if (this.blocked && !(isPublic && this.blocked === 'login')) return null;
     const r = await this.netOp(() => fn(), page);
     if (UNAVAILABLE[r.mode]) {
-      if (!this.blocked) this.status('running', `LinkedIn: ${UNAVAILABLE[r.mode]} Continuing with the companies already found.`);
-      this.blocked = r.mode;
+      if (!this.blocked) this.status('running', `LinkedIn: ${UNAVAILABLE[r.mode]} ${isPublic || !this.li.jobsPage || !this.modes.jobs ? 'Continuing with the companies already found.' : 'Job results go on (they need no login); company pages are skipped, and contacts come from Google Maps and websites.'}`);
+      // A limit or check on the public results is worse than a login page.
+      if (!this.blocked || r.mode !== 'login') this.blocked = r.mode;
       return null;
     }
     await this.pause(this.pacing.liPage);
@@ -190,12 +194,12 @@ class LinkedInSession extends SearchSession {
   async runJobs(page) {
     this.setStep('searching');
     this.jobOffset ||= 0;
-    while (this.jobPages < this.pacing.liMaxPages && !this.blocked) {
+    while (this.jobPages < this.pacing.liMaxPages && !(this.blocked && !(this.li.jobsPage && this.blocked === 'login'))) {
       const start = this.jobOffset;
       this.progress('jobs', `results page ${this.jobPages + 1} for "${this.keyword}"`);
       // LinkedIn's public results pages when available (?start=<offset>),
       // else its jobs search page scrolled for more.
-      const r = await this.liPage(page, () => (this.li.jobsPage ? this.li.jobsPage(page, this.keyword, start) : this.li.searchJobs(page, this.keyword)));
+      const r = await this.liPage(page, () => (this.li.jobsPage ? this.li.jobsPage(page, this.keyword, start) : this.li.searchJobs(page, this.keyword)), { isPublic: Boolean(this.li.jobsPage) });
       if (!r) return;
       if (r.mode === 'empty') return this.progress('jobs', start ? `no more job results after ${this.jobPages} pages` : 'no jobs found');
       if (r.mode !== 'ok') return this.progress('jobs', `results page ${this.jobPages + 1} did not load (${r.detail || r.mode})`);
@@ -443,7 +447,10 @@ class LinkedInSession extends SearchSession {
     website ||= mapsSite;
 
     const email = emails[0] || '';
-    const state = (found, from) => (found ? `found (${from})` : failed.length ? `not found; could not check: ${failed.join(', ')}` : `not published (checked: ${checked.join(', ') || 'nothing to check'})`);
+    // Not found: what was checked, and what could not be (so "not published"
+    // is only said when nothing failed).
+    const state = (found, from) =>
+      found ? `found (${from})` : failed.length ? `not found (checked: ${checked.join(', ') || 'nothing'}); could not check: ${failed.join(', ')}` : `not published (checked: ${checked.join(', ') || 'nothing to check'})`;
     c.details = {
       name,
       website,

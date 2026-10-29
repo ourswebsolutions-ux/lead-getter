@@ -173,7 +173,7 @@ test('LinkedIn search: jobs -> companies -> websites -> Google Maps -> posts -> 
   const eps = leads['Epsilon Co'];
   assert.deepEqual([eps.phone, eps.websiteUrl], ['+92412345678', 'https://epsilon.example.org/'], eps.discovery);
   // A site that could not be read: a failed lookup, said as such.
-  assert.match(eps.discovery, /email: not found; could not check: website \(HTTP 404\)/);
+  assert.match(eps.discovery, /email: not found \(checked: LinkedIn, Google Maps\); could not check: website \(HTTP 404\)/);
 
   // Every results page (2 jobs each), until LinkedIn showed no more.
   assert.equal(stats.pages, 2);
@@ -210,6 +210,20 @@ test('LinkedIn login wall on company pages: reported, and companies are still co
   assert.equal(leads['Gamma Traders'].phone, '+922134567890');
   assert.ok(leads['Acme Soft'] || leads['Acme Soft (Pvt) Ltd']);
   assert.match((leads['Acme Soft'] || {}).discovery || '', /could not check: LinkedIn page \(login\)/);
+});
+
+test('Regression: a login page on company pages does not stop the public job results: every results page is still read', { skip: !exe && 'Google Chrome not installed' }, async (t) => {
+  // Two jobs per results page: before the fix, the search stopped after the first page.
+  const { outcome, store, stats } = await run(t, { config: { authwall: '/company/', perPage: 2 } });
+  assert.equal(outcome.state, 'done', outcome.message);
+  assert.match(outcome.message, /4 jobs on 2 results pages/);
+  assert.match(outcome.message, /LinkedIn asked to log in/);
+  assert.equal(stats.pages, 2);
+  const leads = byName(store);
+  assert.ok(Object.keys(leads).length >= 3, Object.keys(leads).join(', '));
+  // Contacts still come from Google Maps and websites; the status says what was checked.
+  assert.equal(leads['Gamma Traders'].phone, '+922134567890');
+  for (const l of Object.values(leads)) if (!l.email) assert.match(l.discovery, /email: not found \(checked: .+?\); could not check: LinkedIn page \(login\)/);
 });
 
 test('LinkedIn not available at all: the LinkedIn part says why and saves nothing', { skip: !exe && 'Google Chrome not installed' }, async (t) => {
