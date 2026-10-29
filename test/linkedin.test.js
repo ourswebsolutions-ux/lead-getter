@@ -102,14 +102,16 @@ const SITES = {
   'https://betalabs.io/contact-us': '<p>Write to hello@betalabs.io</p>',
 };
 
-async function run(t, { config = {}, pacing = {}, store = new LeadStore(':memory:'), signal = new AbortController().signal, onLead = () => {} } = {}) {
+async function run(t, { config = {}, pacing = {}, store = new LeadStore(':memory:'), signal = new AbortController().signal, onLead = () => {}, modes, linkedin = li } = {}) {
   const browser = await chromium.launch({ executablePath: exe, headless: true });
   t.after(() => browser.close());
   const context = await browser.newContext({ viewport: { width: 1100, height: 900 } });
   await context.addCookies([{ name: 'li_at', value: '1', domain: '.linkedin.com', path: '/', secure: true }]);
   const page = await context.newPage();
-  await page.route('https://www.linkedin.com/**', (r) => r.fulfill({ contentType: 'text/html; charset=utf-8', body: fixture.replace('<script>', `<script>window.CONFIG = ${JSON.stringify(config)};</script><script>`) }));
-  await page.route('https://www.google.com/**', (r) => r.fulfill({ contentType: 'text/html', body: '<div role="feed"></div>' }));
+  // Every tab of the context sees the same LinkedIn and Google pages.
+  await context.route('https://www.linkedin.com/**', (r) => r.fulfill({ contentType: 'text/html; charset=utf-8', body: fixture.replace('<script>', `<script>window.CONFIG = ${JSON.stringify(config)};</script><script>`) }));
+  await context.route('https://www.google.com/**', (r) => r.fulfill({ contentType: 'text/html', body: '<div role="feed"></div>' }));
+  await context.route(/^https:\/\/(?!www\.(linkedin|google)\.com)/, (r) => r.fulfill({ status: 404, contentType: 'text/html', body: 'not found' }));
   const maps = mockMaps();
   const statuses = [];
   const diag = [];
@@ -118,6 +120,8 @@ async function run(t, { config = {}, pacing = {}, store = new LeadStore(':memory
     country: 'PK',
     store,
     pages: { linkedin: async () => page },
+    linkedin,
+    ...(modes ? { modes } : {}),
     signal,
     maps,
     fetchImpl: site(SITES),
@@ -126,7 +130,7 @@ async function run(t, { config = {}, pacing = {}, store = new LeadStore(':memory
     emit: (e, p) => (e === 'status' ? statuses.push(p.message) : onLead(p)),
   });
   const outcome = await session.run();
-  return { outcome, stats: session.stats.linkedin, store, statuses, maps, diag };
+  return { outcome, stats: session.stats.linkedin, store, statuses, maps, diag, context };
 }
 
 const byName = (store) => Object.fromEntries(store.listLeads().map((l) => [l.name, l]));
@@ -146,18 +150,19 @@ test('LinkedIn search: jobs -> companies -> websites -> Google Maps -> posts -> 
       job: 'https://www.linkedin.com/jobs/view/4001/', title: 'Full Stack Developer', address: 'Lahore, Punjab', sources: ['linkedin'],
     },
   );
-  assert.match(acme.discovery, /phone \(linkedin\), email, website/);
+  assert.equal(acme.discovery, 'phone: found (LinkedIn); email: found (website); website: acmesoft.com');
   assert.equal(store.listLeads().filter((l) => l.linkedinUrl === acme.linkedinUrl).length, 1, 'two jobs, one company');
 
   // Website contact page: email only; Google Maps had no exact match ("Beta Labs International").
   const beta = leads['Beta Labs'];
   assert.deepEqual([beta.email, beta.phone], ['hello@betalabs.io', '']);
-  assert.match(beta.discovery, /no phone.*no exact Google Maps match/);
+  // Unavailable (every source checked), not a failed lookup.
+  assert.match(beta.discovery, /^phone: not published \(checked: LinkedIn, Google Maps \(no exact match\), website\); email: found \(website\)/);
 
   // Stage 3: no website, no phone on LinkedIn: Google Maps, the exact name in the same city.
   const gamma = leads['Gamma Traders'];
   assert.deepEqual([gamma.phone, gamma.phoneStatus, gamma.websiteUrl], ['+922134567890', 'valid', '']);
-  assert.match(gamma.discovery, /phone \(maps\)/);
+  assert.match(gamma.discovery, /^phone: found \(Google Maps\); email: not published \(checked: LinkedIn, Google Maps\); website: none found$/);
 
   // Stage 4: a company's hiring post (email in it); Maps result in another city is rejected.
   const delta = leads['Delta Digital'];
@@ -166,13 +171,19 @@ test('LinkedIn search: jobs -> companies -> websites -> Google Maps -> posts -> 
   assert.equal(leads['Rida Recruiter'].phone, '+923217654321');
   // Stage 5: company search (too few companies); website unreachable, Maps (same site) gave the number.
   const eps = leads['Epsilon Co'];
-  assert.deepEqual([eps.phone, eps.websiteUrl], ['+92412345678', 'https://epsilon.example.org/']);
-  assert.match(eps.discovery, /website not reached/);
+  assert.deepEqual([eps.phone, eps.websiteUrl], ['+92412345678', 'https://epsilon.example.org/'], eps.discovery);
+  // A site that could not be read: a failed lookup, said as such.
+  assert.match(eps.discovery, /email: not found; could not check: website \(HTTP 404\)/);
 
-  assert.deepEqual(maps.queries.sort(), ['Beta Labs Islamabad', 'Delta Digital Lahore', 'Epsilon Co Faisalabad', 'Gamma Traders Karachi']);
+  // Every results page (2 jobs each), until LinkedIn showed no more.
+  assert.equal(stats.pages, 2);
+  assert.match(outcome.message, /^4 jobs on 2 results pages, 3 posts, /);
+  // Google Maps, second, whenever a phone or email is still missing after LinkedIn
+  // (Acme and Rida have a phone but no email yet).
+  assert.deepEqual(maps.queries.sort(), ['Acme Soft (Pvt) Ltd Lahore', 'Beta Labs Islamabad', 'Delta Digital Lahore', 'Epsilon Co Faisalabad', 'Gamma Traders Karachi', 'Rida Recruiter']);
   assert.deepEqual(
     { jobs: stats.jobs, posts: stats.posts, companies: stats.companies, newLeads: stats.newLeads, withPhone: stats.withPhone, withEmail: stats.withEmail },
-    { jobs: 4, posts: 3, companies: 6, newLeads: 6, withPhone: 4, withEmail: 3 },
+    { jobs: 4, posts: 3, companies: 7, newLeads: 6, withPhone: 4, withEmail: 3 },
   );
   // Progress per stage.
   for (const stage of ['jobs', 'company', 'website', 'maps', 'posts', 'companies']) assert.ok(statuses.some((m) => m.startsWith(`LinkedIn ${stage}:`)), stage);
@@ -190,14 +201,15 @@ test('LinkedIn search: jobs -> companies -> websites -> Google Maps -> posts -> 
 });
 
 test('LinkedIn login wall on company pages: reported, and companies are still completed from websites and Maps', { skip: !exe && 'Google Chrome not installed' }, async (t) => {
-  const { outcome, store } = await run(t, { config: { authwall: '/company/' } });
+  // All jobs on one results page (no further LinkedIn page is opened after the wall).
+  const { outcome, store } = await run(t, { config: { authwall: '/company/', perPage: 10 } });
   assert.equal(outcome.state, 'done', outcome.message);
   assert.match(outcome.message, /LinkedIn asked to log in/);
   const leads = byName(store);
   // Job companies are kept (names from the jobs), Gamma still matched on Maps.
   assert.equal(leads['Gamma Traders'].phone, '+922134567890');
   assert.ok(leads['Acme Soft'] || leads['Acme Soft (Pvt) Ltd']);
-  assert.match((leads['Acme Soft'] || {}).discovery || '', /LinkedIn company page not read \(login\)/);
+  assert.match((leads['Acme Soft'] || {}).discovery || '', /could not check: LinkedIn page \(login\)/);
 });
 
 test('LinkedIn not available at all: the LinkedIn part says why and saves nothing', { skip: !exe && 'Google Chrome not installed' }, async (t) => {
@@ -297,4 +309,55 @@ test('"Not on WhatsApp" lists and exports only numbers WhatsApp said have no acc
   assert.deepEqual(s.listLeads({ whatsapp: 'unavailable' }).map((l) => l.name), ['Shop 2']);
   assert.deepEqual(s.listLeads({ whatsapp: 'available' }).map((l) => l.name), ['Shop 1']);
   assert.equal(s.listLeads({}).length, 3, 'not checked yet: in neither list');
+});
+
+test('LinkedIn modes: Posts only runs no job or company search; Jobs only no post search', { skip: !exe && 'Google Chrome not installed' }, async (t) => {
+  const posts = await run(t, { modes: { jobs: false, posts: true, companies: false } });
+  assert.equal(posts.outcome.state, 'done', posts.outcome.message);
+  assert.deepEqual([posts.stats.jobs, posts.stats.posts], [0, 3]);
+  assert.deepEqual(posts.store.listLeads().map((l) => l.name).sort(), ['Delta Digital', 'Rida Recruiter']);
+  const jobs = await run(t, { modes: { jobs: true, posts: false, companies: false } });
+  assert.deepEqual([jobs.stats.jobs, jobs.stats.posts], [4, 0]);
+  assert.deepEqual(jobs.store.listLeads().map((l) => l.name).sort(), ['Acme Soft (Pvt) Ltd', 'Beta Labs', 'Gamma Traders']);
+});
+
+test('relevance: search words as prefixes, a name alone is not enough', () => {
+  const { searchTerms, relevance } = require('../src/browser/linkedin-session');
+  const terms = searchTerms('video editor in USA');
+  assert.deepEqual(terms, ['vide', 'edit', 'usa']);
+  assert.ok(relevance('Senior Video Editing Lead', terms) >= 0.5);
+  assert.ok(relevance('Film Editor', terms) < 0.5);
+  assert.equal(relevance('Bakery and cafe', terms), 0);
+});
+
+test('LinkedIn posts in the current layout (no activity ids): one post per control menu', { skip: !exe && 'Google Chrome not installed' }, async (t) => {
+  const browser = await chromium.launch({ executablePath: exe, headless: true });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  // As seen on linkedin.com: "Feed post" blocks, the author in the control menu's label.
+  const post = (author, href, text) => `<div componentkey="update-card-focus${author.length}"><h2>Feed post</h2>
+    <div><a href="${href}">${author}</a><button aria-label="Open control menu for post by ${author}">…</button></div>
+    <div><span>${text}</span><button>… more</button></div><div><button aria-label="Repost">Repost</button></div></div>`;
+  await page.setContent(`<main><div>${post('Alex Mitar', 'https://www.linkedin.com/in/alexmitar/', 'Video Editor Needed. Looking for a video editor for branded content. Email jobs@mitarfilms.com')}
+    ${post('Studio Nine', 'https://www.linkedin.com/company/studio-nine/', 'We are hiring a video editor for a new campaign project.')}</div></main>`);
+  const posts = await page.evaluate(li.collectPostsInPage);
+  assert.equal(posts.length, 2);
+  assert.deepEqual(posts.map((p) => p.author), ['Alex Mitar', 'Studio Nine']);
+  assert.match(posts[0].text, /jobs@mitarfilms\.com/);
+  assert.equal(posts[1].companyHrefs[0], 'https://www.linkedin.com/company/studio-nine/');
+  assert.ok(posts[0].key && posts[0].key !== posts[1].key);
+});
+
+test('LinkedIn company pages without a labelled website: the outside link written as a web address', { skip: !exe && 'Google Chrome not installed' }, async (t) => {
+  const browser = await chromium.launch({ executablePath: exe, headless: true });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.setContent(`<main><h1>BrainX Technologies</h1>
+    <section><p>Software house in Lahore. Follow us on <a href="https://www.facebook.com/brainx">facebook.com/brainx</a></p>
+    <div><a href="https://www.linkedin.com/redir/redirect/?url=https%3A%2F%2Fwww.brainx.tech%2F&amp;urlhash=x">www.brainx.tech</a></div>
+    <div><a href="tel:+924238913038">042 38913038</a></div></section></main>`);
+  const c = await page.evaluate(li.readCompanyInPage);
+  assert.equal(c.website, '', 'no labelled website');
+  assert.equal(li.cleanWebsite(c.siteLinks.find((h) => li.cleanWebsite(h))), 'https://www.brainx.tech/', 'the web address link, not the social page');
+  assert.deepEqual(c.tels, ['tel:+924238913038']);
 });

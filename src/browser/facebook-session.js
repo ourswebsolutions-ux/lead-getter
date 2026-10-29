@@ -103,6 +103,17 @@ class FacebookSession extends SearchSession {
   }
 
   async searchQuery(page, query) {
+    try {
+      return await this.searchQueryOnce(page, query);
+    } catch (err) {
+      try {
+        this.diagnose?.({ source: 'facebook', query, ending: `ended: ${String(err?.kind || err?.message || err).split('\n')[0].slice(0, 160)}`, stats: { ...this.stats.facebook } });
+      } catch {}
+      throw err;
+    }
+  }
+
+  async searchQueryOnce(page, query) {
     this.setStep('searching');
     this.status('running', `Facebook: searching posts for "${query}"`);
     const result = await this.netOp(() => this.fb.openSearch(page, query), page);
@@ -179,7 +190,8 @@ class FacebookSession extends SearchSession {
     f.posts++;
     const who = post.author || 'a Facebook user';
     const postUrl = post.url || `${this.fb.searchUrl(query)}#lf-${post.key.replace(/^text:/, '').slice(0, 16)}`;
-    if (this.store.hasFacebookPost(postUrl)) return this.status('running', `Facebook: already saved a post by ${who}`);
+    // Every post's text is read, even one saved before: its numbers are then
+    // counted as already saved (saving is idempotent), never skipped unread.
     const items = [{ text: post.text, links: post.links, author: post.author, pageUrl: post.pageUrl }, ...(post.comments || []).map((c) => ({ ...c, links: [] }))];
     let found = 0;
     let added = 0;
@@ -225,8 +237,8 @@ class FacebookSession extends SearchSession {
         this.emit('lead', saved.lead);
       }
     }
-    if (!found) return this.status('running', `Facebook: no phone number in a post by ${who}`);
-    this.status('running', added ? `Facebook lead found: ${who}` : `Facebook: ${who}'s number is already a lead`);
+    if (!found) return this.progress(`no phone number in a post by ${who}`);
+    this.progress(added ? `lead found: ${who}` : `${who}'s number is already a lead`);
   }
 
   saveFacebook(r) {

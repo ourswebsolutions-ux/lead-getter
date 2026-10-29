@@ -23,14 +23,27 @@
     'gamma-traders': { name: 'Gamma Traders', hq: 'Karachi, Sindh' },
     'delta-digital': { name: 'Delta Digital', hq: 'Lahore, Punjab' },
     'epsilon-co': { name: 'Epsilon Co', website: 'https://epsilon.example.org', hq: 'Faisalabad, Punjab' },
+    'developer-coffee': { name: 'Developer Coffee Roasters', hq: 'Lahore, Punjab', industry: 'Food and Beverage Services', about: 'Specialty coffee roasted daily in Lahore.' },
   };
   const main = document.getElementById('main');
   const p = location.pathname;
   let m;
   if (C.authwall && (C.authwall === 'all' || p.startsWith(C.authwall))) {
     main.innerHTML = '<form class="authwall-join-form"><input id="session_key"><button>Sign in</button></form>';
+  } else if (p.startsWith('/jobs-guest/jobs/api/seeMoreJobPostings/search')) {
+    // LinkedIn's public job results: public job cards, C.perPage per page, then nothing.
+    const start = Number(new URLSearchParams(location.search).get('start') || 0);
+    main.innerHTML = JOBS.slice(start, start + (C.perPage || 2)).map((j) => `<li><div class="base-card base-search-card job-search-card" data-entity-urn="urn:li:jobPosting:${j.id}">
+      <a class="base-card__full-link" href="https://www.linkedin.com/jobs/view/${j.title.toLowerCase().replace(/[^a-z]+/g, '-')}-at-${j.slug}-${j.id}?position=1&amp;refId=x"><span class="sr-only">${j.title}</span></a>
+      <div class="base-search-card__info"><h3 class="base-search-card__title">${j.title}</h3>
+      <h4 class="base-search-card__subtitle"><a class="hidden-nested-link" href="https://www.linkedin.com/company/${j.slug}?trk=public_jobs_jserp-result_job-search-card-subtitle">${j.company}</a></h4>
+      <div class="base-search-card__metadata"><span class="job-search-card__location">${j.location}</span></div></div></div></li>`).join('');
   } else if (p.startsWith('/jobs/search')) {
-    main.innerHTML = '<ul class="jobs-list">' + JOBS.map((j) => `<li data-occludable-job-id="${j.id}">
+    // Two jobs per results page (?start=0, 2, 4, ...), then LinkedIn's "no more".
+    const start = Number(new URLSearchParams(location.search).get('start') || 0);
+    const pageJobs = JOBS.slice(start, start + (C.perPage || 2));
+    if (!pageJobs.length) main.innerHTML = '<h2>No matching jobs found.</h2>';
+    else main.innerHTML = '<ul class="jobs-list">' + pageJobs.map((j) => `<li data-occludable-job-id="${j.id}">
       <div class="job-card-container"><a class="job-card-container__link" href="/jobs/view/${j.id}/?trk=public_jobs&refId=x" aria-label="${j.title}"><strong>${j.title}</strong></a>
       <div class="artdeco-entity-lockup__subtitle"><span>${j.company}</span></div>
       <ul class="artdeco-entity-lockup__caption"><li>${j.location}</li></ul></div></li>`).join('') + '</ul>';
@@ -42,10 +55,10 @@
       <div id="job-details">We are hiring a ${j.title} to build our web platform. Apply via LinkedIn.</div>`;
   } else if ((m = p.match(/^\/company\/([^/]+)\/about/))) {
     const c = COMPANIES[m[1]];
-    main.innerHTML = `<h1>${c.name}</h1><section><h2>Overview</h2><p>${c.name} builds software.</p><dl>
+    main.innerHTML = `<h1>${c.name}</h1><section><h2>Overview</h2><p>${c.about || `${c.name} builds software.`}</p><dl>
       ${c.website ? `<dt><h3>Website</h3></dt><dd><a href="https://www.linkedin.com/redir/redirect?url=${encodeURIComponent(c.website)}&urlhash=x">${c.website}</a></dd>` : ''}
       ${c.phone ? `<dt><h3>Phone</h3></dt><dd><a href="tel:${c.phone}"><span>${c.phone}</span></a><span class="visually-hidden">Phone number is a link</span></dd>` : ''}
-      <dt><h3>Industry</h3></dt><dd>Software Development</dd>
+      <dt><h3>Industry</h3></dt><dd>${c.industry || 'Software Development'}</dd>
       <dt><h3>Headquarters</h3></dt><dd>${c.hq}</dd></dl></section>`;
   } else if (p.startsWith('/search/results/content')) {
     main.innerHTML = `
@@ -56,7 +69,9 @@
       <div data-urn="urn:li:activity:7003"><div class="update-components-actor__container"><a class="update-components-actor__meta-link" href="https://www.linkedin.com/in/recruiter/"><span class="update-components-actor__title"><span aria-hidden="true">Rida Recruiter</span></span></a></div>
         <div class="update-components-text">Need a freelance full stack developer for an outsourcing project. WhatsApp 0321 7654321</div></div>`;
   } else if (p.startsWith('/search/results/companies')) {
-    main.innerHTML = '<ul><li><a href="https://www.linkedin.com/company/epsilon-co/">Epsilon Co</a><div>IT Services · Faisalabad</div></li></ul>';
+    main.innerHTML = new URLSearchParams(location.search).get('page')
+      ? '<p>No results found</p>'
+      : '<ul><li><a href="https://www.linkedin.com/company/epsilon-co/">Epsilon Co</a><div>IT Services · Faisalabad</div></li><li><a href="https://www.linkedin.com/company/developer-coffee/">Developer Coffee Roasters</a><div>Food &amp; Beverage · Lahore</div></li></ul>';
   }
 </script>
 </body>

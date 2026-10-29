@@ -140,4 +140,38 @@ async function findContacts(website, { country = null, fetchImpl, signal, maxPag
   return { emails: rankEmails(emails, home.url), phones, pages, error: null };
 }
 
-module.exports = { findContacts, contactsFromHtml, rankEmails, textOf, fetchPage };
+// The same, read in a browser tab: for sites that refuse a plain request
+// (bot protection, HTTP 403) or need scripts to show their contact details.
+async function findContactsInPage(page, website, { country = null, maxPages = 3, timeout = 25_000 } = {}) {
+  const read = async (url) => {
+    try {
+      const res = await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
+      if (res && res.status() >= 400) return null;
+      await page.waitForTimeout(1500);
+      return { url: page.url(), html: await page.content() };
+    } catch {
+      // A failed load is still turning into Chrome's error page: let it
+      // settle so the page's next navigation isn't interrupted by it.
+      await page.waitForLoadState('load', { timeout: 8000 }).catch(() => {});
+      return null;
+    }
+  };
+  const home = await read(website);
+  if (!home) return { emails: [], phones: [], pages: [], error: 'could not be opened' };
+  const pages = [home.url];
+  const first = contactsFromHtml(home.html, home.url, { country });
+  const emails = [...first.emails];
+  const phones = [...first.phones];
+  for (const url of first.contactPages.slice(0, maxPages - 1)) {
+    const p = await read(url);
+    if (!p) continue;
+    pages.push(p.url);
+    const c = contactsFromHtml(p.html, p.url, { country });
+    emails.push(...c.emails);
+    for (const ph of c.phones) if (!phones.some((x) => x.phone === ph.phone)) phones.push(ph);
+  }
+  phones.sort((a, b) => (a.status === 'valid' ? 0 : 1) - (b.status === 'valid' ? 0 : 1));
+  return { emails: rankEmails(emails, home.url), phones, pages, error: null, via: 'browser' };
+}
+
+module.exports = { findContacts, findContactsInPage, contactsFromHtml, rankEmails, textOf, fetchPage };

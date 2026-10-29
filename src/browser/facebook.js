@@ -46,15 +46,27 @@ function unwrap(href) {
   }
 }
 
-const POST_PATH = /\/posts\/|\/permalink\/|\/permalink\.php|\/story\.php|\/photo\.php|\/photos\/|\/videos\/|\/reel\/|\/groups\/[^/]+\/(posts|permalink)\//;
+const POST_PATH = /\/posts\/|\/permalink\/|\/permalink\.php|\/story\.php|\/photo\.php|^\/photo\/?$|\/photos\/|\/videos\/|\/reel\/|\/groups\/[^/]+\/(posts|permalink)\//;
 // Query parameters that identify a post; everything else is tracking.
 const KEEP_PARAMS = ['story_fbid', 'id', 'fbid', 'v', 'set'];
+
+// Facebook's own pages whose paths can look like a post's (the search page is
+// /search/posts/): never a post.
+const NOT_A_POST = /^\/(search|hashtag|watch\/search|events|marketplace|login|help|policies|privacy|settings|notifications|messages|bookmarks|friends|gaming|ads|business|pages\/create)(\/|$)/i;
 
 // A post's address without tracking parameters, or '' if it is not a post.
 function cleanPostUrl(href) {
   try {
     const u = new URL(unwrap(href));
-    if (u.protocol !== 'https:' || !isFacebookHost(u.hostname) || !POST_PATH.test(u.pathname)) return '';
+    if (u.protocol !== 'https:' || !isFacebookHost(u.hostname) || NOT_A_POST.test(u.pathname)) return '';
+    // A group post as Facebook links it from search: /groups/<id>/?multi_permalinks=<post>.
+    const group = u.pathname.match(/^\/groups\/([^/]+)\/?$/);
+    const multi = (u.searchParams.get('multi_permalinks') || '').split(',')[0];
+    if (group && /^\d+$/.test(multi)) return `https://www.facebook.com/groups/${group[1]}/posts/${multi}`;
+    // A photo of a group post (set=gm.<post>&idorvanity=<group>).
+    const gm = (u.searchParams.get('set') || '').match(/^gm\.(\d+)$/);
+    if (/^\/photo\/?$/.test(u.pathname) && gm && u.searchParams.get('idorvanity')) return `https://www.facebook.com/groups/${u.searchParams.get('idorvanity')}/posts/${gm[1]}`;
+    if (!POST_PATH.test(u.pathname)) return '';
     const q = new URLSearchParams();
     for (const k of KEEP_PARAMS) if (u.searchParams.get(k)) q.set(k, u.searchParams.get(k));
     const qs = q.toString();
@@ -195,9 +207,15 @@ async function collectPosts(page) {
   return (await page.evaluate(collectInPage)).map(parsePost);
 }
 
+// The post's own address: its post/permalink link first, a photo of it last.
+function postUrlOf(hrefs) {
+  const found = hrefs.map(cleanPostUrl).filter(Boolean);
+  return found.find((u) => !/\/photo(\.php|\/|$)|\/photos\//.test(new URL(u).pathname)) || found[0] || '';
+}
+
 function parsePost(raw) {
   const hrefs = raw.hrefs || [];
-  const url = hrefs.map(cleanPostUrl).find(Boolean) || '';
+  const url = postUrlOf(hrefs);
   const pageUrl = cleanProfileUrl(raw.authorUrl);
   const links = hrefs.map((h) => unwrap(h) || h).filter((h) => /^tel:|wa\.me\/|whatsapp\.com\/send/i.test(h));
   const text = String(raw.text || '').trim();
@@ -208,16 +226,17 @@ function parsePost(raw) {
   return { key, url, pageUrl, author: String(raw.author || '').trim(), text, links, comments };
 }
 
-// Facebook often leaves a post's own link (its date) empty until the
-// pointer is over it. For posts without one, the date links are hovered so
-// Facebook fills them in, the way it does for a person reading. Returns how
-// many were hovered.
+// Facebook leaves a post's own link (its date) as "?__cft__..." (or "#")
+// until the pointer is over it; read as is, that is the search page. For
+// posts without a post link, those links are hovered so Facebook fills in the
+// post's address, the way it does for a person reading. Returns how many
+// were hovered.
 async function revealPostLinks(page, { max = 12 } = {}) {
   const n = await page
     .evaluate((limit) => {
       const sel = '[role="article"], div[aria-posinset]';
       const posts = [...document.querySelectorAll(sel)].filter((el) => !el.parentElement?.closest(sel));
-      const isPost = (h) => /\/posts\/|\/permalink|story_fbid|\/photo|\/videos\/|\/reel\//.test(h || '');
+      const isPost = (h) => /\/posts\/|\/permalink|story_fbid|multi_permalinks|\/videos\/|\/reel\//.test(h || '') && !/^\/?search\//.test(h || '');
       let i = 0;
       for (const post of posts) {
         if (i >= limit) break;
@@ -225,7 +244,7 @@ async function revealPostLinks(page, { max = 12 } = {}) {
         const own = [...post.querySelectorAll('a')].filter((a) => !a.closest(sel + ' ' + sel) || a.closest(sel) === post);
         const cand = own.find((a) => {
           const h = a.getAttribute('href');
-          return (!h || h === '#' || h.startsWith('#')) && a.offsetParent !== null;
+          return (!h || h.startsWith('#') || h.startsWith('?')) && a.offsetParent !== null;
         });
         if (cand) cand.setAttribute('data-lf-reveal', String(i++));
       }
@@ -234,10 +253,10 @@ async function revealPostLinks(page, { max = 12 } = {}) {
     .catch(() => 0);
   for (let i = 0; i < n; i++) {
     const a = page.locator(`[data-lf-reveal="${i}"]`).first();
-    await a.hover({ timeout: 1500, force: true }).catch(() => {});
+    await a.hover({ timeout: 2500 }).catch(() => a.hover({ timeout: 1000, force: true }).catch(() => {}));
     await a.focus({ timeout: 500 }).catch(() => {});
   }
-  if (n) await page.waitForTimeout(300);
+  if (n) await page.waitForTimeout(500);
   await page.evaluate(() => document.querySelectorAll('[data-lf-reveal]').forEach((a) => a.removeAttribute('data-lf-reveal'))).catch(() => {});
   return n;
 }

@@ -79,8 +79,28 @@ function normalizePhone(raw, { address } = {}) {
 // --- numbers in free text (posts, pages, websites) ------------------------------
 
 // Arabic-Indic and Persian digits as 0-9, so "۰۳۰۰" is read like "0300".
+// Also: full-width digits, keycap emoji digits ("0️⃣3️⃣"), HTML entities
+// left in text ("&#48;" or "&nbsp;") and the dashes word processors insert.
 function asciiDigits(text) {
-  return String(text || '').replace(/[٠-٩۰-۹]/g, (d) => String((d.charCodeAt(0) & 0xf) % 10));
+  return String(text || '')
+    .replace(/&#(\d{1,7});/g, (_, n) => safeChar(Number(n)))
+    .replace(/&#x([0-9a-f]{1,6});/gi, (_, n) => safeChar(parseInt(n, 16)))
+    .replace(/&(nbsp|ensp|emsp|thinsp);/gi, ' ')
+    .replace(/&(ndash|mdash|minus);/gi, '-')
+    .replace(/&amp;/gi, '&')
+    .replace(/(\d)\uFE0F?\u20E3/g, '$1')
+    .replace(/[０-９]/g, (d) => String(d.charCodeAt(0) - 0xff10))
+    .replace(/[٠-٩۰-۹]/g, (d) => String((d.charCodeAt(0) & 0xf) % 10))
+    .replace(/[\u2010-\u2015\u2212]/g, '-')
+    .replace(/[\u200b-\u200d\u2060\ufeff]/g, '');
+}
+
+function safeChar(code) {
+  try {
+    return String.fromCodePoint(code);
+  } catch {
+    return ' ';
+  }
 }
 
 // A run of digits with the separators people write numbers with (spaces,

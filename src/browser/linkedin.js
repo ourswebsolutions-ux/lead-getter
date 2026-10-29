@@ -13,10 +13,13 @@
 const NAV_TIMEOUT = 45_000;
 const LI = 'https://www.linkedin.com';
 
-const jobsSearchUrl = (q) => `${LI}/jobs/search/?keywords=${encodeURIComponent(q)}`;
+const jobsSearchUrl = (q, start = 0) => `${LI}/jobs/search/?keywords=${encodeURIComponent(q)}${start ? `&start=${start}` : ''}`;
 const postsSearchUrl = (q) => `${LI}/search/results/content/?keywords=${encodeURIComponent(q)}`;
-const companiesSearchUrl = (q) => `${LI}/search/results/companies/?keywords=${encodeURIComponent(q)}`;
+const companiesSearchUrl = (q, n = 1) => `${LI}/search/results/companies/?keywords=${encodeURIComponent(q)}${n > 1 ? `&page=${n}` : ''}`;
 const postUrl = (urn) => `${LI}/feed/update/${urn}/`;
+// LinkedIn's public job results, page by page (what its public jobs page
+// loads as it is scrolled): the same job cards, logged in or not.
+const jobsResultsUrl = (q, start = 0) => `${LI}/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords=${encodeURIComponent(q)}&start=${start}`;
 
 function isLinkedInHost(host) {
   return /(^|\.)linkedin\.com$/i.test(host);
@@ -62,7 +65,7 @@ const aboutUrl = (companyUrl) => `${companyUrl.replace(/\/$/, '')}/about/`;
 
 // An official website: a real outside address (not LinkedIn or a social
 // network, not a job board), or ''.
-const NOT_A_SITE = /(^|\.)(linkedin\.com|facebook\.com|fb\.com|instagram\.com|twitter\.com|x\.com|youtube\.com|tiktok\.com|wa\.me|whatsapp\.com|indeed\.com|glassdoor\.com|rozee\.pk|bayt\.com|google\.com|bit\.ly|lnkd\.in)$/i;
+const NOT_A_SITE = /(^|\.)(linkedin\.com|facebook\.com|fb\.com|instagram\.com|twitter\.com|x\.com|youtube\.com|youtu\.be|tiktok\.com|vimeo\.com|behance\.net|dribbble\.com|pinterest\.com|threads\.net|linktr\.ee|beacons\.ai|wa\.me|whatsapp\.com|t\.me|indeed\.com|glassdoor\.com|rozee\.pk|bayt\.com|upwork\.com|fiverr\.com|google\.com|goo\.gl|bit\.ly|lnkd\.in|medium\.com|github\.com|wixsite\.com)$/i;
 function cleanWebsite(href) {
   try {
     const u = new URL(unwrap(String(href || '').trim().replace(/^(?!https?:\/\/)/i, 'https://')));
@@ -107,7 +110,7 @@ async function detectState(page) {
 // returns truthy when the content has rendered) or a state page.
 // Returns { mode: 'ok' | 'empty' | 'login' | 'checkpoint' | 'blocked' | 'failed', detail }.
 async function open(page, url, ready, { timeout = 25_000 } = {}) {
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+  await goto(page, url);
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     const state = await detectState(page);
@@ -117,6 +120,17 @@ async function open(page, url, ready, { timeout = 25_000 } = {}) {
     await page.waitForTimeout(500);
   }
   return { mode: 'failed', detail: `the page did not load (${page.url().slice(0, 120)})` };
+}
+
+// page.goto, once more when an earlier navigation was still finishing.
+async function goto(page, url) {
+  try {
+    return await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+  } catch (err) {
+    if (!/interrupted by another navigation/i.test(String(err?.message))) throw err;
+    await page.waitForTimeout(1000);
+    return page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+  }
 }
 
 // --- in-page readers (self-contained, so they can be serialised) ---------------------
@@ -140,7 +154,8 @@ function collectJobsInPage() {
   for (const a of document.querySelectorAll('a[href*="/jobs/view/"]')) cards.add(a.closest('li, [data-job-id], .base-card, .job-card-container') || a);
   for (const card of cards) {
     const link = card.matches('a') ? card : card.querySelector('a[href*="/jobs/view/"]');
-    const jobId = card.getAttribute('data-occludable-job-id') || card.getAttribute('data-job-id') || idOf(link?.getAttribute('href')) || idOf(card.getAttribute('data-entity-urn'));
+    const urn = (card.getAttribute('data-entity-urn') || card.querySelector('[data-entity-urn]')?.getAttribute('data-entity-urn') || '').match(/jobPosting:(\d+)/);
+    const jobId = card.getAttribute('data-occludable-job-id') || card.getAttribute('data-job-id') || (urn && urn[1]) || idOf(link?.getAttribute('href'));
     if (!jobId || out.has(jobId)) continue;
     const pick = (...sels) => {
       for (const s of sels) {
@@ -199,7 +214,9 @@ function readJobInPage() {
 
 function companyReadyInPage() {
   if (document.querySelector('main dl dt, section dl dt, [data-test-id^="about-us__"], .org-page-details__definition-term')) return 'ok';
-  return document.querySelector('h1') && /overview|about/i.test(document.body?.innerText || '') ? 'ok' : null;
+  const text = document.body?.innerText || '';
+  if (/\n\s*(Website|Industry|Company size|Headquarters)\s*\n/i.test(text)) return 'ok';
+  return document.querySelector('h1') && /overview|about/i.test(text) ? 'ok' : null;
 }
 
 // A company's About page: { name, website, phone, headquarters, industry,
@@ -224,14 +241,41 @@ function readCompanyInPage() {
     const dd = box.querySelector('dd') || box;
     set({ website: 'website', phone: 'phone', headquarters: 'headquarters', industry: 'industry', size: 'company size' }[id] || id, dd);
   }
+  // Layouts without dt/dd: the label on one line, its value on the next.
+  if (!Object.keys(fields).length) {
+    const lines = (document.querySelector('main') || document.body).innerText.split('\n').map(clean).filter(Boolean);
+    const links = [...document.querySelectorAll('a[href]')];
+    for (const label of ['Website', 'Phone', 'Headquarters', 'Industry', 'Company size', 'Location']) {
+      const i = lines.findIndex((l) => l.toLowerCase() === label.toLowerCase());
+      if (i < 0 || !lines[i + 1]) continue;
+      const value = lines[i + 1];
+      const a = links.find((x) => clean(x.textContent) === value);
+      fields[label.toLowerCase()] = { text: value, href: a ? a.href : '' };
+    }
+  }
   const get = (...keys) => keys.map((k) => fields[k]).find(Boolean);
   const website = get('website');
   const phone = get('phone');
   const tel = [...document.querySelectorAll('a[href^="tel:"]')].map((a) => a.getAttribute('href'));
   const overview = document.querySelector('section p, [data-test-id="about-us__description"]');
+  // Outside links written as web addresses: the website when none is
+  // labelled (the caller skips social pages and job boards).
+  const main = document.querySelector('main') || document.body;
+  const looksLikeSite = /^(https?:\/\/)?(www\.)?[a-z0-9-]+(\.[a-z0-9-]+)+(\/\S*)?$/i;
+  const siteLinks = [...main.querySelectorAll('a[href]')]
+    .filter((a) => {
+      let host = '';
+      try {
+        host = new URL(a.href).hostname;
+      } catch {}
+      return (/\/redir\/redirect/.test(a.href) || !/(^|\.)linkedin\.com$/.test(host)) && looksLikeSite.test(clean(a.textContent));
+    })
+    .map((a) => a.href)
+    .slice(0, 10);
   return {
     name: clean(document.querySelector('h1')?.textContent).slice(0, 200),
     website: website ? website.href || website.text : '',
+    siteLinks,
     phone: phone ? phone.text.replace(/phone number is a link/i, '').trim() : '',
     tels: tel.slice(0, 5),
     headquarters: clean(get('headquarters', 'location')?.text).slice(0, 200),
@@ -242,15 +286,44 @@ function readCompanyInPage() {
 }
 
 function postsReadyInPage() {
-  if (document.querySelector('[data-urn*="urn:li:activity:"], [data-id*="urn:li:activity:"], [data-chameleon-result-urn*="urn:li:activity:"]')) return 'ok';
+  if (document.querySelector('[data-urn*="urn:li:activity:"], [data-id*="urn:li:activity:"], [data-chameleon-result-urn*="urn:li:activity:"], [aria-label^="Open control menu for post by"]')) return 'ok';
   return /no results found|try removing filters/i.test(document.body?.innerText || '') ? 'empty' : null;
 }
 
-// Posts on a content search page: { urn, text, author, authorHref, companyHrefs, links }.
+// Posts on a content search page: { urn, key, text, author, authorHref,
+// companyHrefs, links }. Two layouts: posts with activity URNs, and the
+// newer one where a post is the block around its "Open control menu for
+// post by <author>" button (no URN; key is a hash of author and text).
 function collectPostsInPage() {
   const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim();
   const sel = '[data-urn*="urn:li:activity:"], [data-id*="urn:li:activity:"], [data-chameleon-result-urn*="urn:li:activity:"]';
   const posts = [...document.querySelectorAll(sel)].filter((el) => !el.parentElement?.closest(sel));
+  if (!posts.length) {
+    const MENU = '[aria-label^="Open control menu for post by"]';
+    const out = [];
+    for (const m of document.querySelectorAll(MENU)) {
+      // The post: the largest ancestor that still holds only this menu.
+      let box = m;
+      while (box.parentElement && box.parentElement !== document.body && box.parentElement.querySelectorAll(MENU).length === 1) box = box.parentElement;
+      const author = m.getAttribute('aria-label').replace(/^Open control menu for post by\s*/, '').trim();
+      const actor = [...box.querySelectorAll('a[href*="/company/"], a[href*="/in/"]')][0];
+      const links = [...box.querySelectorAll('a[href]')].map((a) => a.href);
+      const postLink = links.find((h) => /\/feed\/update\/urn:li:activity:\d+|\/posts\/[^/?#]+-activity-\d+/.test(h)) || '';
+      const text = (box.innerText || '').replace(/^Feed post\s*/i, '').slice(0, 4000);
+      let h = 0;
+      for (const ch of `${author}\n${text.slice(0, 400)}`) h = (Math.imul(31, h) + ch.charCodeAt(0)) | 0;
+      out.push({
+        urn: ((id) => (id ? `urn:li:activity:${id}` : ''))((postLink.match(/urn:li:activity:(\d+)/) || postLink.match(/activity-(\d+)/) || [])[1]),
+        key: `post:${(h >>> 0).toString(36)}`,
+        text,
+        author: clean(author).slice(0, 200),
+        authorHref: actor ? actor.href : '',
+        companyHrefs: links.filter((x) => /\/company\//.test(x)).slice(0, 10),
+        links: links.filter((x) => /^(mailto:|tel:)|wa\.me\//i.test(x) || !/linkedin\.com/i.test(x)).slice(0, 20),
+      });
+    }
+    return out;
+  }
   return posts.map((el) => {
     const attr = el.getAttribute('data-urn') || el.getAttribute('data-id') || el.getAttribute('data-chameleon-result-urn') || '';
     const urn = (attr.match(/urn:li:activity:\d+/) || [''])[0];
@@ -260,6 +333,7 @@ function collectPostsInPage() {
     const links = [...el.querySelectorAll('a[href]')].map((a) => a.href);
     return {
       urn,
+      key: urn,
       text: (textEl || el).innerText.slice(0, 4000),
       author: clean(name?.textContent || actor?.textContent).slice(0, 200),
       authorHref: actor ? actor.href : '',
@@ -340,20 +414,53 @@ async function readJob(page, id) {
 async function readCompany(page, companyUrl) {
   const r = await open(page, aboutUrl(companyUrl), companyReadyInPage);
   if (r.mode !== 'ok') return r;
-  return { mode: 'ok', company: await page.evaluate(readCompanyInPage) };
+  const company = await page.evaluate(readCompanyInPage);
+  if (!cleanWebsite(company.website)) company.website = (company.siteLinks || []).find((h) => cleanWebsite(h)) || company.website;
+  return { mode: 'ok', company };
+}
+
+async function expandPosts(page) {
+  await page
+    .evaluate(() => {
+      for (const b of document.querySelectorAll('button.feed-shared-inline-show-more-text__see-more-less-toggle, button[aria-label*="see more" i]')) b.click();
+      // Newer layout: "… more" is a button inside the post text.
+      for (const b of document.querySelectorAll('button, [role="button"]')) if (/^…?\s*more$/i.test((b.textContent || '').trim()) && b.offsetParent !== null) b.click();
+    })
+    .catch(() => {});
 }
 
 async function searchPosts(page, q) {
   const r = await open(page, postsSearchUrl(q), postsReadyInPage);
   if (r.mode !== 'ok') return { ...r, posts: [] };
-  await page.evaluate(() => {
-    for (const b of document.querySelectorAll('button.feed-shared-inline-show-more-text__see-more-less-toggle, button[aria-label*="see more" i]')) b.click();
-  }).catch(() => {});
+  await expandPosts(page);
   return { mode: 'ok', posts: await page.evaluate(collectPostsInPage) };
 }
 
-async function searchCompanies(page, q) {
-  const r = await open(page, companiesSearchUrl(q), companiesReadyInPage);
+// More posts: scroll to the end of the results, wait, expand, read again.
+async function morePosts(page) {
+  await scrollMore(page, '[aria-label^="Open control menu for post by"], [data-urn*="urn:li:activity:"]');
+  await page.waitForTimeout(1500);
+  await expandPosts(page);
+  return page.evaluate(collectPostsInPage);
+}
+
+// One page of LinkedIn's public job results (start = results listed
+// before it): { mode: 'ok' | 'empty' | 'blocked' | ..., jobs }. An empty page
+// is the end of the results.
+async function jobsPage(page, q, start) {
+  const res = await goto(page, jobsResultsUrl(q, start));
+  const status = res ? res.status() : 200;
+  if (status === 429) return { mode: 'blocked', jobs: [] };
+  if (status >= 400) return { mode: status === 404 || status === 400 ? 'empty' : 'failed', detail: `HTTP ${status}`, jobs: [] };
+  const state = await detectState(page);
+  if (state) return { mode: state, jobs: [] };
+  await page.waitForTimeout(500);
+  const jobs = await page.evaluate(collectJobsInPage);
+  return { mode: jobs.length ? 'ok' : 'empty', jobs };
+}
+
+async function searchCompanies(page, q, n = 1) {
+  const r = await open(page, companiesSearchUrl(q, n), companiesReadyInPage);
   if (r.mode !== 'ok') return { ...r, companies: [] };
   return { mode: 'ok', companies: await page.evaluate(collectCompaniesInPage) };
 }
@@ -361,6 +468,7 @@ async function searchCompanies(page, q) {
 module.exports = {
   LI,
   jobsSearchUrl,
+  jobsResultsUrl,
   postsSearchUrl,
   companiesSearchUrl,
   postUrl,
@@ -378,6 +486,8 @@ module.exports = {
   readJob,
   readCompany,
   searchPosts,
+  morePosts,
+  jobsPage,
   searchCompanies,
   collectJobsInPage,
   readJobInPage,

@@ -454,6 +454,7 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn) {
         createLinkedIn: (emit) =>
           new LinkedInSession({
             keyword: linkedinKeyword,
+            modes: linkedinModes(),
             categoryId: category.id,
             country,
             store,
@@ -464,7 +465,6 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn) {
             emit,
           }),
       });
-      clearInterval(recheck);
     } catch (err) {
       if (err instanceof ConnectCancelled) {
         sendStatus({ state: 'stopped', message: 'Search stopped' });
@@ -537,6 +537,26 @@ function setLinkedInSearch(on) {
   if (typeof on !== 'boolean') return { ok: false, error: 'Invalid value' };
   store.setState('linkedinSearch', on);
   return { ok: true, on };
+}
+
+// LinkedIn discovery modes (Jobs, Posts, Companies).
+function linkedinModes() {
+  const m = store.getState('linkedinModes') || {};
+  return { jobs: m.jobs !== false, posts: m.posts !== false, companies: m.companies !== false };
+}
+
+function linkedinSettings() {
+  return { modes: linkedinModes() };
+}
+
+function setLinkedInSettings(raw) {
+  if (!raw || typeof raw !== 'object') return { ok: false, error: 'Invalid value' };
+  if (raw.modes) {
+    const m = { jobs: raw.modes.jobs === true, posts: raw.modes.posts === true, companies: raw.modes.companies === true };
+    if (!m.jobs && !m.posts && !m.companies) return { ok: false, error: 'Keep at least one LinkedIn mode on.' };
+    store.setState('linkedinModes', m);
+  }
+  return { ok: true, ...linkedinSettings() };
 }
 
 // The country local numbers are read with: the user's choice, else the
@@ -1113,6 +1133,8 @@ app.whenReady().then(() => {
   handle('facebook:set', (on) => setFacebookSearch(on));
   handle('linkedin:get', () => ({ on: linkedinSearchOn() }));
   handle('linkedin:set', (on) => setLinkedInSearch(on));
+  handle('linkedin:settings', () => linkedinSettings());
+  handle('linkedin:setSettings', (raw) => setLinkedInSettings(raw));
   handle('phoneCountry:get', () => phoneCountrySettings());
   handle('phoneCountry:set', (code) => setPhoneCountry(code === null ? null : String(code || '').toUpperCase()));
   handle('search:status', () => lastStatus);

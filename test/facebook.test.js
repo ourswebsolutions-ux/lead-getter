@@ -509,7 +509,7 @@ test('Stop ends both workers; what was saved stays', async () => {
   assert.ok(r.statuses.slice(0, -1).filter((s) => s.workers).every((s, i, a) => i < a.findIndex((x) => x.state === 'stopping') || s.state === 'stopping' || a.findIndex((x) => x.state === 'stopping') === -1), 'stays "stopping" after Stop');
 });
 
-test('a later search does not re-save posts it already read, and keeps campaign history', async () => {
+test('a later search reads posts again but never adds them twice, and keeps campaign history', async () => {
   const store = new LeadStore(':memory:');
   const posts = [[post(1, 'Wholesale garments, call 0300 1234567')]];
   await search({ withFacebook: true, store, facebook: mockFacebook({ pagesOfPosts: posts }) }).done;
@@ -517,9 +517,9 @@ test('a later search does not re-save posts it already read, and keeps campaign 
   store.db.prepare("INSERT INTO outreach_sends (campaign_id, campaign_name, phone, stage, test, day, status, created_at, sent_at) VALUES (1, 'C', ?, 0, 0, '2026-10-21', 'read', 1, 1)").run(l.phone);
   const again = search({ withFacebook: true, store, facebook: mockFacebook({ pagesOfPosts: posts }) });
   const stats = await again.done;
-  assert.equal(stats.facebook.leads, 0);
-  assert.equal(again.leads.length, 0);
-  assert.ok(again.statuses.some((s) => /already saved a post by Author 1/.test(s.message)));
+  // Read again (never skipped unread): counted as already saved, not new.
+  assert.deepEqual([stats.facebook.numbers, stats.facebook.newLeads, stats.facebook.duplicates], [1, 0, 1]);
+  assert.ok(again.statuses.some((s) => /Author 1's number is already a lead/.test(s.message)));
   const after = store.listLeads();
   assert.equal(after.length, 1);
   assert.equal(after[0].discoveredAt, l.discoveredAt);

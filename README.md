@@ -238,16 +238,28 @@ What each source needs:
 
 **LinkedIn Lead Search** is the LinkedIn switch. It searches what you type in the **LinkedIn search** bar and finds **companies that need what it describes** (for `Full Stack Developer`: companies hiring one, or asking for one in a post) and their **public business contact details**. It runs at the same time as Google Maps and Facebook, in its own Chrome window, using that profile's LinkedIn login.
 
-1. **Jobs:** LinkedIn job listings for the keyword, then each job's own page for the company that posted it, its location and the description. The target is the hiring company, never job seekers.
-2. **Company page:** each company's LinkedIn *About* page, for its official website, phone and headquarters.
-3. **Website:** the company's own website, plus up to two of its contact or about pages, for a business email (the site's own domain first) and phone number. Only `mailto:`, `tel:` and what the pages show are used.
-4. **Google Maps:** when there's still no confirmed phone, Google Maps is searched for the company name and city. A result is used only when it's clearly the same business: the same website, or the exact same name (ignoring Ltd, Pvt and the like) in the same city. A similar name is never enough.
-5. **Posts:** LinkedIn posts for the keyword about hiring, projects, websites, software or outsourcing. A post counts when it's by a company, links to one, or publishes business contact details for that need.
-6. **Company search:** when jobs and posts give fewer than 5 companies, LinkedIn's company search for the keyword.
+**Modes** (checkboxes under the LinkedIn search bar, each can be switched off):
+- **Jobs:** *every* page of LinkedIn's job results for the search (LinkedIn's public results, page after page, until a page comes back empty), and the hiring company of each job. Job seekers are never the target. A job whose title isn't about the search is skipped.
+- **Posts:** posts about hiring, projects or outsourcing for the search, scrolled for more. A post counts when it's by a company, links to one, or publishes business contact details for that need.
+- **Companies:** LinkedIn's company search, page after page. A company is kept only when its own description or industry matches the search; a matching name alone isn't enough.
 
-- **Saving:** a company is kept when it has a phone, an email, a website, or the job or post itself. Contact details are never made up. Each lead records the job title, job URL, post URL, LinkedIn company URL, website, email and location. It also records how far discovery got, e.g. *"phone (maps), email, website; LinkedIn company page read; matched on Google Maps"*, shown on the *LinkedIn* source chip.
+**Each company, once** (reused for every job or post that names it), in this order, looking for **both a phone and an email**:
+1. **LinkedIn:** its company page (website, phone, an email in its description).
+2. **Google Maps:** when the phone or the email is still missing. A result is used only when it's clearly the same business: the same website, or the exact same name (ignoring Ltd, Pvt and the like) in the same city. A similar name is never enough. Google Maps gives the phone, website and address.
+3. **Website:** when the phone or the email is still missing, the website from LinkedIn (and the one from Google Maps, if different): home, Contact, About, footer and similar pages. A site that refuses a plain request (bot protection, HTTP 403) is opened in the browser page instead.
+
+Everything runs in one LinkedIn page, one step at a time. Each company is **saved as soon as it's done**, and the progress shows the results page, jobs, companies done and contacts found as it goes.
+
+For each contact the lead says one of:
+- *found (where)*;
+- *not published* (the sources that were checked);
+- *not found; could not check: …* (which page failed to load or which site couldn't be reached).
+
+For example: *"phone: found (Google Maps); email: not published (checked: LinkedIn, Google Maps, website); website: example.com"*. It's shown on the *LinkedIn* source chip and in the CSV's *Discovery* column.
+
+- **Saving:** a company is kept even when a phone or email couldn't be found: it still has a website, or the job or post itself. Contact details are never made up. Each lead records the job title, job URL, post URL, LinkedIn company URL, website, email and location.
 - **One lead per business:** a company already saved (same phone, LinkedIn company page, website or email), from any source, gets this source added instead of a second lead. A LinkedIn lead later found on Google Maps becomes that listing. Jobs and posts already read aren't read again.
-- **Limits:** 20 jobs, 20 posts and 25 companies per search, a few seconds between LinkedIn pages, website timeouts with one retry, and Stop at any point.
+- **Limits:** every job results page (a safety stop at 100 pages), up to 60 posts, a few seconds between LinkedIn pages, website timeouts with one retry, and Stop at any point (what was saved stays). A long search can take hours: each company takes about 10 to 30 seconds.
 - **Problems:** a login page, security check or limit message stops the LinkedIn pages only. Lead Finder never logs in or works around them. Companies already found are still completed from their websites and Google Maps, and the status says what happened. Without a LinkedIn login, the public job pages may still work, but company pages and post search usually need one.
 - **Leads table:** a *LinkedIn* source chip (opens the job, company or post), the business email and job title under the name, a *LinkedIn* option in the Source filter, and *Email, Website, LinkedIn Company URL, LinkedIn Job URL, LinkedIn Post URL, Job Title, Discovery* in the CSV export. WhatsApp campaigns use only leads with a validated phone, as before.
 - **LinkedIn's terms:** the [LinkedIn User Agreement](https://www.linkedin.com/legal/user-agreement) prohibits automated access and scraping. Lead Finder reads only what your own account is shown, slowly and in small numbers, but LinkedIn may still restrict accounts that use automation. You're responsible for how you use it.

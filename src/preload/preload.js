@@ -41,6 +41,9 @@ contextBridge.exposeInMainWorld('leadFinder', {
   setMapsSearch: (on) => ipcRenderer.invoke('maps:set', Boolean(on)),
   linkedinSearch: () => ipcRenderer.invoke('linkedin:get'),
   setLinkedInSearch: (on) => ipcRenderer.invoke('linkedin:set', Boolean(on)),
+  // LinkedIn modes { jobs, posts, companies }.
+  linkedinSettings: () => ipcRenderer.invoke('linkedin:settings'),
+  setLinkedInSettings: (settings) => ipcRenderer.invoke('linkedin:setSettings', settings && typeof settings === 'object' ? { modes: settings.modes } : null),
   // The country local numbers ("0300 1234567") are read with; null = automatic.
   phoneCountry: () => ipcRenderer.invoke('phoneCountry:get'),
   setPhoneCountry: (code) => ipcRenderer.invoke('phoneCountry:set', code === null ? null : String(code ?? '')),

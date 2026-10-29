@@ -145,3 +145,40 @@ test('duplicates across Google Maps, Facebook and LinkedIn are one lead with eve
   assert.equal(mm.isNewLead, false);
   assert.deepEqual(s2.listLeads()[0].sources, ['maps', 'linkedin']);
 });
+
+test('the reported post: 03244548266, 0331-4059257 and 0321-4647423 with emojis, entities and dashes', () => {
+  const post = '🔥🔥 Garments shop SALE 🛍️ Contact 📞03244548266, 0331-4059257 &amp; 0321‑4647423 (WhatsApp) ✅ Lahore';
+  assert.deepEqual(valid(post, 'PK'), ['+923244548266', '+923314059257', '+923214647423']);
+  assert.deepEqual(valid('Call 0️⃣3️⃣2️⃣4️⃣4️⃣5️⃣4️⃣8️⃣2️⃣6️⃣6️⃣', 'PK'), ['+923244548266']);
+  assert.deepEqual(valid('０３３１－４０５９２５７', 'PK'), ['+923314059257']);
+  assert.deepEqual(valid('&#48;3244548266 &nbsp; +92&nbsp;331&nbsp;4059257 — 0092-321-4647423', 'PK'), ['+923244548266', '+923314059257', '+923214647423']);
+  // Without a country (an en-US computer, no leads): kept to check, all three.
+  assert.equal(findPhones(post, { country: null }).phones.length, 3);
+});
+
+test('the search page is never a post address (it made every post look already saved)', () => {
+  const fb = require('../src/browser/facebook');
+  assert.equal(fb.cleanPostUrl('https://www.facebook.com/search/posts/?q=garments%20shop&__tn__=x'), '');
+  assert.equal(fb.cleanPostUrl('https://www.facebook.com/hashtag/garments?__tn__=x'), '');
+  const p = fb.parsePost({ text: 'Contact 03244548266', author: 'A', authorUrl: 'https://www.facebook.com/a', hrefs: ['https://www.facebook.com/search/posts/?q=garments', 'https://www.facebook.com/a/posts/pfbid02x'] });
+  assert.equal(p.url, 'https://www.facebook.com/a/posts/pfbid02x');
+  const q = fb.parsePost({ text: 'Contact 0331-4059257', author: 'B', authorUrl: 'https://www.facebook.com/b', hrefs: ['https://www.facebook.com/search/posts/?q=garments'] });
+  assert.equal(q.url, '');
+  assert.notEqual(p.key, q.key);
+});
+
+test('several posts that link to the search page: every number is saved, none skipped as "already saved"', async () => {
+  const fb = require('../src/browser/facebook');
+  const store = new LeadStore(':memory:');
+  const hrefs = ['https://www.facebook.com/search/posts/?q=garments%20shop'];
+  const posts = [
+    fb.parsePost({ text: 'Contact 03244548266', author: 'Shop A', authorUrl: 'https://www.facebook.com/shopa', hrefs }),
+    fb.parsePost({ text: 'Call 0331-4059257 or 0321-4647423', author: 'Shop B', authorUrl: 'https://www.facebook.com/shopb', hrefs }),
+    fb.parsePost({ text: 'Same shop A again 03244548266', author: 'Shop A', authorUrl: 'https://www.facebook.com/shopa', hrefs }),
+  ];
+  const session = new FacebookSession({ keyword: 'garments shop', country: 'PK', store, pages: {}, signal: new AbortController().signal, emit: () => {}, facebook: fb });
+  for (const p of posts) await session.processPost(p, 'garments shop');
+  assert.deepEqual(store.listLeads().map((l) => l.phone).sort(), ['+923214647423', '+923244548266', '+923314059257']);
+  const f = session.stats.facebook;
+  assert.deepEqual([f.posts, f.numbers, f.newLeads, f.duplicates], [3, 4, 3, 1]);
+});

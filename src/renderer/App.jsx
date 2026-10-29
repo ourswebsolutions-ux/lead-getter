@@ -459,6 +459,7 @@ export default function App({ onLock }) {
   }); // LinkedIn's own search
   const [linkedinOn, setLinkedinOn] = useState(false); // LinkedIn Lead Search (stored in the app)
   const [country, setCountry] = useState(null); // { setting, effective, countries }: how local numbers are read
+  const [liSettings, setLiSettings] = useState({ modes: { jobs: true, posts: true, companies: true } }); // LinkedIn modes
   const [tableSearch, setTableSearch] = useState('');
   const [searchQuery, setSearchQuery] = useState(''); // debounced
   const [plan, setPlan] = useState(null); // this computer's subscription (activation.js)
@@ -619,6 +620,7 @@ export default function App({ onLock }) {
     api.facebookSearch().then((r) => setFacebookOn(Boolean(r?.on))).catch(() => {});
     api.linkedinSearch().then((r) => setLinkedinOn(Boolean(r?.on))).catch(() => {});
     api.phoneCountry().then(setCountry).catch(() => {});
+    api.linkedinSettings().then((r) => r && setLiSettings(r)).catch(() => {});
     const offStatus = api.onStatus(setStatus);
     const offSummary = api.onSummary(setSummary);
     api.whatsappState().then(setWa).catch(() => {});
@@ -698,6 +700,12 @@ export default function App({ onLock }) {
       setLinkedinOn(!next);
       notify({ type: 'error', text: `Could not change LinkedIn Lead Search: ${res.error}` });
     }
+  }
+
+  async function changeLinkedIn(next) {
+    const res = await api.setLinkedInSettings(next).catch((e) => ({ ok: false, error: e.message }));
+    if (res.ok) setLiSettings({ modes: res.modes });
+    else notify({ type: 'error', text: res.error });
   }
 
   async function changeCountry(code) {
@@ -900,6 +908,27 @@ export default function App({ onLock }) {
               </button>
             </div>
           </form>
+          {linkedinOn && (
+            <div className="li-options" role="group" aria-label="LinkedIn modes">
+              <span className="muted">LinkedIn finds</span>
+              {[
+                ['jobs', 'Jobs', 'Job listings for the LinkedIn search: the companies hiring'],
+                ['posts', 'Posts', 'Posts about hiring, projects or outsourcing for the LinkedIn search'],
+                ['companies', 'Companies', 'Companies whose own description matches the LinkedIn search'],
+              ].map(([k, label, title]) => (
+                <label key={k} className="check-wrap" title={title}>
+                  <input
+                    type="checkbox"
+                    checked={liSettings.modes[k]}
+                    disabled={active}
+                    aria-label={`LinkedIn ${label}`}
+                    onChange={(e) => changeLinkedIn({ modes: { ...liSettings.modes, [k]: e.target.checked } })}
+                  />
+                  <span>{label}</span>
+                </label>
+              ))}
+            </div>
+          )}
           <div className="source-row">
             <span className="source-item" title={mapsOn ? 'Google Maps listings for the keyword and category, with the website filter.' : 'Off: Google Maps is not searched.'}>
               <button

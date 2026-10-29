@@ -1117,6 +1117,7 @@ html.theme-anim *, html.theme-anim *::before, html.theme-anim *::after {
 /* Lead sources: the Facebook Lead Search switch and the Source column. */
 .source-row { display: flex; align-items: center; gap: 8px 18px; margin-top: 12px; font-size: 13px; flex-wrap: wrap; }
 .source-item { display: inline-flex; align-items: center; gap: 8px; }
+.li-options { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; margin-top: 10px; font-size: 13px; }
 .source-hint { font-size: 12.5px; }
 .source-label { font-weight: 600; }
 .sources { white-space: nowrap; }
