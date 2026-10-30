@@ -252,7 +252,7 @@ test('upgrading a version 6 database keeps every lead and adds the Facebook fiel
   s.db.exec('DROP TABLE lead_sources; PRAGMA user_version = 6;');
   for (const c of ['fb_post_url', 'fb_page_url', 'contact_name', 'description']) s.db.exec(`ALTER TABLE businesses DROP COLUMN ${c}`);
   s.migrate();
-  assert.equal(s.db.prepare('PRAGMA user_version').get().user_version, 15);
+  assert.equal(s.db.prepare('PRAGMA user_version').get().user_version, 17);
   const l = s.listLeads()[0];
   assert.deepEqual([l.name, l.sources, l.fbPostUrl], ['Ali Garments', ['maps'], '']);
 });

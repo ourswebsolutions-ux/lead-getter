@@ -29,7 +29,8 @@ test('Podcasts tab: platform switches, keys dialog, links handled, no Chats tab'
   });
   await unlock(win);
   const nav = win.getByRole('navigation', { name: 'Workspace' });
-  assert.deepEqual(await nav.getByRole('button').allInnerTexts(), ['Leads', 'Podcasts', 'Outreach']);
+  const tabs = await nav.getByRole('button').evaluateAll((els) => els.map((e) => e.getAttribute('aria-label')));
+  assert.deepEqual(tabs, ['Leads', 'Podcasts', 'Outreach', 'Dialer', 'Numbers', 'Messages']);
   await nav.getByRole('button', { name: 'Podcasts' }).click();
   const pc = win.locator('section.podcasts');
   await pc.getByText('Discover podcasts and find contact emails automatically.').waitFor();

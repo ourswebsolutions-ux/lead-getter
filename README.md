@@ -591,29 +591,134 @@ Each lead has a call status of its own, next to its WhatsApp campaign status (Se
 
 ### Auto Dialer
 
-Turn on **Auto Dialer** in the Dialer to call the Call Unseen leads one after another, oldest first, through the same Bluetooth calls.
+Turn on **Auto Dialer** (left of the Dialer) to call, one after another and through the same Bluetooth calls, either your **Call Unseen leads** (oldest first) or the numbers of one **number category** (choose under *Calls*). Only one runs at a time, and what it calls can't change while it runs.
 
-- **Who it calls:** only leads with a valid number, mobile numbers only by default (landlines are skipped and logged), that are Call Unseen, not marked Do not call and not opted out. It calls each lead at most once per run.
-- **Answered:** dialling stops at once and you talk normally. After the call it **pauses** until you press **Continue**.
-- **Not answered:** "not answered" means no answer, busy, rejected, failed or unreachable, as far as the phone shows it. The lead is Call Seen and the next lead is called after the gap (10 s by default). A call that rings longer than 45 s is ended as not answered.
-- **Ended by you before it was answered:** the next call waits **1 minute**. Turning the Auto Dialer off during that wait cancels it.
-- It never dials while a call is going on, while the phone isn't connected, or outside the calling hours (09:00–20:00 by default, under *Calling rules*). Bluetooth lost: paused until you continue.
-- **Stop**, or the switch, ends the run immediately; a call in progress is left alone. The Auto Dialer is always off when Lead Finder starts and never restarts by itself.
-- The card shows the lead being called, its number, progress (done / total), the countdown to the next call, and why each recent call ended.
+- **Who it calls:** only numbers that are valid and mobile (by default; landlines are skipped and logged), Call Unseen, not marked Do not call, and not opted out. It also skips any number an outgoing call has already started to, as a lead, an imported number or in the call log, so a number is never called twice, whatever list it is on.
+- **Answered:** you talk through the computer and nothing else is dialled. When the call has **ended**, from the computer or the phone, as the phone reports it over HFP (the `call` indicator goes to 0), a **60-second** countdown starts ("Next call in 60, 59…"). At zero it checks again that the phone is connected, that no call is going on, and which number is next, then dials.
+- **Ended by you before it was answered:** the same 60 seconds.
+- **Not answered** (no answer, busy, rejected, failed, unreachable, as far as the phone shows it): the number is Call Seen, and the next is dialled after the gap (10 s by default). A call that rings longer than 45 s is ended as not answered.
+- **Off** (the switch or **Stop**) cancels the countdown at once; a call in progress is left alone. **Pause** keeps the run's progress, and **Continue** resumes it. Bluetooth lost: paused. Outside the calling hours (09:00–20:00 by default, under *Calling rules*): paused. It is always off when Lead Finder starts and never restarts by itself.
+- The card shows what it calls, the SIM the phone uses, the number being called, progress (done / total), the countdown, and why each recent call ended.
 
-What the phone does *not* report over HFP: it doesn't say why an unanswered call ended. No answer, rejected by the other person, switched off and unreachable all end the same way (the call setup ends without the call connecting). Only *busy* is sometimes reported (`BUSY`). The Dialer therefore shows these as **No answer** and doesn't guess further.
+What the phone does *not* report over HFP:
+- **Why an unanswered call ended.** No answer, rejected, switched off and unreachable all end the same way; only *busy* is sometimes reported. They show as **No answer**.
+- **Who hung up an answered call.** That's why every answered call gets the 60 seconds.
+- **A call you cut on the phone while it is still ringing** looks the same as one nobody answered, so it gets the gap, not the 60 seconds. Ending it from the computer counts as yours.
 
 ### Limits (exact)
 
 - **No SIM choice from the computer**: see *SIM* above.
 - **Narrowband audio (CVSD, 8 kHz)**, like most car kits. Wideband (mSBC) would need codec negotiation and an mSBC encoder in the voice path, which are not included.
-- **Linux only for now.** On Windows and macOS the Dialer says so. Windows does not let an application be the Hands-Free unit for a phone, so the same design is not possible there.
+- **Native on Linux only.** Windows does not let an application be the Hands-Free unit for a phone; there, and on macOS, calls go through a Linux bridge (see *Bridges*).
 - **One hands-free program at a time.** While Lead Finder holds the role, other programs can't use this computer as a phone's hands-free. That's PipeWire's `hfp_hf`, which other apps don't use for calls anyway.
 - If the phone keeps the audio (for example, *Phone calls* is off for this computer), the call still works on the phone. The Dialer shows "Call audio is on the phone" and offers to move it.
 
 ### Security
 
 Calls are placed only when you press Call or a lead's Call button. The renderer also checks for a real click or key press, and nothing dials automatically. Only the paired phone you chose is accepted as the hands-free phone. The link uses Bluetooth's own authentication and encryption. No call audio is recorded or stored.
+
+## Numbers (imported phone numbers by category)
+
+The **Numbers** workspace keeps phone numbers you import apart from your leads, in categories you make (SEO, Web Development, USA Leads…).
+
+- **Import** from CSV, Excel (.xlsx, first sheet) or TXT, or paste numbers: one per line, or name, business, number. Columns are recognised by their names (phone/mobile/number, name, company/business, email, city, notes) and can be mapped by hand; other columns are kept with each number. Numbers are put in international format with your phone country when they are valid; invalid ones are kept and marked, and never auto-called. A number appears once per category: repeats in the file and numbers already in the category are counted, not added again. Numbers that are also in another category or among your leads are marked **Duplicate**. They are never called twice; see *Auto Dialer*.
+- **Each category:** totals for Call Seen, Call Unseen, Opted out / do not call and SMS sent; search; move numbers to another category; delete numbers or the category (with confirmation; their calls stay in the call log); **Reset call status** (with confirmation) makes the category's called numbers Call Unseen again.
+- **Each number:** **Call** (the Dialer), **Text** (Messages), and its call status (click it to mark Do not call).
+- Stored in `number_lists` and `numbers` (schema 16). Calls and messages remember the imported number they were for; your leads are not changed.
+
+## Messages (SMS through your phone)
+
+The **Messages** workspace sends and receives ordinary SMS through the connected phone and its SIM, over Bluetooth **Message Access (MAP)**. It uses BlueZ's `obexd` as the MAP client, nothing is installed on the phone, and it is separate from WhatsApp.
+
+- **Sending:** the message is pushed to the phone's outbox (`PushMessage`) and the phone sends it. A lead or number becomes **SMS sent** once the phone accepted it. Delivery is shown when the phone sends MAP event reports (*Delivered*, *Failed*).
+- **Receiving:** the phone's inbox and sent folder (the latest 50 and 30) are read when it connects, then on the phone's new-message reports and every 30 seconds.
+- **Conversations** show the lead's or imported number's name. **Templates** fill in `{name}` and `{business}`.
+- **Phone setup (Android):** allow message access for this computer: Settings → Bluetooth → this computer → **Text messages** / *Message access*. Until then the phone refuses (OBEX "service unavailable"), and Messages says so.
+- **No SIM choice:** MAP has no way to choose the SIM. The phone sends with its default SMS SIM, and that is set on the phone.
+- Messages are stored in `sms_messages`. A lead's SMS status (`businesses.sms_seen_at`) is kept apart from its WhatsApp and call status.
+
+### SMS campaigns
+
+*Messages → Campaigns* sends one message to many people through the phone, one text at a time, without opening each lead.
+
+1. **New campaign**: give it a name and write the message. Placeholders are filled in for each recipient: `{name}`, `{business_name}`, `{phone}`, `{category}`, `{city}`. If a field is empty, it leaves no gap or empty brackets. `{name}` falls back to the business name. The city is taken from the lead's address, best effort.
+2. **Recipients**:
+   - **From leads**, with search, category, source and location filters, and *select all filtered*.
+   - **From numbers**: a whole category.
+   - **Import file**: CSV or Excel. Columns are mapped automatically, including name, business name, category and city. Before adding, a check shows the valid, invalid (with their rows) and repeated contacts.
+   - Each number is in a campaign once. Pending recipients can be removed before sending.
+3. **Preview**: the message as each of the first recipients will get it.
+4. **Sending controls**:
+   - **Speed:** 1 per minute, 30 s or 15 s, never faster than one every 10 s.
+   - **At most per hour:** counts all texts to the phone, by hand or by campaigns.
+   - **Retries after a failure:** 0–5, waiting a minute longer each time.
+   - **Skip contacts already texted.**
+5. **Start / Pause / Resume / Stop / Retry failed.** One campaign sends at a time.
+
+Each recipient has its own status:
+
+- **Pending:** not sent yet.
+- **Submitted:** the phone accepted it into its outbox.
+- **Sent:** the phone reported it sent, or lists it in its Sent folder.
+- **Delivered:** the phone sent a delivery report.
+- **Failed:** with the reason.
+- **Skipped:** opted out, already texted, or the message came out empty.
+
+A message is never shown as sent or delivered unless the phone said so. Contacts who opted out are never texted, including WhatsApp opt-outs and anyone who replied **STOP** (or *unsubscribe*, *band karo*) by SMS.
+
+**Progress is saved for every message** (`sms_campaigns`, `sms_recipients`, schema 17):
+
+- **Phone's messages disconnected:** the campaign waits and goes on when they are back.
+- **Lead Finder closed:** the campaign goes on when it next opens and the phone connects.
+- **Closed while a message was being handed to the phone:** that message is marked failed with this reason and **not** sent again, so nobody gets it twice. Its real outcome shows up if the phone lists it in its Sent folder.
+
+## Bridges (calls and SMS from any computer)
+
+Windows and macOS do not let an application be a phone's Bluetooth hands-free device, so Lead Finder there cannot dial the phone directly. A Linux laptop on the same network can do it for them: Lead Finder **Bridge** lends that laptop's Bluetooth, and the phone connected to it, to Lead Finder on any other computer. Calls, the Auto Dialer, SMS and SMS campaigns then work there as if the Bluetooth were local. The call's voice is played and recorded by Lead Finder's window, with the system's echo cancellation.
+
+**On the Linux laptop** (with the phone paired to it, as in *Dialer → Setup*):
+
+```
+lead-finder --bridge                  # installed app (.deb / AppImage); --name "Office laptop" to name it
+npm run bridge                        # from the source
+```
+
+It runs without a window, in the background (for example as a startup application or a `systemd --user` service).
+
+**On the main computer:** open the **Dialer**. With **Automatic device discovery** on (the default), bridges on the network appear by themselves, so no IP address is ever typed.
+
+- **Pairing:** a new bridge is paired once. Both screens show the same 6-digit code; confirm it in Lead Finder, and on the bridge (in its terminal, or its confirmation window when it runs without a terminal).
+- **Choosing:** Lead Finder then connects to paired bridges by itself and uses the best one. It prefers, in order: one with a phone connected; working hands-free; Bluetooth on; verified two-way audio; the one in use; the fastest connection.
+- **Reconnecting:** if the bridge in use goes away, Lead Finder uses the next best (this computer's own Bluetooth on Linux, or another bridge), and returns to the bridge when it comes back. It never switches during a call. If a bridge goes away during a call, the call goes on, on the phone: the bridge moves its audio there.
+- **What the card shows:** the bridge in use, its device type and address, Bluetooth, the phone, call audio ("verified" once a call has carried voice both ways), connection quality (round-trip time) and the reconnect state.
+
+**Security:**
+- **Discovery is only a hint.** Bridges announce themselves by UDP multicast on the local network (`239.255.76.70:47670`) with a name, port and status, but nothing is trusted from that.
+- **Authentication:** each install has its own Ed25519 identity. A connection does a fresh X25519 key exchange, signed by both identities, so a man in the middle can't take part. Messages and audio are then encrypted with AES-256-GCM; a changed or replayed frame closes the connection.
+- **Pairing:** the code is derived from that connection's own secret, so codes that match mean nobody is in between.
+- **Limits:** a bridge serves one Lead Finder at a time, and only allows the Bluetooth helper's own commands.
+- **Where the keys live:** in `~/.config/lead-finder-bridge` (bridge) and in Lead Finder's data folder (`bridge-identity`). Being on the same Wi-Fi gives no access.
+
+## Compatibility
+
+What runs where, and what was actually tested. "CI" means built, installed and started on that system by the release workflow; the rest was tested on Debian 12 (Linux) with a vivo 1920 (Android).
+
+| Feature | Linux | Windows 10 / 11 | macOS (Apple Silicon, Intel) |
+|---|---|---|---|
+| Lead search (Google Maps, Facebook, LinkedIn, Podcasts), leads, categories, export | ✅ tested | ✅ same code · CI | ✅ same code · CI |
+| WhatsApp checks and outreach campaigns | ✅ tested | ✅ same code | ✅ same code |
+| Numbers (import CSV/Excel/TXT, categories) | ✅ tested | ✅ same code (JavaScript only) | ✅ same code |
+| Calls through the phone, native | ✅ tested with a real phone (HFP 1.7) | ❌ Windows gives apps no hands-free role or call-audio channel | ❌ not built (macOS has an IOBluetooth hands-free API, but it is old and could not be tested here) |
+| Calls through a **Linux bridge** | ✅ tested end to end (scripted phone) | ⚠️ supported by design (network and the window's audio are cross-platform); not tested on Windows hardware yet | ⚠️ the same; the microphone permission is asked the first time |
+| Being a bridge | ✅ | ❌ (see native calls) | ❌ |
+| SMS and SMS campaigns | ✅ native (MAP via `obexd`); phone's MAP session verified | ⚠️ through a Linux bridge | ⚠️ through a Linux bridge |
+| Auto Dialer, call history, Call Seen | ✅ tested | ⚠️ through a bridge | ⚠️ through a bridge |
+| Automatic device discovery and reconnection | ✅ tested (one computer) | ⚠️ supported by design; not tested on Windows | ⚠️ the same |
+| AI voice assistant, speech-to-text, text-to-speech | ❌ not part of Lead Finder yet | ❌ | ❌ |
+| Installers | `.deb`, AppImage | `.exe` installer, portable `.exe` | `.dmg` / `.zip` (Apple Silicon and Intel) |
+| Automatic updates | ✅ | ✅ installer (not the portable build) | ✅ |
+
+**Other Linux distributions:** Fedora, Arch, Mint and others run the AppImage. Bluetooth calling needs BlueZ, PipeWire or PulseAudio (`pactl`, `pacat`, `parec`), Python 3 with D-Bus and GObject bindings (Fedora: `python3-dbus python3-gobject`; Arch: `python-dbus python-gobject`), and `obexd` for SMS. They were not tested on those systems.
 
 ## Chrome closing during a search
 
@@ -649,7 +754,7 @@ If Chrome, or Lead Finder's tab, closes while a search is running, the search pa
 - Table `businesses` is keyed by the Google Maps place id, so a business is never stored twice. Every checked listing is recorded so it isn't revisited. Phone and address are kept **only for qualified leads**. A later search fills in missing fields but never blanks existing ones, and a failed re-check never demotes a verified lead. Each lead has `category_id` (pointing to `categories`) and `discovered_date`, the local calendar date. A lead keeps the category and date from when it was first found.
 - Phone columns: `phone` (E.164 when validated, else as found), `phone_raw` (original), `phone_status` (`valid` / `unverified` / `invalid`), `phone_country`. Table `whatsapp_checks` holds the per-number result you recorded, and `app_state` holds the last search, for resuming after a crash.
 - Table `categories` stores each category once, with a normalised key that ignores case and spacing.
-- Schema upgrades are versioned (`PRAGMA user_version`, currently 15) and each runs once in a transaction. Version 2 converts stored phone numbers with the address's country and keeps the originals. Upgrading from the first version keeps every existing lead, computes its date from its recorded discovery time, and leaves its category empty (*Uncategorized*), because no category was ever recorded for it.
+- Schema upgrades are versioned (`PRAGMA user_version`, currently 17) and each runs once in a transaction. Version 2 converts stored phone numbers with the address's country and keeps the originals. Upgrading from the first version keeps every existing lead, computes its date from its recorded discovery time, and leaves its category empty (*Uncategorized*), because no category was ever recorded for it.
 - Nothing is uploaded anywhere. Lead Finder doesn't read cookies or passwords.
 
 ## Google Maps terms: read this
@@ -672,6 +777,12 @@ src/export/     CSV generation
 src/dialer/     Dialer: dialer.js (calls, history, reconnects), hfp.js (Hands-Free AT protocol),
                 bluetooth.js + bt-helper.py (BlueZ over D-Bus, the call's SCO voice),
                 audio.js (devices, echo cancellation), pipewire-hfp.js (the Hands-Free role)
+                auto-dialer.js (the Auto Dialer)
+src/messaging/  sms.js: SMS through the phone (Bluetooth MAP, via bt-helper.py and obexd);
+                sms-campaigns.js: SMS campaigns (the sending queue)
+src/bridge/     Bridges: secure.js (signed, encrypted link), discovery.js, server.js (Lead Finder
+                Bridge), client.js, link.js (this computer or a bridge), remote-audio.js
+src/numbers/    import.js: phone numbers from CSV, Excel, TXT or pasted text
 test/           Unit tests, Electron E2E test, real-Chrome integration script
 scripts/        dev.js (npm run dev), release.js (npm run release)
 tools/activation/  Activation setup (not packaged): writes the build's settings, tests SMTP

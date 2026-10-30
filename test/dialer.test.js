@@ -260,7 +260,7 @@ test('outgoing call: ATD, dialing, ringing, answered, audio on the computer, mut
   assert.equal(dialer.state().call.business, 'Acme Plumbing');
   assert.equal(audio.prepared, 1); // devices handed to the helper before the phone sends audio
   await until(() => bt.cmds.some(([c]) => c === 'audio'));
-  assert.deepEqual(bt.cmds.find(([c]) => c === 'audio')[1], { play: 'ec_spk', record: 'ec_mic', muted: false });
+  assert.deepEqual(bt.cmds.find(([c]) => c === 'audio')[1], { play: 'ec_spk', record: 'ec_mic', muted: false, remote: false });
   ag.ciev('callsetup', 3);
   await until(() => dialer.state().call.state === 'alerting');
   // Not answered yet and the audio is not here: no muting.

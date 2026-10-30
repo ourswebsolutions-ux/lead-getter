@@ -1603,12 +1603,24 @@ app.whenReady().then(() => {
   handle('dialer:disconnect', () => dialerDo((d) => d.disconnect({ keep: true })));
   handle('dialer:reconnect', () => dialerDo((d) => d.reconnectNow()));
   handle('dialer:forget', (address) => dialerDo((d) => d.forget(String(address || ''))));
-  handle('dialer:call', (number, opts) => dialerDo((d) => d.call(String(number || ''), { leadId: Number(opts?.leadId) || null })));
+  handle('dialer:call', (number, opts) => dialerDo((d) => d.call(String(number || ''), { leadId: Number(opts?.leadId) || null, numberId: Number(opts?.numberId) || null })));
   handle('dialer:hangup', () => dialerDo((d) => d.hangup()));
   handle('dialer:answer', () => dialerDo((d) => d.answer()));
   handle('dialer:reject', () => dialerDo((d) => d.reject()));
   handle('dialer:mute', (on) => dialerDo((d) => d.mute(Boolean(on))));
   handle('dialer:takeHandsFree', () => dialerDo((d) => d.takeHandsFree()));
+  // Bridges (another computer's Bluetooth, over the local network)
+  handle('bridge:state', () => phoneLink?.state() || null);
+  handle('bridge:discovery', (on) => phoneLink?.setDiscovery(Boolean(on)) || { ok: false });
+  handle('bridge:pair', (fp) => (phoneLink ? phoneLink.connectBridge(String(fp || ''), { pair: true }) : { ok: false }));
+  handle('bridge:confirm', (fp, ok) => phoneLink?.confirmPairing(String(fp || ''), Boolean(ok)) || { ok: false });
+  handle('bridge:forget', (fp) => phoneLink?.forget(String(fp || '')) || { ok: false });
+  handle('bridge:choose', (key) => phoneLink?.choose(String(key || '')) || { ok: false });
+  // The call's microphone from the window, when a bridge carries the call (20 ms chunks).
+  ipcMain.on('dialer:mic', (event, buf) => {
+    if (!trustedSender(event) || !appLock?.unlocked || !phoneLink?.remote) return;
+    if (buf instanceof Uint8Array && buf.length <= 4096) phoneLink.sendVoice(Buffer.from(buf));
+  });
   handle('dialer:refreshSim', () => dialerDo((d) => d.refreshSim()));
   handle('autodial:state', () => autoDialer?.state() || null);
   handle('autodial:start', () => (autoDialer ? autoDialer.start() : { ok: false, error: 'The Dialer is not ready.' }));
@@ -1616,6 +1628,90 @@ app.whenReady().then(() => {
   handle('autodial:resume', () => (autoDialer ? autoDialer.resume() : { ok: false }));
   handle('autodial:stop', () => autoDialer?.stop() || { ok: false });
   handle('autodial:settings', (raw) => (autoDialer ? autoDialer.setSettings(raw && typeof raw === 'object' ? raw : {}) : { ok: false }));
+  // SMS (Bluetooth MAP)
+  handle('sms:state', () => sms?.state() || { state: 'off', templates: [] });
+  handle('sms:threads', () => sms?.threads() || []);
+  handle('sms:messages', (phone) => sms?.messages(String(phone || '').slice(0, 30)) || { messages: [] });
+  handle('sms:send', (phone, text, opts) => (sms ? sms.send(String(phone || ''), String(text || ''), { leadId: Number(opts?.leadId) || null, numberId: Number(opts?.numberId) || null }) : { ok: false, error: 'Messages are not ready.' }));
+  handle('sms:sync', async () => {
+    try {
+      return { ok: true, added: (await sms?.sync()) || 0 };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  // SMS campaigns
+  const camp = (fn) => (smsCampaigns ? fn(smsCampaigns) : { ok: false, error: 'Messages are not ready.' });
+  handle('smsc:list', () => smsCampaigns?.list() || []);
+  handle('smsc:create', (d) => camp((c) => c.create(d && typeof d === 'object' ? d : {})));
+  handle('smsc:update', (id, d) => camp((c) => c.update(Number(id), d && typeof d === 'object' ? d : {})));
+  handle('smsc:addLeads', (id, leadIds) =>
+    camp((c) => {
+      const list = ids(leadIds).map((i) => store.leadById(i)).filter((l) => l?.phone);
+      return c.addRecipients(Number(id), list.map(leadRecipient));
+    }),
+  );
+  handle('smsc:addLeadFilter', (id, raw) =>
+    camp((c) => {
+      const f = validateFilter(raw);
+      return c.addRecipients(Number(id), store.listLeads(f).filter((l) => l.phone).map(leadRecipient));
+    }),
+  );
+  handle('smsc:addNumbers', (id, listId) =>
+    camp((c) => {
+      const rows = store.listNumbers({ listId: Number(listId), limit: 2000 }).rows.filter((n) => n.valid);
+      return c.addRecipients(Number(id), rows.map((n) => ({ kind: 'number', refId: n.id, phone: n.phone, name: n.name, business: n.business, category: n.extra?.category || n.list, city: n.extra?.city || null })));
+    }),
+  );
+  // An imported file checked before it is added: valid, invalid (with their rows), repeated.
+  handle('smsc:checkImport', (token, mapping) => {
+    const r = campaignImport(token, mapping);
+    if (r.error) return { ok: false, error: r.error };
+    const { built } = r;
+    const table = pendingImports.get(String(token));
+    const invalidRows = table.rows.filter((row) => !require('../numbers/import').normalize(row[r.mapping.phone], phoneCountry())?.valid).slice(0, 20);
+    return { ok: true, total: built.total, valid: built.items.filter((i) => i.valid).length, notValid: built.items.filter((i) => !i.valid).length, noNumber: built.invalid, duplicates: built.duplicates, invalidRows, sample: built.items.filter((i) => i.valid).slice(0, 5) };
+  });
+  handle('smsc:addImport', (id, token, mapping) =>
+    camp((c) => {
+      const r = campaignImport(token, mapping);
+      if (r.error) return { ok: false, error: r.error };
+      const items = r.built.items.filter((i) => i.valid);
+      const res = c.addRecipients(Number(id), items.map((i) => ({ kind: 'import', phone: i.phone, name: i.name, business: i.business, category: i.extra?.category || null, city: i.extra?.city || null })));
+      if (res.ok) pendingImports.delete(String(token));
+      return { ...res, skippedInvalid: r.built.items.length - items.length + r.built.invalid };
+    }),
+  );
+  handle('smsc:recipients', (id, f) => store.smsRecipients(Number(id), { status: String(f?.status || ''), search: String(f?.search || '').slice(0, 100), limit: Number(f?.limit) || 300, offset: Number(f?.offset) || 0 }));
+  handle('smsc:removeRecipients', (id, list) => camp((c) => c.removeRecipients(Number(id), ids(list))));
+  handle('smsc:preview', (id) => smsCampaigns?.preview(Number(id)) || []);
+  handle('smsc:start', (id) => camp((c) => c.start(Number(id))));
+  handle('smsc:pause', (id) => camp((c) => c.pause(Number(id))));
+  handle('smsc:stop', (id) => camp((c) => c.stop(Number(id))));
+  handle('smsc:retry', (id) => camp((c) => c.retryFailures(Number(id))));
+  handle('smsc:delete', (id) => camp((c) => c.remove(Number(id))));
+  handle('sms:retry', () => (sms ? sms.retry() : { ok: false, error: 'Messages are not ready.' }));
+  handle('sms:templates', (list) => (sms ? sms.saveTemplates(list) : { ok: false }));
+  // Number categories and imported numbers
+  handle('numbers:lists', () => store.numberLists());
+  handle('numbers:createList', (name) => numbersDo(() => ({ id: store.createNumberList(String(name || '')) })));
+  handle('numbers:renameList', (id, name) => numbersDo(() => store.renameNumberList(Number(id), String(name || ''))));
+  handle('numbers:deleteList', (id) => {
+    if (autoDialer?.settings.source.kind === 'list' && autoDialer.settings.source.listId === Number(id) && autoDialer.s.status !== 'off') return { ok: false, error: 'The Auto Dialer is calling this category: stop it first.' };
+    return numbersDo(() => store.deleteNumberList(Number(id)));
+  });
+  handle('numbers:list', (f) => store.listNumbers({ listId: Number(f?.listId) || null, search: String(f?.search || '').slice(0, 100), status: String(f?.status || ''), limit: Number(f?.limit) || 200, offset: Number(f?.offset) || 0 }));
+  handle('numbers:pickFile', () => pickNumbersFile());
+  handle('numbers:parseText', (text) => {
+    const { readTable } = require('../numbers/import');
+    const table = readTable(String(text || '').slice(0, 5_000_000), 'txt');
+    return table.rows.length ? importPreview(table, 'Pasted numbers') : { ok: false, error: 'No phone numbers were found in the text.' };
+  });
+  handle('numbers:import', (token, mapping, listId) => importNumbers(token, mapping, listId));
+  handle('numbers:move', (list, to) => numbersDo(() => store.moveNumbers(ids(list), Number(to))));
+  handle('numbers:delete', (list) => numbersDo(() => store.deleteNumbers(ids(list))));
+  handle('numbers:doNotCall', (id, on) => numbersDo(() => store.setNumberDoNotCall(Number(id), Boolean(on))));
+  handle('numbers:resetCalls', (id) => numbersDo(() => ({ reset: store.resetNumberListCalls(Number(id)) })));
   handle('leads:doNotCall', (id, on) => {
     const leadId = Number(id);
     if (!Number.isInteger(leadId) || leadId <= 0) return { ok: false, error: 'Unknown lead.' };
@@ -1723,7 +1819,95 @@ function afterUnlock() {
 // --- Dialer (calls through the user's Android phone; see src/dialer) ------------------
 
 let dialer = null;
+let phoneLink = null;
 let autoDialer = null;
+let sms = null;
+let smsCampaigns = null;
+
+// Campaign recipients from leads, imported numbers or a file (one shape for all).
+function leadRecipient(l) {
+  const { cityOf } = require('../messaging/sms-campaigns');
+  const person = l.kind === 'person';
+  return { kind: 'lead', refId: l.id, phone: l.phone, name: person ? l.name : l.contactName || null, business: person ? l.companyName : l.name, category: l.category || null, city: cityOf(l.address) };
+}
+
+function campaignImport(token, rawMapping) {
+  const table = pendingImports.get(String(token || ''));
+  if (!table) return { error: 'Choose the file again.' };
+  const { buildItems, FIELDS } = require('../numbers/import');
+  const mapping = {};
+  for (const f of FIELDS) {
+    const i = Number(rawMapping?.[f]);
+    if (Number.isInteger(i) && i >= 0) mapping[f] = i;
+  }
+  if (mapping.phone == null) return { error: 'Choose the column with the phone numbers.' };
+  const built = buildItems(table, mapping, { country: phoneCountry() });
+  return { built, mapping };
+}
+
+// --- imported phone numbers (number categories) --------------------------------------
+
+// Files read for import, waiting for the user's column mapping (by token).
+const pendingImports = new Map();
+
+function importPreview(table, file) {
+  const { guessMapping } = require('../numbers/import');
+  const token = require('node:crypto').randomBytes(8).toString('hex');
+  pendingImports.clear();
+  pendingImports.set(token, table);
+  return { ok: true, token, file, headers: table.headers, preview: table.rows.slice(0, 8), rows: table.rows.length, mapping: guessMapping(table), country: phoneCountry() };
+}
+
+async function pickNumbersFile() {
+  const r = await dialog.showOpenDialog(win, { title: 'Import phone numbers', properties: ['openFile'], filters: [{ name: 'Numbers (CSV, Excel, text)', extensions: ['csv', 'xlsx', 'txt'] }] });
+  if (r.canceled || !r.filePaths[0]) return { ok: false, canceled: true };
+  const file = r.filePaths[0];
+  const { readTable, kindOf } = require('../numbers/import');
+  try {
+    const st = await fs.stat(file);
+    if (st.size > 30 * 1024 * 1024) return { ok: false, error: 'The file is larger than 30 MB.' };
+    const table = readTable(await fs.readFile(file), kindOf(file));
+    if (!table.rows.length) return { ok: false, error: 'No rows were found in that file.' };
+    return importPreview(table, path.basename(file));
+  } catch (err) {
+    return { ok: false, error: `The file could not be read: ${err.message}` };
+  }
+}
+
+function importNumbers(token, rawMapping, listId) {
+  const table = pendingImports.get(String(token || ''));
+  if (!table) return { ok: false, error: 'Choose the file again.' };
+  const { buildItems, FIELDS } = require('../numbers/import');
+  const mapping = {};
+  for (const f of FIELDS) {
+    const i = Number(rawMapping?.[f]);
+    if (Number.isInteger(i) && i >= 0) mapping[f] = i;
+  }
+  if (mapping.phone == null) return { ok: false, error: 'Choose the column with the phone numbers.' };
+  const built = buildItems(table, mapping, { country: phoneCountry() });
+  try {
+    const r = store.importNumbers(Number(listId), built.items);
+    pendingImports.delete(token);
+    send('numbers:changed', {});
+    autoDialer?.changed();
+    return { ok: true, ...r, invalid: built.invalid, duplicatesInFile: built.duplicates, total: built.total, notValid: built.items.filter((i) => !i.valid).length };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+function numbersDo(fn) {
+  try {
+    const r = fn();
+    send('numbers:changed', {});
+    autoDialer?.changed();
+    return { ok: true, ...(r && typeof r === 'object' ? r : { result: r }) };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+const ids = (v) => (Array.isArray(v) ? v.map(Number).filter((n) => Number.isInteger(n) && n > 0).slice(0, 50_000) : []);
 
 function initDialer() {
   const { Dialer } = require('../dialer/dialer');
@@ -1732,13 +1916,32 @@ function initDialer() {
   const handover = require('../dialer/pipewire-hfp');
   // Tests may run a stand-in for the Bluetooth helper; never in a packaged app.
   const script = !app.isPackaged && process.env.LEAD_FINDER_BT_HELPER ? process.env.LEAD_FINDER_BT_HELPER : undefined;
+  // The phone link: this computer's Bluetooth (Linux) and/or bridges found on
+  // the local network (any system). Tests may turn off the local one.
+  const { PhoneLink } = require('../bridge/link');
+  const { Listener } = require('../bridge/discovery');
+  const { Identity } = require('../bridge/secure');
+  const { SwitchAudio } = require('../bridge/remote-audio');
+  const testing = !app.isPackaged;
+  const local = (supported() || script) && !(testing && process.env.LEAD_FINDER_NO_LOCAL_BT) ? new Bluetooth(script ? { script } : {}) : null;
+  const udpPort = testing && Number(process.env.LEAD_FINDER_DISCOVERY_PORT) ? Number(process.env.LEAD_FINDER_DISCOVERY_PORT) : undefined;
+  phoneLink = new PhoneLink({
+    local,
+    identity: new Identity(path.join(app.getPath('userData'), 'bridge-identity'), require('node:os').hostname()),
+    listener: new Listener(udpPort ? { udpPort } : {}),
+    state: { get: (k) => store.getState(k), set: (k, v) => store.setState(k, v) },
+    callLive: () => Boolean(dialer?.s.call && dialer.s.call.state !== 'ended'),
+  });
+  const bluetooth = phoneLink;
   dialer = new Dialer({
-    bluetooth: new Bluetooth(script ? { script } : {}),
-    audio: new CallAudio(),
+    bluetooth,
+    audio: new SwitchAudio({ local: process.platform === 'linux' ? new CallAudio() : null, isRemote: () => phoneLink.remote }),
     store,
     handover,
-    supported: supported() || Boolean(script),
+    supported: true,
   });
+  phoneLink.on('link', (st) => send('bridge:state', st));
+  phoneLink.on('voice', (buf) => send('dialer:voice', buf));
   dialer.on('state', (st) => send('dialer:state', st));
   dialer.on('incoming', (call) => {
     send('dialer:incoming', call);
@@ -1759,6 +1962,32 @@ function initDialer() {
   const { AutoDialer } = require('../dialer/auto-dialer');
   autoDialer = new AutoDialer({ dialer, store });
   autoDialer.on('state', (st) => send('autodial:state', st));
+  dialer.on('numberSeen', (id) => send('numbers:changed', { ids: [id] }));
+  // SMS over Bluetooth MAP, with the same phone.
+  const { Sms } = require('../messaging/sms');
+  sms = new Sms({ bluetooth, store, dialer });
+  const { SmsCampaigns } = require('../messaging/sms-campaigns');
+  smsCampaigns = new SmsCampaigns({ sms, store });
+  smsCampaigns.on('changed', (e) => send('smsc:changed', e));
+  smsCampaigns.init();
+  sms.on('state', (st) => send('sms:state', st));
+  sms.on('changed', (e) => {
+    send('sms:changed', { phone: e.phone });
+    if (e.leadId) send('leads:call', { ids: [e.leadId] });
+    if (e.numberId) send('numbers:changed', { ids: [e.numberId] });
+  });
+  sms.on('incoming', ({ phone, body, contact }) => {
+    if (!Notification.isSupported()) return;
+    const n = new Notification({ title: contact?.name || contact?.business || phone, body: String(body || '').slice(0, 200) });
+    n.on('click', () => {
+      if (win && !win.isDestroyed()) {
+        win.show();
+        win.focus();
+        send('sms:open', { phone });
+      }
+    });
+    n.show();
+  });
   dialer.start().catch((err) => console.error('dialer:', err.message));
 }
 
@@ -1785,7 +2014,9 @@ app.on('before-quit', (e) => {
   Promise.all([search?.promise, podcastRun?.promise].map((p) => Promise.resolve(p).catch(() => {})))
     .then(() => outreach?.dispose())
     .then(() => autoDialer?.stop())
+    .then(() => sms?.disconnect())
     .then(() => dialer?.stop())
+    .then(() => phoneLink?.stop())
     .then(() => chrome.disconnect())
     .then(() => wa?.disconnect()) // closes the connection; the linked session is kept
     .finally(() => {

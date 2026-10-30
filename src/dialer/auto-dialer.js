@@ -1,12 +1,16 @@
 'use strict';
 
-// The Auto Dialer: calls Call Unseen leads one after another through the
-// Dialer (the same Bluetooth Hands-Free calls as the Call button), while the
-// user has it on.
+// The Auto Dialer: calls Call Unseen leads, or the numbers of one imported
+// category, one after another through the Dialer (the same Bluetooth
+// Hands-Free calls as the Call button), while the user has it on.
 //
-//   answered         -> stops dialling; after the call, waits for the user to continue
-//   ended by the user before an answer -> waits 1 minute, then the next lead
-//   not answered, busy, failed -> a short gap, then the next lead
+//   answered -> you talk; when the call has ended (from the computer or the
+//               phone, as the phone reports it) -> 60 seconds, then the next
+//   ended by the user before an answer -> 60 seconds, then the next
+//   not answered, busy, failed -> the gap, then the next
+//
+// The countdown starts only when the phone reports the call as ended; at
+// zero the connection, the current call and the next number are checked again.
 //
 // It only calls leads with a valid (by default mobile) number that are Call
 // Unseen, not marked "do not call" and not opted out; each lead at most once
@@ -26,6 +30,7 @@ const DEFAULTS = {
   ringSeconds: 45, // ring this long, then end the call as not answered
   mobileOnly: true,
   hours: { on: true, from: '09:00', to: '20:00' },
+  source: { kind: 'leads' }, // or { kind: 'list', listId }
 };
 
 const isMobile = (number) => {
@@ -46,6 +51,7 @@ function settingsFrom(raw = {}) {
     afterManualSeconds: DEFAULTS.afterManualSeconds,
     ringSeconds: n(raw.ringSeconds, 15, 120, DEFAULTS.ringSeconds),
     mobileOnly: raw.mobileOnly !== false,
+    source: raw.source?.kind === 'list' && Number.isInteger(Number(raw.source.listId)) && Number(raw.source.listId) > 0 ? { kind: 'list', listId: Number(raw.source.listId) } : { kind: 'leads' },
     hours: { on: h.on !== false, from: minutes(h.from) != null ? h.from : DEFAULTS.hours.from, to: minutes(h.to) != null ? h.to : DEFAULTS.hours.to },
   };
 }
@@ -68,16 +74,29 @@ class AutoDialer extends EventEmitter {
   }
 
   state() {
-    return { ...this.s, settings: this.settings, eligible: this.s.status === 'off' ? this.count() : undefined };
+    return { ...this.s, settings: this.settings, sourceName: this.sourceName(), eligible: this.s.status === 'off' ? this.count() : undefined };
   }
 
   changed() {
     this.emit('state', this.state());
   }
 
-  // Leads this run may still call (number checks included).
+  // The next candidates of the chosen source: leads, or one category's numbers.
+  candidates(limit) {
+    const src = this.settings.source;
+    if (src.kind === 'list') return this.store.callableNumbers({ listId: src.listId, exclude: [...this.tried], limit }).map((n) => ({ ...n, numberEntry: true }));
+    return this.store.callableLeads({ exclude: [...this.tried], limit });
+  }
+
+  sourceName() {
+    const src = this.settings.source;
+    if (src.kind !== 'list') return 'Leads';
+    return this.store.numberLists?.().find((l) => l.id === src.listId)?.name || 'Category';
+  }
+
+  // Leads or numbers this run may still call (number checks included).
   eligible(limit = 5000) {
-    return this.store.callableLeads({ exclude: [...this.tried], limit }).filter((l) => this.callable(l));
+    return this.candidates(limit).filter((l) => this.callable(l));
   }
 
   callable(lead) {
@@ -94,6 +113,7 @@ class AutoDialer extends EventEmitter {
   }
 
   setSettings(raw) {
+    if (raw?.source && this.s.status !== 'off') return { ok: false, error: 'Stop the Auto Dialer before choosing what it calls.' };
     this.settings = settingsFrom({ ...this.settings, ...raw, hours: { ...this.settings.hours, ...(raw?.hours || {}) } });
     this.store.setState('autoDialerSettings', this.settings);
     this.changed();
@@ -126,10 +146,11 @@ class AutoDialer extends EventEmitter {
 
   start() {
     if (this.s.status !== 'off') return { ok: false, error: 'The Auto Dialer is already on.' };
+    this.answered = false;
     if (this.dialer.s.link !== 'ready') return { ok: false, error: 'Connect your phone first.' };
     this.tried = new Set();
     const total = this.count();
-    if (!total) return { ok: false, error: 'No leads to call: every lead with a valid mobile number is Call Seen, marked do-not-call or opted out.' };
+    if (!total) return { ok: false, error: this.settings.source.kind === 'list' ? `Nothing to call in "${this.sourceName()}": every valid ${this.settings.mobileOnly ? 'mobile ' : ''}number there is Call Seen, already called elsewhere, do-not-call or opted out.` : 'No leads to call: every lead with a valid mobile number is Call Seen, marked do-not-call or opted out.' };
     this.s = { status: 'running', reason: null, lead: null, nextAt: null, processed: 0, skipped: 0, total, log: [] };
     this.changed();
     this.schedule(0);
@@ -191,7 +212,7 @@ class AutoDialer extends EventEmitter {
     }
     if (!this.inHours()) return this.pause(`Outside the calling hours (${this.settings.hours.from}–${this.settings.hours.to})`);
     let lead = null;
-    for (const l of this.store.callableLeads({ exclude: [...this.tried], limit: 50 })) {
+    for (const l of this.candidates(50)) {
       this.tried.add(l.id);
       if (this.callable(l)) {
         lead = l;
@@ -201,20 +222,22 @@ class AutoDialer extends EventEmitter {
       this.log({ leadId: l.id, name: l.name, number: l.phone, outcome: 'skipped', reason: dialable(l.phone) ? 'Not a mobile number' : 'Invalid number' });
     }
     if (!lead) {
-      if (this.store.callableLeads({ exclude: [...this.tried], limit: 1 }).length) return this.schedule(0);
+      if (this.candidates(1).length) return this.schedule(0);
       this.clearTimers();
       this.s.status = 'off';
-      this.s.reason = 'Done: every eligible lead was called';
+      this.s.reason = `Done: every eligible ${this.settings.source.kind === 'list' ? 'number' : 'lead'} was called`;
       this.s.lead = null;
       this.changed();
       return;
     }
     const person = lead.kind === 'person';
-    this.s.lead = { id: lead.id, name: person ? lead.name : lead.contactName || lead.name, business: person ? lead.companyName || null : lead.name, number: lead.phone };
+    this.s.lead = lead.numberEntry
+      ? { id: lead.id, kind: 'number', name: lead.name || lead.business || lead.phone, business: lead.business || null, number: lead.phone }
+      : { id: lead.id, kind: 'lead', name: person ? lead.name : lead.contactName || lead.name, business: person ? lead.companyName || null : lead.name, number: lead.phone };
     this.s.status = 'calling';
     this.s.reason = null;
     this.changed();
-    const r = await this.dialer.call(lead.phone, { leadId: lead.id, auto: true });
+    const r = await this.dialer.call(lead.phone, lead.numberEntry ? { numberId: lead.id, auto: true } : { leadId: lead.id, auto: true });
     if (r.ok) return;
     // Not placed (no service, the phone refused…): counted, then the next one, unless the phone is gone.
     this.s.processed++;
@@ -234,11 +257,12 @@ class AutoDialer extends EventEmitter {
         if (c?.auto && c.state !== 'active' && c.state !== 'ended') this.dialer.hangup({ by: 'auto' });
       }, this.settings.ringSeconds * 1000);
     }
-    if (call?.auto && call.state === 'active' && this.s.status === 'calling') {
-      // Answered: no more dialling until the user says so.
+    if (call?.auto && call.state === 'active' && this.s.status === 'calling' && !this.answered) {
+      // Answered: nothing else is dialled while the call goes on.
+      this.answered = true;
       this.timers.clearTimeout(this.ringTimer);
       this.ringTimer = null;
-      this.s.reason = 'Answered: talk now; the Auto Dialer waits for you after the call';
+      this.s.reason = 'Answered: talk now. The next call is 60 seconds after this one ends.';
       this.changed();
     }
     if (st.link !== 'ready' && ['running', 'waiting', 'calling'].includes(this.s.status)) this.pause('Bluetooth disconnected: reconnect the phone, then continue');
@@ -253,15 +277,15 @@ class AutoDialer extends EventEmitter {
     if (this.s.status === 'off') return;
     this.s.processed++;
     this.log({ leadId: call.leadId, name: call.name || call.business, number: call.number, outcome: call.status, reason: call.reason });
+    this.answered = false;
     if (this.s.status === 'paused') return this.changed();
-    if (call.status === 'answered') {
-      this.clearTimers();
-      this.s.status = 'paused';
-      this.s.reason = 'The last call was answered: continue when you are ready';
-      this.changed();
-      return;
+    // The phone reported the call as ended. Answered (ended from the computer
+    // or the phone) or ended by the user before an answer: 60 seconds.
+    if (call.status === 'answered' || call.status === 'cancelled') {
+      this.s.reason = call.status === 'answered' ? 'The call ended' : 'You ended the call';
+      return this.schedule(this.settings.afterManualSeconds, 'waiting');
     }
-    if (call.status === 'cancelled') return this.schedule(this.settings.afterManualSeconds, 'waiting');
+    this.s.reason = null;
     this.schedule(this.settings.gapSeconds, 'waiting');
   }
 }

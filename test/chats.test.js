@@ -203,7 +203,7 @@ test('migration from version 3 (through 4, 5 and 6) keeps existing leads and set
   v3.db.exec('DROP TABLE wa_chats; DROP TABLE wa_chat_messages; DROP TABLE outreach_contacts; DROP TABLE outreach_sends; DROP TABLE outreach_optouts; PRAGMA user_version = 3;');
   v3.close();
   const v4 = new LeadStore(file);
-  assert.equal(v4.db.prepare('PRAGMA user_version').get().user_version, 15, 'upgraded through version 4 to the current version');
+  assert.equal(v4.db.prepare('PRAGMA user_version').get().user_version, 17, 'upgraded through version 4 to the current version');
   assert.deepEqual(v4.listLeads({}).map((l) => l.name), ['Kept Estate']);
   assert.deepEqual(v4.getState('theme'), { mode: 'dark' });
   assert.equal(v4.db.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE name IN ('wa_chats','wa_chat_messages','outreach_contacts','outreach_sends','outreach_optouts')").get().n, 5);

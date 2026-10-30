@@ -159,6 +159,106 @@ class LeadStore {
     this.migrateV13();
     this.migrateV14();
     this.migrateV15();
+    this.migrateV16();
+    this.migrateV17();
+  }
+
+  // Version 17: SMS campaigns. A campaign keeps its message, its sending
+  // controls and every recipient (a lead, an imported number or a contact
+  // imported for it) with that recipient's own status, so progress survives
+  // restarts and nobody gets the same campaign twice.
+  migrateV17() {
+    if (this.db.prepare('PRAGMA user_version').get().user_version >= 17) return;
+    this.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS sms_campaigns (
+          id INTEGER PRIMARY KEY,
+          name TEXT NOT NULL,
+          message TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'draft',
+          reason TEXT,
+          device TEXT,
+          delay_seconds INTEGER NOT NULL DEFAULT 30,
+          per_hour INTEGER NOT NULL DEFAULT 60,
+          max_retries INTEGER NOT NULL DEFAULT 2,
+          skip_texted INTEGER NOT NULL DEFAULT 1,
+          created_at INTEGER NOT NULL,
+          started_at INTEGER,
+          finished_at INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS sms_recipients (
+          id INTEGER PRIMARY KEY,
+          campaign_id INTEGER NOT NULL,
+          kind TEXT NOT NULL,
+          ref_id INTEGER,
+          phone TEXT NOT NULL,
+          name TEXT,
+          business TEXT,
+          category TEXT,
+          city TEXT,
+          status TEXT NOT NULL DEFAULT 'pending',
+          reason TEXT,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          next_at INTEGER,
+          sms_id INTEGER,
+          body TEXT,
+          updated_at INTEGER,
+          UNIQUE (campaign_id, phone)
+        );
+        CREATE INDEX IF NOT EXISTS sms_recipients_queue ON sms_recipients (campaign_id, status, id);
+        CREATE INDEX IF NOT EXISTS sms_recipients_sms ON sms_recipients (sms_id);
+        PRAGMA user_version = 17;`);
+    });
+  }
+
+  // Version 16: imported phone numbers in categories of their own (apart
+  // from leads), each with its call and SMS status; calls can belong to an
+  // imported number; SMS messages sent and received through the phone
+  // (Bluetooth MAP); the SMS status of leads, apart from WhatsApp and calls.
+  migrateV16() {
+    if (this.db.prepare('PRAGMA user_version').get().user_version >= 16) return;
+    this.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS number_lists (
+          id INTEGER PRIMARY KEY,
+          name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+          created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS numbers (
+          id INTEGER PRIMARY KEY,
+          list_id INTEGER NOT NULL REFERENCES number_lists(id) ON DELETE CASCADE,
+          phone TEXT NOT NULL,
+          phone_raw TEXT,
+          valid INTEGER NOT NULL DEFAULT 0,
+          name TEXT,
+          business TEXT,
+          extra TEXT,
+          created_at INTEGER NOT NULL,
+          call_seen_at INTEGER,
+          call_dnc INTEGER NOT NULL DEFAULT 0,
+          sms_seen_at INTEGER,
+          UNIQUE (list_id, phone)
+        );
+        CREATE INDEX IF NOT EXISTS numbers_phone ON numbers (phone);
+        CREATE TABLE IF NOT EXISTS sms_messages (
+          id INTEGER PRIMARY KEY,
+          handle TEXT UNIQUE,
+          phone TEXT NOT NULL,
+          direction TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+          body TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL,
+          error TEXT,
+          at INTEGER NOT NULL,
+          lead_id INTEGER,
+          number_id INTEGER,
+          read INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE INDEX IF NOT EXISTS sms_phone ON sms_messages (phone, at);`);
+      const has = (t, col) => this.db.prepare(`SELECT 1 FROM pragma_table_info('${t}') WHERE name = ?`).get(col);
+      if (!has('calls', 'number_id')) this.db.exec('ALTER TABLE calls ADD COLUMN number_id INTEGER');
+      if (!has('businesses', 'sms_seen_at')) this.db.exec('ALTER TABLE businesses ADD COLUMN sms_seen_at INTEGER');
+      this.db.exec('PRAGMA user_version = 16;');
+    });
   }
 
   // Version 15: the call status of each lead, kept apart from its WhatsApp
@@ -1605,12 +1705,12 @@ class LeadStore {
 
   // --- calls (the Dialer) ---
 
-  addCall({ leadId = null, number = '', name = null, business = null, direction, status, startedAt, sim = null, device = null }) {
+  addCall({ leadId = null, numberId = null, number = '', name = null, business = null, direction, status, startedAt, sim = null, device = null }) {
     return Number(
       this.withRetry(() =>
         this.db
-          .prepare('INSERT INTO calls (lead_id, number, name, business, direction, status, started_at, sim, device) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-          .run(leadId, number, name, business, direction, status, startedAt, sim, device).lastInsertRowid,
+          .prepare('INSERT INTO calls (lead_id, number_id, number, name, business, direction, status, started_at, sim, device) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+          .run(leadId, numberId, number, name, business, direction, status, startedAt, sim, device).lastInsertRowid,
       ),
     );
   }
@@ -1652,7 +1752,7 @@ class LeadStore {
     const rows = this.withRetry(() =>
       this.db.prepare(`SELECT c.* FROM calls c ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY c.started_at DESC, c.id DESC LIMIT ?`).all(...args, Math.min(Math.max(Number(limit) || 200, 1), 2000)),
     );
-    return rows.map((r) => ({ id: r.id, leadId: r.lead_id, number: r.number, name: r.name, business: r.business, direction: r.direction, status: r.status, startedAt: r.started_at, endedAt: r.ended_at, duration: r.duration, sim: r.sim, device: r.device, detail: r.detail }));
+    return rows.map((r) => ({ id: r.id, leadId: r.lead_id, numberId: r.number_id ?? null, number: r.number, name: r.name, business: r.business, direction: r.direction, status: r.status, startedAt: r.started_at, endedAt: r.ended_at, duration: r.duration, sim: r.sim, device: r.device, detail: r.detail }));
   }
 
   // Call Seen: an outgoing call to this lead started (only the first time is kept).
@@ -1675,12 +1775,376 @@ class LeadStore {
         .prepare(
           `${LEAD_SELECT} WHERE b.qualified = 1 AND b.phone IS NOT NULL AND b.phone != '' AND b.phone_status = 'valid' AND b.call_seen_at IS NULL AND b.call_dnc = 0
              AND NOT EXISTS (SELECT 1 FROM outreach_optouts o WHERE o.phone = b.phone)
+             AND ${NOT_CALLED('b.phone')}
              ${ex.length ? `AND b.id NOT IN (${ex.map(() => '?').join(',')})` : ''}
            ORDER BY b.discovered_at ASC, b.id ASC LIMIT ?`,
         )
         .all(...ex, Math.max(1, Math.min(Number(limit) || 50, 5000))),
     );
     return rows.map(toLead);
+  }
+
+  // --- imported numbers in categories (apart from leads) ---
+
+  numberLists() {
+    return this.withRetry(() =>
+      this.db
+        .prepare(
+          `SELECT l.id, l.name, l.created_at,
+             COUNT(n.id) AS total,
+             SUM(n.call_seen_at IS NOT NULL) AS called,
+             SUM(n.call_seen_at IS NULL AND n.call_dnc = 0) AS unseen,
+             SUM(n.call_dnc = 1 OR EXISTS (SELECT 1 FROM outreach_optouts o WHERE o.phone = n.phone)) AS opted_out,
+             SUM(n.sms_seen_at IS NOT NULL) AS texted
+           FROM number_lists l LEFT JOIN numbers n ON n.list_id = l.id
+           GROUP BY l.id ORDER BY l.name COLLATE NOCASE`,
+        )
+        .all(),
+    ).map((r) => ({ id: r.id, name: r.name, createdAt: r.created_at, total: r.total, called: r.called || 0, unseen: r.unseen || 0, optedOut: r.opted_out || 0, texted: r.texted || 0 }));
+  }
+
+  createNumberList(name) {
+    const n = String(name || '').trim().slice(0, 80);
+    if (!n) throw new Error('Enter a category name.');
+    if (this.db.prepare('SELECT 1 FROM number_lists WHERE name = ?').get(n)) throw new Error(`A category named "${n}" already exists.`);
+    return Number(this.db.prepare('INSERT INTO number_lists (name, created_at) VALUES (?, ?)').run(n, Date.now()).lastInsertRowid);
+  }
+
+  renameNumberList(id, name) {
+    const n = String(name || '').trim().slice(0, 80);
+    if (!n) throw new Error('Enter a category name.');
+    const other = this.db.prepare('SELECT id FROM number_lists WHERE name = ?').get(n);
+    if (other && other.id !== id) throw new Error(`A category named "${n}" already exists.`);
+    this.db.prepare('UPDATE number_lists SET name = ? WHERE id = ?').run(n, id);
+  }
+
+  // Deletes the category and its numbers (their calls stay in the call log).
+  deleteNumberList(id) {
+    this.transaction(() => {
+      this.db.prepare('DELETE FROM numbers WHERE list_id = ?').run(id);
+      this.db.prepare('DELETE FROM number_lists WHERE id = ?').run(id);
+    });
+  }
+
+  // items: [{ phone, raw, valid, name, business, extra }]. A number already
+  // in the category is not added again (its details are kept as they were).
+  importNumbers(listId, items, now = Date.now()) {
+    if (!this.db.prepare('SELECT 1 FROM number_lists WHERE id = ?').get(listId)) throw new Error('That category no longer exists.');
+    const insert = this.db.prepare('INSERT OR IGNORE INTO numbers (list_id, phone, phone_raw, valid, name, business, extra, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+    const elsewhere = this.db.prepare(`SELECT (SELECT COUNT(*) FROM numbers WHERE phone = ? AND list_id != ?) + (SELECT COUNT(*) FROM businesses WHERE phone = ? AND qualified = 1) AS n`);
+    let added = 0;
+    let inList = 0;
+    let alsoElsewhere = 0;
+    this.transaction(() => {
+      for (const it of items) {
+        const extra = it.extra && Object.keys(it.extra).length ? JSON.stringify(it.extra) : null;
+        const r = insert.run(listId, it.phone, it.raw || null, it.valid ? 1 : 0, it.name || null, it.business || null, extra, now);
+        if (r.changes) {
+          added++;
+          if (elsewhere.get(it.phone, listId, it.phone).n) alsoElsewhere++;
+        } else inList++;
+      }
+    });
+    return { added, duplicateInCategory: inList, alsoElsewhere };
+  }
+
+  // filter: { listId, search, status: called | unseen | dnc | optout | texted, limit, offset }
+  listNumbers({ listId = null, search = '', status = '', limit = 200, offset = 0 } = {}) {
+    const where = [];
+    const args = [];
+    if (listId) {
+      where.push('n.list_id = ?');
+      args.push(Number(listId));
+    }
+    if (status === 'called') where.push('n.call_seen_at IS NOT NULL');
+    else if (status === 'unseen') where.push('n.call_seen_at IS NULL AND n.call_dnc = 0');
+    else if (status === 'dnc') where.push('n.call_dnc = 1');
+    else if (status === 'optout') where.push('(n.call_dnc = 1 OR EXISTS (SELECT 1 FROM outreach_optouts o WHERE o.phone = n.phone))');
+    else if (status === 'texted') where.push('n.sms_seen_at IS NOT NULL');
+    const q = String(search || '').trim().toLowerCase();
+    if (q) {
+      const like = `%${q.replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
+      const digits = q.replace(/\D/g, '');
+      where.push(`(lower(COALESCE(n.name, '')) LIKE ? ESCAPE '\\' OR lower(COALESCE(n.business, '')) LIKE ? ESCAPE '\\'${digits.length >= 3 ? " OR replace(n.phone, '+', '') LIKE ?" : ''})`);
+      args.push(like, like);
+      if (digits.length >= 3) args.push(`%${digits}%`);
+    }
+    const w = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const total = this.db.prepare(`SELECT COUNT(*) AS n FROM numbers n ${w}`).get(...args).n;
+    const rows = this.db
+      .prepare(
+        `SELECT n.*, l.name AS list_name,
+           EXISTS (SELECT 1 FROM outreach_optouts o WHERE o.phone = n.phone) AS opted_out,
+           (SELECT COUNT(*) FROM numbers d WHERE d.phone = n.phone AND d.id != n.id) + (SELECT COUNT(*) FROM businesses b WHERE b.phone = n.phone AND b.qualified = 1) AS dupes
+         FROM numbers n JOIN number_lists l ON l.id = n.list_id ${w}
+         ORDER BY n.id ASC LIMIT ? OFFSET ?`,
+      )
+      .all(...args, Math.min(Math.max(Number(limit) || 200, 1), 2000), Math.max(0, Number(offset) || 0));
+    return { total, rows: rows.map(toNumber) };
+  }
+
+  numberById(id) {
+    const r = this.db.prepare('SELECT n.*, l.name AS list_name, EXISTS (SELECT 1 FROM outreach_optouts o WHERE o.phone = n.phone) AS opted_out, 0 AS dupes FROM numbers n JOIN number_lists l ON l.id = n.list_id WHERE n.id = ?').get(id);
+    return r ? toNumber(r) : null;
+  }
+
+  // Moves numbers to another category; one already there is left where it was.
+  moveNumbers(ids, toListId) {
+    const move = this.db.prepare('UPDATE OR IGNORE numbers SET list_id = ? WHERE id = ?');
+    let moved = 0;
+    this.transaction(() => {
+      for (const id of ids) moved += move.run(toListId, id).changes;
+    });
+    return { moved, skipped: ids.length - moved };
+  }
+
+  deleteNumbers(ids) {
+    const del = this.db.prepare('DELETE FROM numbers WHERE id = ?');
+    this.transaction(() => ids.forEach((id) => del.run(id)));
+  }
+
+  setNumberDoNotCall(id, on) {
+    this.db.prepare('UPDATE numbers SET call_dnc = ? WHERE id = ?').run(on ? 1 : 0, id);
+  }
+
+  markNumberCallSeen(id, at = Date.now()) {
+    if (id) this.db.prepare('UPDATE numbers SET call_seen_at = ? WHERE id = ? AND call_seen_at IS NULL').run(at, id);
+  }
+
+  // Back to Call Unseen for a whole category (asked for, after confirmation).
+  resetNumberListCalls(listId) {
+    return this.db.prepare('UPDATE numbers SET call_seen_at = NULL WHERE list_id = ? AND call_seen_at IS NOT NULL').run(listId).changes;
+  }
+
+  // Numbers of a category the Auto Dialer may call (as callableLeads).
+  callableNumbers({ listId, exclude = [], limit = 50 } = {}) {
+    const ex = [...new Set(exclude.map(Number).filter(Number.isInteger))];
+    return this.db
+      .prepare(
+        `SELECT n.*, l.name AS list_name, 0 AS opted_out, 0 AS dupes FROM numbers n JOIN number_lists l ON l.id = n.list_id
+         WHERE n.list_id = ? AND n.valid = 1 AND n.call_seen_at IS NULL AND n.call_dnc = 0
+           AND NOT EXISTS (SELECT 1 FROM outreach_optouts o WHERE o.phone = n.phone)
+           AND ${NOT_CALLED('n.phone')}
+           ${ex.length ? `AND n.id NOT IN (${ex.map(() => '?').join(',')})` : ''}
+         ORDER BY n.id ASC LIMIT ?`,
+      )
+      .all(Number(listId), ...ex, Math.max(1, Math.min(Number(limit) || 50, 5000)))
+      .map(toNumber);
+  }
+
+  // --- opt-outs (shared by WhatsApp and SMS) ---
+
+  isOptedOut(phone) {
+    const digits = String(phone || '').replace(/\D/g, '');
+    if (digits.length < 6) return false;
+    return Boolean(this.db.prepare("SELECT 1 FROM outreach_optouts WHERE phone = ? OR replace(phone, '+', '') LIKE ? LIMIT 1").get(String(phone), `%${digits.slice(-9)}`));
+  }
+
+  optOut(phone, reason = null) {
+    this.db.prepare('INSERT OR IGNORE INTO outreach_optouts (phone, reason, at) VALUES (?, ?, ?)').run(String(phone), reason, Date.now());
+  }
+
+  // --- SMS campaigns ---
+
+  createSmsCampaign({ name, message, delaySeconds = 30, perHour = 60, maxRetries = 2, skipTexted = true, device = null }) {
+    return Number(
+      this.db
+        .prepare('INSERT INTO sms_campaigns (name, message, delay_seconds, per_hour, max_retries, skip_texted, device, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(name, message, delaySeconds, perHour, maxRetries, skipTexted ? 1 : 0, device, Date.now()).lastInsertRowid,
+    );
+  }
+
+  updateSmsCampaign(id, fields) {
+    const cols = { name: 'name', message: 'message', status: 'status', reason: 'reason', device: 'device', delaySeconds: 'delay_seconds', perHour: 'per_hour', maxRetries: 'max_retries', skipTexted: 'skip_texted', startedAt: 'started_at', finishedAt: 'finished_at' };
+    const sets = [];
+    const args = [];
+    for (const [k, c] of Object.entries(cols)) {
+      if (!(k in fields)) continue;
+      sets.push(`${c} = ?`);
+      args.push(typeof fields[k] === 'boolean' ? (fields[k] ? 1 : 0) : fields[k]);
+    }
+    if (sets.length) this.db.prepare(`UPDATE sms_campaigns SET ${sets.join(', ')} WHERE id = ?`).run(...args, id);
+  }
+
+  smsCampaigns() {
+    return this.db
+      .prepare(
+        `SELECT c.*, COUNT(r.id) AS total,
+           SUM(r.status = 'pending') AS pending, SUM(r.status = 'sending') AS sending, SUM(r.status = 'submitted') AS submitted,
+           SUM(r.status = 'sent') AS sent, SUM(r.status = 'delivered') AS delivered, SUM(r.status = 'failed') AS failed, SUM(r.status = 'skipped') AS skipped
+         FROM sms_campaigns c LEFT JOIN sms_recipients r ON r.campaign_id = c.id GROUP BY c.id ORDER BY c.created_at DESC, c.id DESC`,
+      )
+      .all()
+      .map(toCampaign);
+  }
+
+  smsCampaign(id) {
+    return this.smsCampaigns().find((c) => c.id === id) || null;
+  }
+
+  deleteSmsCampaign(id) {
+    this.transaction(() => {
+      this.db.prepare('DELETE FROM sms_recipients WHERE campaign_id = ?').run(id);
+      this.db.prepare('DELETE FROM sms_campaigns WHERE id = ?').run(id);
+    });
+  }
+
+  // recipients: [{ kind: lead | number | import, refId, phone, name, business, category, city }];
+  // a number already in the campaign is not added again.
+  addSmsRecipients(campaignId, recipients, now = Date.now()) {
+    const ins = this.db.prepare('INSERT OR IGNORE INTO sms_recipients (campaign_id, kind, ref_id, phone, name, business, category, city, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
+    let added = 0;
+    this.transaction(() => {
+      for (const r of recipients) added += ins.run(campaignId, r.kind, r.refId ?? null, r.phone, r.name || null, r.business || null, r.category || null, r.city || null, now).changes;
+    });
+    return { added, duplicates: recipients.length - added };
+  }
+
+  removeSmsRecipients(campaignId, ids) {
+    const del = this.db.prepare("DELETE FROM sms_recipients WHERE campaign_id = ? AND id = ? AND status IN ('pending', 'skipped', 'failed')");
+    let removed = 0;
+    this.transaction(() => ids.forEach((id) => (removed += del.run(campaignId, id).changes)));
+    return removed;
+  }
+
+  smsRecipients(campaignId, { status = '', search = '', limit = 200, offset = 0 } = {}) {
+    const where = ['r.campaign_id = ?'];
+    const args = [campaignId];
+    if (status === 'not_sent') where.push("r.status IN ('pending', 'sending')");
+    else if (status) {
+      where.push('r.status = ?');
+      args.push(status);
+    }
+    const q = String(search || '').trim().toLowerCase();
+    if (q) {
+      const like = `%${q.replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
+      where.push("(lower(COALESCE(r.name, '')) LIKE ? ESCAPE '\\' OR lower(COALESCE(r.business, '')) LIKE ? ESCAPE '\\' OR r.phone LIKE ?)");
+      args.push(like, like, like);
+    }
+    const w = where.join(' AND ');
+    const total = this.db.prepare(`SELECT COUNT(*) AS n FROM sms_recipients r WHERE ${w}`).get(...args).n;
+    const rows = this.db.prepare(`SELECT r.* FROM sms_recipients r WHERE ${w} ORDER BY r.id ASC LIMIT ? OFFSET ?`).all(...args, Math.min(Math.max(Number(limit) || 200, 1), 2000), Math.max(0, Number(offset) || 0));
+    return { total, rows: rows.map(toRecipient) };
+  }
+
+  // The next recipient to send to (pending, its retry time reached).
+  nextSmsRecipient(campaignId, now = Date.now()) {
+    const r = this.db.prepare("SELECT * FROM sms_recipients WHERE campaign_id = ? AND status = 'pending' AND (next_at IS NULL OR next_at <= ?) ORDER BY attempts ASC, id ASC LIMIT 1").get(campaignId, now);
+    return r ? toRecipient(r) : null;
+  }
+
+  // The earliest retry time of a campaign's waiting recipients (null: none waiting).
+  nextSmsRetryAt(campaignId) {
+    return this.db.prepare("SELECT MIN(next_at) AS t FROM sms_recipients WHERE campaign_id = ? AND status = 'pending' AND next_at IS NOT NULL").get(campaignId).t ?? null;
+  }
+
+  updateSmsRecipient(id, fields) {
+    const cols = { status: 'status', reason: 'reason', attempts: 'attempts', nextAt: 'next_at', smsId: 'sms_id', body: 'body' };
+    const sets = ['updated_at = ?'];
+    const args = [Date.now()];
+    for (const [k, c] of Object.entries(cols)) {
+      if (!(k in fields)) continue;
+      sets.push(`${c} = ?`);
+      args.push(fields[k]);
+    }
+    this.db.prepare(`UPDATE sms_recipients SET ${sets.join(', ')} WHERE id = ?`).run(...args, id);
+  }
+
+  // Recipients follow their message: submitted -> sent -> delivered / failed (as the phone reports).
+  syncSmsRecipients() {
+    return this.db
+      .prepare(
+        `UPDATE sms_recipients SET status = (SELECT m.status FROM sms_messages m WHERE m.id = sms_recipients.sms_id), updated_at = ?
+         WHERE sms_id IS NOT NULL AND status IN ('submitted', 'sent')
+           AND (SELECT m.status FROM sms_messages m WHERE m.id = sms_recipients.sms_id) IN ('sent', 'delivered', 'failed')
+           AND (SELECT m.status FROM sms_messages m WHERE m.id = sms_recipients.sms_id) != status`,
+      )
+      .run(Date.now()).changes;
+  }
+
+  // Failed recipients of a campaign go back in the queue (asked for).
+  retrySmsFailures(campaignId) {
+    return this.db.prepare("UPDATE sms_recipients SET status = 'pending', next_at = NULL, attempts = 0, reason = NULL WHERE campaign_id = ? AND status = 'failed' AND COALESCE(reason, '') NOT LIKE 'Opted out%'").run(campaignId).changes;
+  }
+
+  // A text to this number was already sent (any campaign or by hand), last 9 digits.
+  textedBefore(phone, exceptSmsId = null) {
+    const digits = String(phone || '').replace(/\D/g, '');
+    if (digits.length < 6) return false;
+    return Boolean(this.db.prepare("SELECT 1 FROM sms_messages WHERE direction = 'out' AND status NOT IN ('failed', 'sending') AND replace(phone, '+', '') LIKE ? AND id IS NOT ? LIMIT 1").get(`%${digits.slice(-9)}`, exceptSmsId));
+  }
+
+  // Texts handed to the phone in the last hour (for the hourly limit).
+  smsSentSince(since) {
+    return this.db.prepare("SELECT COUNT(*) AS n FROM sms_messages WHERE direction = 'out' AND status != 'failed' AND at >= ?").get(since).n;
+  }
+
+  // --- SMS (through the phone, Bluetooth MAP) ---
+
+  // The lead or imported number with this phone number, for names in conversations.
+  contactByPhone(phone) {
+    const lead = this.findLeadByPhone(phone);
+    if (lead) return { kind: 'lead', id: lead.id, name: lead.kind === 'person' ? lead.name : lead.contactName || lead.name, business: lead.kind === 'person' ? lead.companyName : lead.name };
+    const digits = String(phone || '').replace(/\D/g, '');
+    if (digits.length < 7) return null;
+    const n = this.db.prepare("SELECT id, name, business FROM numbers WHERE replace(phone, '+', '') LIKE ? ORDER BY id DESC LIMIT 1").get(`%${digits.slice(-9)}`);
+    return n ? { kind: 'number', id: n.id, name: n.name || n.business || null, business: n.business || null } : null;
+  }
+
+  // A message; one with a MAP handle already saved is not saved twice.
+  addSms({ handle = null, phone, direction, body = '', status, error = null, at = Date.now(), leadId = null, numberId = null, read = true }) {
+    const r = this.db.prepare('INSERT OR IGNORE INTO sms_messages (handle, phone, direction, body, status, error, at, lead_id, number_id, read) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(handle, phone, direction, body, status, error, at, leadId, numberId, read ? 1 : 0);
+    return r.changes ? Number(r.lastInsertRowid) : null;
+  }
+
+  updateSms(id, { status, error = null, handle }) {
+    this.db.prepare('UPDATE sms_messages SET status = COALESCE(?, status), error = ?, handle = COALESCE(?, handle) WHERE id = ?').run(status ?? null, error, handle ?? null, id);
+  }
+
+  // A message sent from Lead Finder that the phone's sent folder now lists:
+  // same number (last 9 digits), same text, not matched yet.
+  claimSentSms({ phone, body, since, handle }) {
+    const tail = String(phone || '').replace(/\D/g, '').slice(-9);
+    if (tail.length < 6) return null;
+    const row = this.db
+      .prepare("SELECT id, phone, status FROM sms_messages WHERE handle IS NULL AND direction = 'out' AND body = ? AND at >= ? AND replace(phone, '+', '') LIKE ? ORDER BY at DESC LIMIT 1")
+      .get(body, since, `%${tail}`);
+    if (!row) return null;
+    this.db.prepare('UPDATE sms_messages SET handle = ? WHERE id = ?').run(handle, row.id);
+    return row;
+  }
+
+  smsByHandle(handle) {
+    return this.db.prepare('SELECT * FROM sms_messages WHERE handle = ?').get(handle) || null;
+  }
+
+  markSmsSeen({ leadId, numberId }, at = Date.now()) {
+    if (leadId) this.db.prepare('UPDATE businesses SET sms_seen_at = COALESCE(sms_seen_at, ?) WHERE id = ?').run(at, leadId);
+    if (numberId) this.db.prepare('UPDATE numbers SET sms_seen_at = COALESCE(sms_seen_at, ?) WHERE id = ?').run(at, numberId);
+  }
+
+  // Conversations, newest first: the last message and unread count of each number.
+  smsThreads() {
+    const rows = this.db
+      .prepare(
+        `SELECT m.phone, MAX(m.at) AS at, SUM(m.direction = 'in' AND m.read = 0) AS unread, COUNT(*) AS n,
+           (SELECT body FROM sms_messages x WHERE x.phone = m.phone ORDER BY x.at DESC, x.id DESC LIMIT 1) AS last,
+           (SELECT direction FROM sms_messages x WHERE x.phone = m.phone ORDER BY x.at DESC, x.id DESC LIMIT 1) AS last_dir
+         FROM sms_messages m GROUP BY m.phone ORDER BY at DESC LIMIT 500`,
+      )
+      .all();
+    return rows.map((r) => ({ phone: r.phone, at: r.at, unread: r.unread || 0, count: r.n, last: r.last, lastDirection: r.last_dir, contact: this.contactByPhone(r.phone) }));
+  }
+
+  smsMessages(phone) {
+    return this.db
+      .prepare('SELECT * FROM sms_messages WHERE phone = ? ORDER BY at ASC, id ASC LIMIT 2000')
+      .all(phone)
+      .map((r) => ({ id: r.id, handle: r.handle, phone: r.phone, direction: r.direction, body: r.body, status: r.status, error: r.error, at: r.at, leadId: r.lead_id, numberId: r.number_id, read: Boolean(r.read) }));
+  }
+
+  markSmsRead(phone) {
+    this.db.prepare("UPDATE sms_messages SET read = 1 WHERE phone = ? AND direction = 'in'").run(phone);
   }
 
   // The saved lead with this number (the last 9 digits match), for incoming calls.
@@ -1785,6 +2249,8 @@ function toLead(row) {
     // started, 'dnc' when the lead must not be called.
     callStatus: row.call_dnc ? 'dnc' : row.call_seen_at ? 'seen' : 'unseen',
     callSeenAt: row.call_seen_at ?? null,
+    // SMS status (texts sent through the phone), apart from WhatsApp and calls.
+    smsStatus: row.sms_seen_at ? 'seen' : 'unseen',
     // Where the lead was found: Google Maps, a Facebook post and/or LinkedIn.
     source: { fb: 'facebook', li: 'linkedin', lp: 'linkedin', pc: 'podcast' }[String(row.place_key).slice(0, 2)] || 'maps',
     // A person found with LinkedIn People search (not a business).
@@ -1833,11 +2299,64 @@ const LEAD_SELECT = `SELECT b.*, c.name AS category_name, w.status AS wa_status,
   LEFT JOIN categories c ON c.id = b.category_id
   LEFT JOIN whatsapp_checks w ON w.phone = b.phone AND b.phone_status = 'valid'`;
 
+function toCampaign(r) {
+  return {
+    id: r.id,
+    name: r.name,
+    message: r.message,
+    status: r.status,
+    reason: r.reason,
+    device: r.device,
+    delaySeconds: r.delay_seconds,
+    perHour: r.per_hour,
+    maxRetries: r.max_retries,
+    skipTexted: Boolean(r.skip_texted),
+    createdAt: r.created_at,
+    startedAt: r.started_at,
+    finishedAt: r.finished_at,
+    counts: { total: r.total || 0, pending: (r.pending || 0) + (r.sending || 0), submitted: r.submitted || 0, sent: r.sent || 0, delivered: r.delivered || 0, failed: r.failed || 0, skipped: r.skipped || 0 },
+  };
+}
+
+function toRecipient(r) {
+  return { id: r.id, campaignId: r.campaign_id, kind: r.kind, refId: r.ref_id, phone: r.phone, name: r.name, business: r.business, category: r.category, city: r.city, status: r.status, reason: r.reason, attempts: r.attempts, nextAt: r.next_at, smsId: r.sms_id, body: r.body, updatedAt: r.updated_at };
+}
+
+function toNumber(r) {
+  let extra = null;
+  try {
+    extra = r.extra ? JSON.parse(r.extra) : null;
+  } catch {}
+  return {
+    id: r.id,
+    listId: r.list_id,
+    list: r.list_name,
+    phone: r.phone,
+    raw: r.phone_raw,
+    valid: Boolean(r.valid),
+    name: r.name,
+    business: r.business,
+    extra,
+    createdAt: r.created_at,
+    callStatus: r.call_dnc ? 'dnc' : r.call_seen_at ? 'seen' : 'unseen',
+    callSeenAt: r.call_seen_at,
+    smsStatus: r.sms_seen_at ? 'seen' : 'unseen',
+    optedOut: Boolean(r.opted_out),
+    duplicates: r.dupes || 0,
+  };
+}
+
+// A phone number no outgoing call has started to (as a lead, an imported
+// number or in the call log): the Auto Dialer never calls a number twice.
+const NOT_CALLED = (col) => `NOT EXISTS (SELECT 1 FROM calls k WHERE k.number = ${col} AND k.direction = 'outgoing' AND k.status NOT IN ('failed', 'dialing'))
+  AND NOT EXISTS (SELECT 1 FROM numbers n2 WHERE n2.phone = ${col} AND (n2.call_seen_at IS NOT NULL OR n2.call_dnc = 1))
+  AND NOT EXISTS (SELECT 1 FROM businesses b2 WHERE b2.phone = ${col} AND b2.qualified = 1 AND (b2.call_seen_at IS NOT NULL OR b2.call_dnc = 1))`;
+
 const TOMBSTONE = `qualified = 0, website_status = 'deleted', website_detail = NULL, name = '', phone = NULL, phone_raw = NULL,
   phone_status = NULL, phone_country = NULL, address = NULL, maps_url = '', fb_post_url = NULL, fb_page_url = NULL, contact_name = NULL, description = NULL,
   email = NULL, website_url = NULL, li_job_url = NULL, li_post_url = NULL, job_title = NULL, discovery = NULL,
   host_name = NULL, emails = NULL, person_title = NULL, company_name = NULL, company_url = NULL, phones = NULL, email_status = NULL, contact_providers = NULL,
-  call_seen_at = NULL, call_dnc = 0`;
+  call_seen_at = NULL, call_dnc = 0, sms_seen_at = NULL`;
 
 // Email status of a finished check (processPodcast's status).
 const EMAIL_STATUS = { found: 'found', platform_only: 'platform', not_found: 'none', incomplete: 'failed', failed: 'failed' };

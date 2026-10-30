@@ -1,16 +1,17 @@
 {
   "name": "lead-finder",
-  "version": "1.9.0",
+  "version": "1.10.0",
   "description": "Finds Google Maps businesses with or without websites using your own Chrome.",
-  "main": "src/main/main.js",
+  "main": "src/main/entry.js",
   "scripts": {
     "dev": "node scripts/dev.js",
     "build": "vite build",
     "start": "vite build && node scripts/dev.js --prod",
     "test": "node --test test/*.test.js",
     "test:integration": "node test/integration/real-chrome.js",
-    "test:e2e": "vite build && node --test --test-timeout=200000 test/e2e/app.e2e.js test/e2e/activation.e2e.js test/e2e/access.e2e.js test/e2e/sources.e2e.js test/e2e/design.e2e.js test/e2e/premium.e2e.js test/e2e/whatsapp.e2e.js test/e2e/outreach.e2e.js test/e2e/many-leads.e2e.js test/e2e/facebook.e2e.js test/e2e/live-leads.e2e.js test/e2e/podcasts.e2e.js test/e2e/people.e2e.js test/e2e/dialer.e2e.js",
-    "release": "node scripts/release.js"
+    "test:e2e": "vite build && node --test --test-timeout=200000 test/e2e/app.e2e.js test/e2e/activation.e2e.js test/e2e/access.e2e.js test/e2e/sources.e2e.js test/e2e/design.e2e.js test/e2e/premium.e2e.js test/e2e/whatsapp.e2e.js test/e2e/outreach.e2e.js test/e2e/many-leads.e2e.js test/e2e/facebook.e2e.js test/e2e/live-leads.e2e.js test/e2e/podcasts.e2e.js test/e2e/people.e2e.js test/e2e/dialer.e2e.js test/e2e/numbers.e2e.js test/e2e/campaigns.e2e.js test/e2e/bridge.e2e.js",
+    "release": "node scripts/release.js",
+    "bridge": "node src/bridge/run.js"
   },
   "author": {
     "name": "Axora Web",
@@ -52,6 +53,9 @@
       "src/export/**",
       "src/whatsapp/**",
       "src/dialer/**",
+      "src/bridge/**",
+      "src/numbers/**",
+      "src/messaging/**",
       "dist/renderer/**",
       "package.json"
     ],
@@ -72,7 +76,8 @@
     },
     "win": {
       "target": [
-        "nsis"
+        "nsis",
+        "portable"
       ],
       "icon": "build/icon.png"
     },
@@ -82,7 +87,11 @@
         "zip"
       ],
       "category": "public.app-category.business",
-      "icon": "build/icon.png"
+      "icon": "build/icon.png",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Lead Finder uses the microphone for phone calls made through your phone (the Dialer).",
+        "NSLocalNetworkUsageDescription": "Lead Finder finds Lead Finder Bridges on your local network, to make calls and send SMS through a phone connected to another computer."
+      }
     },
     "nsis": {
       "oneClick": false,
@@ -98,7 +107,8 @@
       "recommends": [
         "python3-dbus",
         "python3-gi",
-        "pulseaudio-utils"
+        "pulseaudio-utils",
+        "bluez-obexd"
       ]
     },
     "publish": [

@@ -61,14 +61,43 @@ def at(cmd):
             # Numbers ending in 0 ring and are not answered.
             later(1.5, lambda: ciev("callsetup", 0) if not ind["call"] else None)
         else:
-            later(0.9, lambda: (emit({"event": "sco_up", "address": PHONE}), ciev("call", 1), ciev("callsetup", 0)))
+            later(0.9, lambda: (sco(True), ciev("call", 1), ciev("callsetup", 0)))
         return
     elif cmd == "AT+CHUP":
         line("OK")
-        later(0.2, lambda: (emit({"event": "sco_down", "address": PHONE, "reason": "closed by the phone"}), ciev("call", 0)))
+        later(0.2, lambda: (sco(False), ciev("call", 0)))
         return
     line("OK")
 
+
+sent_box = []
+voice = {"remote": False, "on": False, "out": 0}
+
+
+def voice_loop():
+    # A bridge's remote audio: 20 ms of a quiet tone, while the voice link is up.
+    import math
+    import struct
+    import base64
+    t = 0
+    while voice["on"]:
+        if voice["remote"]:
+            pcm = b"".join(struct.pack("<h", int(3000 * math.sin(2 * math.pi * 440 * (t + i) / 8000))) for i in range(160))
+            emit({"event": "voice", "address": PHONE, "data": base64.b64encode(pcm).decode()})
+        t += 160
+        time.sleep(0.02)
+
+
+def sco(up, reason="closed by the phone"):
+    if up:
+        emit({"event": "sco_up", "address": PHONE})
+        if not voice["on"]:
+            voice["on"] = True
+            threading.Thread(target=voice_loop, daemon=True).start()
+    else:
+        voice["on"] = False
+        emit({"event": "sco_down", "address": PHONE, "reason": reason})
+bodies = {"/m/1": "Is the offer still open?"}
 
 ADAPTER = {"path": "/org/bluez/hci0", "address": "00:11:22:33:44:55", "name": "test-laptop", "powered": True, "discovering": False, "visible": False}
 pending_pair = None
@@ -112,10 +141,32 @@ for raw in sys.stdin:
         at(req["line"])
     elif cmd == "sco_disconnect":
         emit({"id": rid, "ok": True, "result": True})
-        emit({"event": "sco_down", "address": PHONE, "reason": "moved to the phone"})
+        sco(False, "moved to the phone")
     elif cmd == "sco_connect":
         emit({"id": rid, "ok": True, "result": True})
-        later(0.2, lambda: emit({"event": "sco_up", "address": PHONE}))
+        later(0.2, lambda: sco(True))
+    elif cmd == "audio":
+        voice["remote"] = bool(req.get("remote"))
+        emit({"id": rid, "ok": True, "result": True})
+    elif cmd == "voice_out":
+        voice["out"] += 1  # the computer's microphone (no reply)
+    elif cmd == "state":
+        emit({"id": rid, "ok": True, "result": {"adapter": ADAPTER, "devices": [device()] if state["paired"] else [], "links": []}})
+    elif cmd == "map_connect":
+        # Message access (MAP): one SMS waiting in the inbox.
+        emit({"id": rid, "ok": True, "result": True})
+    elif cmd == "map_list":
+        folder = req.get("folder")
+        msgs = [{"path": "/m/1", "handle": "1", "folder": "telecom/msg/inbox", "senderAddress": "+923001234567", "sender": "Acme", "timestamp": "20261030T101500", "read": False, "subject": "Is the offer"}] if folder == "inbox" else sent_box
+        emit({"id": rid, "ok": True, "result": msgs})
+    elif cmd == "map_get":
+        emit({"id": rid, "ok": True, "result": bodies.get(req.get("path"), "")})
+    elif cmd == "map_push":
+        n = len(sent_box) + 100
+        sent_box.append({"path": "/m/%d" % n, "handle": str(n), "folder": "telecom/msg/sent", "recipientAddress": req.get("number"), "timestamp": time.strftime("%Y%m%dT%H%M%S")})
+        bodies["/m/%d" % n] = req.get("text")
+        emit({"id": rid, "ok": True, "result": {"transfer": "/t/%d" % n}})
+        later(1.0, lambda: emit({"event": "sms_status", "address": PHONE, "handle": str(n), "changed": {"status": "delivery-success"}}))
     elif cmd == "register_hf":
         emit({"id": rid, "ok": True, "result": True})
     else:

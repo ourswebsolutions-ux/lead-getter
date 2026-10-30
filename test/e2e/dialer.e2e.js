@@ -131,23 +131,29 @@ test('Dialer: SIM, call, Recent calls, Call Seen, Do not call, Auto Dialer', asy
   await win.getByRole('button', { name: 'Dialer' }).click();
   await win.evaluate(() => window.leadFinder.autoDialSettings({ hours: { on: false }, gapSeconds: 5 }));
   const auto = win.getByRole('region', { name: 'Auto Dialer' });
-  await auto.getByText(/4 leads ready/).waitFor(); // Bright, Echo, Gamma, Hotel (Acme called, Corner is a landline)
+  await auto.getByText(/4 ready/).waitFor();
+  assert.match(await auto.innerText(), /SIM: Jazz/); // Bright, Echo, Gamma, Hotel (Acme called, Corner is a landline)
   await auto.getByRole('switch', { name: 'Auto Dialer' }).click();
   // Bright Dental: not answered -> the next lead after the gap (Corner Shop's landline is skipped).
   await auto.getByText('Bright Dental').first().waitFor();
   await auto.getByText(/Next call in/).waitFor({ timeout: 20_000 });
   await auto.locator('.dl-auto-log').getByText('Bright Dental').waitFor();
-  // Echo Traders answers: dialling stops; after the call it waits for the user.
+  // Echo Traders answers: nothing else is dialled; when it ends, the next call is 60 seconds later.
   await dialPad.getByText('Echo Traders').waitFor({ timeout: 20_000 });
   await dialPad.locator('.dl-state').filter({ hasText: 'Connected' }).waitFor();
   assert.match(await auto.innerText(), /Answered/);
   await dialPad.getByRole('button', { name: 'End call' }).click();
-  await auto.getByText('The last call was answered: continue when you are ready').waitFor();
-  await new Promise((r) => setTimeout(r, 6000)); // it really waits: no call after the gap
+  await auto.getByText(/Next call in (59|60)s/).waitFor();
+  await new Promise((r) => setTimeout(r, 6000)); // counting down, no call meanwhile
   assert.equal((await win.evaluate(() => window.leadFinder.dialerHistory({ limit: 1 })))[0].business, 'Echo Traders');
+  assert.match(await auto.innerText(), /Next call in 5\ds/);
   assert.equal((await lead('Gamma Foods')).callStatus, 'unseen');
-  // Continue: Gamma Foods rings; the user ends it -> the next call waits 1 minute.
-  await auto.getByRole('button', { name: 'Continue' }).click();
+  // Off cancels the countdown; on again: Gamma Foods rings; the user ends it -> 60 seconds again.
+  await auto.getByRole('switch', { name: 'Auto Dialer' }).click();
+  await auto.getByText('Off', { exact: true }).waitFor();
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.equal((await lead('Gamma Foods')).callStatus, 'unseen');
+  await auto.getByRole('switch', { name: 'Auto Dialer' }).click();
   await dialPad.getByText('Gamma Foods').waitFor({ timeout: 20_000 });
   await dialPad.locator('.dl-state').filter({ hasText: 'Ringing' }).waitFor();
   await dialPad.getByRole('button', { name: 'End call' }).click();

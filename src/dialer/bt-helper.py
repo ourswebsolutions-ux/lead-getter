@@ -24,8 +24,10 @@ disconnects devices, and makes this computer a Bluetooth Hands-Free unit
   Nothing is recorded or stored.
 """
 
+import base64
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -228,6 +230,10 @@ class Voice:
         self.mic = bytearray()
         self.mic_watch = None
         self.listener = None
+        # Remote: the call's audio goes to Lead Finder on another computer (a bridge).
+        self.remote = False
+        self.out = bytearray()
+        self.flush_timer = None
 
     def listen(self, adapter_address):
         try:
@@ -284,6 +290,10 @@ class Voice:
 
     def start_audio(self):
         self.stop_audio()
+        if self.remote:
+            # 20 ms chunks of the phone's voice to Lead Finder; its microphone comes back with voice_out.
+            self.flush_timer = GLib.timeout_add(20, self.flush)
+            return
         try:
             self.player = subprocess.Popen(PLAY + (["--device=" + self.play] if self.play else []), stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             os.set_blocking(self.player.stdin.fileno(), False)
@@ -293,7 +303,22 @@ class Voice:
         except OSError as e:
             emit({"event": "audio_error", "error": "pacat and parec are needed for call audio (%s)." % e})
 
+    def flush(self):
+        if self.out:
+            emit({"event": "voice", "address": self.address, "data": base64.b64encode(bytes(self.out)).decode()})
+            self.out = bytearray()
+        return True
+
+    def mic_in(self, data):
+        self.mic += data
+        if len(self.mic) > MIC_MAX:
+            del self.mic[: len(self.mic) - MIC_MAX]
+
     def stop_audio(self):
+        if self.flush_timer:
+            GLib.source_remove(self.flush_timer)
+            self.flush_timer = None
+        self.out = bytearray()
         if self.mic_watch:
             GLib.source_remove(self.mic_watch)
             self.mic_watch = None
@@ -336,7 +361,9 @@ class Voice:
         if not data:
             self.close("closed by the phone")
             return False
-        if self.player and self.player.poll() is None:
+        if self.remote:
+            self.out += data
+        elif self.player and self.player.poll() is None:
             try:
                 self.player.stdin.write(data)
                 self.player.stdin.flush()
@@ -354,9 +381,9 @@ class Voice:
             pass
         return True
 
-    def configure(self, play, record, muted):
-        changed = (play, record) != (self.play, self.record)
-        self.play, self.record, self.muted = play, record, muted
+    def configure(self, play, record, muted, remote=False):
+        changed = (play, record, remote) != (self.play, self.record, self.remote)
+        self.play, self.record, self.muted, self.remote = play, record, muted, remote
         if changed and self.sock:
             self.start_audio()
 
@@ -379,6 +406,177 @@ class Voice:
 voice = Voice()
 hf_registered = False
 hf_error = None
+
+
+# --- SMS: Bluetooth Message Access (MAP) through obexd ---------------------------------
+# obexd (BlueZ's OBEX service, on the session bus) is the MAP client: it
+# connects to the phone's Message Access Server, lists, reads and pushes
+# (sends) messages, and receives the phone's event reports (new message,
+# sent, delivered) through its Message Notification Server.
+
+OBEX = "org.bluez.obex"
+session_bus = None
+map_sessions = {}  # address -> session path
+TMP = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "lead-finder-map")
+
+
+def obex():
+    global session_bus
+    if session_bus is None:
+        session_bus = dbus.SessionBus()
+        session_bus.add_signal_receiver(on_obex_added, dbus_interface="org.freedesktop.DBus.ObjectManager", signal_name="InterfacesAdded", bus_name=OBEX)
+        session_bus.add_signal_receiver(on_obex_changed, dbus_interface="org.freedesktop.DBus.Properties", signal_name="PropertiesChanged", bus_name=OBEX, path_keyword="path")
+    return session_bus
+
+
+def map_address(path):
+    for a, p in map_sessions.items():
+        if str(path).startswith(p + "/"):
+            return a
+    return None
+
+
+def message_info(path, props):
+    keep = ("Folder", "Subject", "Timestamp", "Sender", "SenderAddress", "ReplyTo", "Recipient", "RecipientAddress", "Type", "Size", "Status", "Read", "Sent", "Protected")
+    return {"path": str(path), "handle": str(path).rsplit("/", 1)[-1], **{k[0].lower() + k[1:]: plain(v) for k, v in props.items() if k in keep}}
+
+
+def on_obex_added(path, ifaces):
+    if "org.bluez.obex.Message1" in ifaces:
+        address = map_address(path)
+        if address:
+            emit({"event": "sms_message", "address": address, "message": message_info(path, ifaces["org.bluez.obex.Message1"])})
+
+
+def on_obex_changed(iface, changed, invalidated, path=None):
+    if iface == "org.bluez.obex.Message1":
+        address = map_address(path)
+        if address:
+            emit({"event": "sms_status", "address": address, "path": str(path), "handle": str(path).rsplit("/", 1)[-1], "changed": plain(changed)})
+
+
+def obex_error(e):
+    msg = e.get_dbus_message() if isinstance(e, dbus.DBusException) else str(e)
+    if "0x53" in (msg or "") or "0x43" in (msg or "") or "Forbidden" in (msg or ""):
+        return "denied: The phone refused message access. On the phone: Settings, Bluetooth, this computer, turn on Text messages (Message access)."
+    if "ServiceUnknown" in (e.get_dbus_name() if isinstance(e, dbus.DBusException) else "") or "org.bluez.obex" in (msg or ""):
+        return "obexd: The Bluetooth messaging service (obexd) is not running on this computer."
+    return msg or "MAP error"
+
+
+def wait_transfer(transfer, done):
+    # Calls done(error or None) when the OBEX transfer completes or fails.
+    def changed(iface, props, invalidated, path=None):
+        if str(path) != str(transfer) or "Status" not in props:
+            return
+        st = str(props["Status"])
+        if st in ("complete", "error"):
+            receiver.remove()
+            done(None if st == "complete" else "The transfer failed.")
+
+    receiver = obex().add_signal_receiver(changed, dbus_interface="org.freedesktop.DBus.Properties", signal_name="PropertiesChanged", bus_name=OBEX, path_keyword="path")
+
+
+def bmessage(number, text):
+    body = "BEGIN:MSG\r\n" + text.replace("\r\n", "\n").replace("\n", "\r\n") + "\r\nEND:MSG\r\n"
+    return (
+        "BEGIN:BMSG\r\nVERSION:1.0\r\nSTATUS:READ\r\nTYPE:SMS_GSM\r\nFOLDER:telecom/msg/outbox\r\n"
+        "BEGIN:BENV\r\nBEGIN:VCARD\r\nVERSION:2.1\r\nN:\r\nTEL:" + number + "\r\nEND:VCARD\r\n"
+        "BEGIN:BBODY\r\nCHARSET:UTF-8\r\nLENGTH:" + str(len(body.encode("utf-8"))) + "\r\n" + body + "END:BBODY\r\nEND:BENV\r\nEND:BMSG\r\n"
+    )
+
+
+def bmessage_text(raw):
+    m = re.search(r"BEGIN:MSG\r?\n(.*?)\r?\nEND:MSG", raw, re.S)
+    return m.group(1) if m else ""
+
+
+def map_command(rid, cmd, req, address):
+    bus_ = obex()
+    if cmd == "map_connect":
+        if address in map_sessions:
+            return reply(rid, True)
+        client = dbus.Interface(bus_.get_object(OBEX, "/org/bluez/obex"), "org.bluez.obex.Client1")
+
+        def ok(path):
+            map_sessions[address] = str(path)
+            try:
+                dbus.Interface(bus_.get_object(OBEX, path), "org.bluez.obex.MessageAccess1").SetFolder("telecom/msg")
+            except dbus.DBusException:
+                pass
+            reply(rid, True)
+
+        return client.CreateSession(address, {"Target": "map"}, reply_handler=ok, error_handler=lambda e: reply(rid, error=obex_error(e)), timeout=90)
+    if cmd == "map_disconnect":
+        path = map_sessions.pop(address, None)
+        if path:
+            try:
+                dbus.Interface(bus_.get_object(OBEX, "/org/bluez/obex"), "org.bluez.obex.Client1").RemoveSession(path)
+            except dbus.DBusException:
+                pass
+        return reply(rid, True)
+    path = map_sessions.get(address)
+    if not path:
+        raise RuntimeError("Messages are not connected.")
+    ma = dbus.Interface(bus_.get_object(OBEX, path), "org.bluez.obex.MessageAccess1")
+    if cmd == "map_list":
+        flt = {"MaxCount": dbus.UInt16(max(1, min(int(req.get("max") or 50), 500)))}
+        if req.get("since"):
+            flt["PeriodBegin"] = str(req["since"])
+        return ma.ListMessages(str(req.get("folder") or "inbox"), flt, reply_handler=lambda msgs: reply(rid, [message_info(p, pr) for p, pr in msgs.items()]), error_handler=lambda e: reply(rid, error=obex_error(e)), timeout=60)
+    if cmd == "map_get":
+        os.makedirs(TMP, mode=0o700, exist_ok=True)
+        target = os.path.join(TMP, "msg-%s.bmsg" % re.sub(r"[^\w-]", "_", str(req.get("handle") or "x")))
+        msg = dbus.Interface(bus_.get_object(OBEX, str(req["path"])), "org.bluez.obex.Message1")
+
+        def got(transfer, props):
+            def done(err):
+                try:
+                    with open(target, encoding="utf-8", errors="replace") as f:
+                        text = bmessage_text(f.read())
+                except OSError:
+                    text = None
+                try:
+                    os.remove(target)
+                except OSError:
+                    pass
+                reply(rid, error=err) if err or text is None else reply(rid, text)
+
+            wait_transfer(transfer, done)
+
+        return msg.Get(target, False, reply_handler=got, error_handler=lambda e: reply(rid, error=obex_error(e)), timeout=60)
+    if cmd == "map_push":
+        number = str(req.get("number") or "")
+        text = str(req.get("text") or "")
+        if not re.match(r"^\+?[0-9]{3,20}$", number) or not text:
+            raise RuntimeError("A number and a message are needed.")
+        os.makedirs(TMP, mode=0o700, exist_ok=True)
+        source = os.path.join(TMP, "out-%d.bmsg" % rid)
+        with open(source, "w", encoding="utf-8", newline="") as f:
+            f.write(bmessage(number, text))
+
+        def pushed(transfer, props):
+            def done(err):
+                try:
+                    os.remove(source)
+                except OSError:
+                    pass
+                reply(rid, error=err) if err else reply(rid, {"transfer": str(transfer)})
+
+            wait_transfer(transfer, done)
+
+        def failed(e):
+            try:
+                os.remove(source)
+            except OSError:
+                pass
+            reply(rid, error=obex_error(e))
+
+        return ma.PushMessage(source, "telecom/msg/outbox", {"Transparent": False, "Retry": True, "Charset": "utf8"}, reply_handler=pushed, error_handler=failed, timeout=60)
+    if cmd == "map_read":
+        dbus.Interface(bus_.get_object(OBEX, str(req["path"])), "org.freedesktop.DBus.Properties").Set("org.bluez.obex.Message1", "Read", dbus.Boolean(True))
+        return reply(rid, True)
+    raise RuntimeError("Unknown command: %s" % cmd)
 
 
 def register_hf():
@@ -582,14 +780,19 @@ def handle(req):
             dev, _ = device_iface(address)
             return run_async(rid, dev.ConnectProfile, HFP_AG_UUID)
         if cmd == "audio":
-            voice.configure(req.get("play") or "", req.get("record") or "", bool(req.get("muted")))
+            voice.configure(req.get("play") or "", req.get("record") or "", bool(req.get("muted")), bool(req.get("remote")))
             return reply(rid, True)
+        if cmd == "voice_out":
+            voice.mic_in(base64.b64decode(str(req.get("data") or "")))
+            return  # no reply: 50 a second
         if cmd == "sco_connect":
             voice.connect(address)
             return reply(rid, True)
         if cmd == "sco_disconnect":
             voice.close("moved to the phone")
             return reply(rid, True)
+        if cmd.startswith("map_"):
+            return map_command(rid, cmd, req, address)
         if cmd == "register_hf":
             if not hf_registered:
                 register_hf()

@@ -133,6 +133,8 @@ class Dialer extends EventEmitter {
       this.changed();
     });
     on('link_up', (m) => this.onLinkUp(m.address));
+    // The phone link moved (another bridge, or this computer): the old one is let go.
+    on('switched', ({ reason }) => this.onSwitched(reason));
     on('link_down', (m) => this.onLinkDown(m.address, m.reason));
     on('data', (m) => m.address === this.s.saved?.address && this.hfp?.onLine(m.line));
     on('sco_up', (m) => this.onVoice(m.address, true));
@@ -182,12 +184,32 @@ class Dialer extends EventEmitter {
     }
   }
 
+  onSwitched(reason) {
+    this.timers.clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.hfp?.reset(reason || 'The phone link moved.');
+    this.hfp = null;
+    // A call going on stays on, on the phone (the bridge moves its audio there).
+    if (this.s.call && this.s.call.state !== 'ended') this.finish({ detail: `${reason || 'The phone link moved'}: the call went on on the phone.`, lost: true });
+    this.s.link = 'idle';
+    this.s.phone = null;
+    this.s.hfRole = null;
+    this.s.adapter = null;
+    this.s.devices = [];
+    this.changed();
+    // The audio devices are those of the new link (this computer's, or the window's for a bridge).
+    this.audio.available().then((ok) => {
+      this.s.audioAvailable = ok;
+      this.refreshAudio();
+    });
+  }
+
   onSnapshot(st) {
     this.s.error = null;
     this.helperRestarts = 0;
     this.s.adapter = st.adapter;
     this.s.devices = st.devices;
-    if (!st.adapter) this.s.error = 'No Bluetooth adapter was found on this computer.';
+    if (!st.adapter) this.s.error = st.message || 'No Bluetooth adapter was found on this computer.';
     this.changed();
     this.scheduleReconnect(0);
   }
@@ -400,15 +422,23 @@ class Dialer extends EventEmitter {
 
   // --- calls ------------------------------------------------------------------------
 
-  leadFor(number, leadId) {
+  leadFor(number, leadId, numberId) {
+    if (numberId) {
+      const n = this.store.numberById?.(numberId);
+      if (n) return { leadId: null, numberId: n.id, name: n.name || n.business || null, business: n.business || null };
+    }
     const lead = leadId ? this.store.leadById(leadId) : number ? this.store.findLeadByPhone?.(number) : null;
-    if (!lead) return { leadId: null, name: null, business: null };
+    if (!lead) {
+      const c = number && !leadId ? this.store.contactByPhone?.(number) : null;
+      if (c?.kind === 'number') return { leadId: null, numberId: c.id, name: c.name, business: c.business };
+      return { leadId: null, name: null, business: null };
+    }
     const person = lead.kind === 'person';
     return { leadId: lead.id, name: person ? lead.name : lead.contactName || lead.name, business: person ? lead.companyName || null : lead.name };
   }
 
-  newCall({ number = '', direction, state, leadId = null }) {
-    const who = this.leadFor(number, leadId);
+  newCall({ number = '', direction, state, leadId = null, numberId = null }) {
+    const who = this.leadFor(number, leadId, numberId);
     const startedAt = this.now();
     const recordId = this.store.addCall({ ...who, number, direction, status: direction === 'incoming' ? 'ringing' : 'dialing', startedAt, sim: this.s.phone?.operator || null, device: this.s.saved?.name || null });
     this.s.call = { recordId, number, ...who, direction, state, startedAt, answeredAt: null, muted: false, operator: this.s.phone?.operator || null, audio: { state: 'phone' }, error: null };
@@ -427,7 +457,7 @@ class Dialer extends EventEmitter {
 
   // Places a call: on the user's press of Call, or by the Auto Dialer the
   // user turned on (auto: true).
-  async call(rawNumber, { leadId = null, auto = false } = {}) {
+  async call(rawNumber, { leadId = null, numberId = null, auto = false } = {}) {
     const number = dialable(rawNumber);
     if (!number) return { ok: false, error: 'Enter a phone number (digits, with + for the country code).' };
     if (this.s.link !== 'ready') return { ok: false, error: 'Connect your phone first.' };
@@ -442,7 +472,7 @@ class Dialer extends EventEmitter {
     }
     if (this.s.link !== 'ready') return { ok: false, error: 'Connect your phone first.' };
     if (this.s.call && this.s.call.state !== 'ended') return { ok: false, error: 'A call is already in progress.' };
-    const call = this.newCall({ number, direction: 'outgoing', state: 'requesting', leadId });
+    const call = this.newCall({ number, direction: 'outgoing', state: 'requesting', leadId, numberId });
     call.auto = auto;
     this.prepareAudio();
     this.changed();
@@ -455,6 +485,10 @@ class Dialer extends EventEmitter {
     if (call.leadId) {
       this.store.markCallSeen(call.leadId, this.now());
       this.emit('seen', call.leadId);
+    }
+    if (call.numberId) {
+      this.store.markNumberCallSeen(call.numberId, this.now());
+      this.emit('numberSeen', call.numberId);
     }
     if (this.s.call === call && call.state === 'requesting') {
       call.state = 'dialing';
@@ -553,7 +587,7 @@ class Dialer extends EventEmitter {
 
   sendAudio() {
     const r = this.audio.route;
-    return this.bt.request('audio', { play: r?.play || '', record: r?.record || '', muted: Boolean(this.s.call?.muted) }).catch(() => {});
+    return this.bt.request('audio', { play: r?.play || '', record: r?.record || '', muted: Boolean(this.s.call?.muted), remote: Boolean(r?.remote) }).catch(() => {});
   }
 
   onVoice(address, up, reason) {

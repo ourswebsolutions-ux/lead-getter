@@ -98,6 +98,11 @@ class Bluetooth extends EventEmitter {
     });
   }
 
+  // A command without a reply (the call's microphone audio, 50 times a second).
+  notify(cmd, args = {}) {
+    if (this.child) this.child.stdin.write(`${JSON.stringify({ cmd, ...args })}\n`);
+  }
+
   stop() {
     const child = this.child;
     if (!child) return;

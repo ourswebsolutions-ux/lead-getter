@@ -4,6 +4,8 @@
 
 const { contextBridge, ipcRenderer } = require('electron');
 
+const campaignFields = (d) => (d && typeof d === 'object' ? { name: d.name, message: d.message, speed: d.speed, delaySeconds: d.delaySeconds, perHour: d.perHour, maxRetries: d.maxRetries, skipTexted: d.skipTexted } : {});
+
 function subscribe(channel, callback) {
   const listener = (_event, payload) => callback(payload);
   ipcRenderer.on(channel, listener);
@@ -129,11 +131,22 @@ contextBridge.exposeInMainWorld('leadFinder', {
   dialerDisconnect: () => ipcRenderer.invoke('dialer:disconnect'),
   dialerReconnect: () => ipcRenderer.invoke('dialer:reconnect'),
   dialerForget: (address) => ipcRenderer.invoke('dialer:forget', String(address ?? '')),
-  dialerCall: (number, opts) => ipcRenderer.invoke('dialer:call', String(number ?? ''), { leadId: Number(opts?.leadId) || null }),
+  dialerCall: (number, opts) => ipcRenderer.invoke('dialer:call', String(number ?? ''), { leadId: Number(opts?.leadId) || null, numberId: Number(opts?.numberId) || null }),
   dialerHangup: () => ipcRenderer.invoke('dialer:hangup'),
   dialerAnswer: () => ipcRenderer.invoke('dialer:answer'),
   dialerReject: () => ipcRenderer.invoke('dialer:reject'),
   dialerMute: (on) => ipcRenderer.invoke('dialer:mute', Boolean(on)),
+  // Bridges: another computer's Bluetooth over the local network.
+  bridgeState: () => ipcRenderer.invoke('bridge:state'),
+  onBridgeState: (callback) => subscribe('bridge:state', callback),
+  bridgeDiscovery: (on) => ipcRenderer.invoke('bridge:discovery', Boolean(on)),
+  bridgePair: (fp) => ipcRenderer.invoke('bridge:pair', String(fp ?? '')),
+  bridgeConfirm: (fp, ok) => ipcRenderer.invoke('bridge:confirm', String(fp ?? ''), Boolean(ok)),
+  bridgeForget: (fp) => ipcRenderer.invoke('bridge:forget', String(fp ?? '')),
+  bridgeChoose: (key) => ipcRenderer.invoke('bridge:choose', String(key ?? '')),
+  // The call's audio in the window when a bridge carries it: PCM s16le 8 kHz mono.
+  onDialerVoice: (callback) => subscribe('dialer:voice', callback),
+  dialerMic: (buf) => buf instanceof Uint8Array && ipcRenderer.send('dialer:mic', buf),
   dialerRefreshSim: () => ipcRenderer.invoke('dialer:refreshSim'),
   // Auto Dialer: calls Call Unseen leads one after another while it is on.
   autoDialState: () => ipcRenderer.invoke('autodial:state'),
@@ -142,7 +155,56 @@ contextBridge.exposeInMainWorld('leadFinder', {
   autoDialPause: () => ipcRenderer.invoke('autodial:pause'),
   autoDialResume: () => ipcRenderer.invoke('autodial:resume'),
   autoDialStop: () => ipcRenderer.invoke('autodial:stop'),
-  autoDialSettings: (s) => ipcRenderer.invoke('autodial:settings', s && typeof s === 'object' ? { gapSeconds: s.gapSeconds, ringSeconds: s.ringSeconds, mobileOnly: s.mobileOnly, hours: s.hours && typeof s.hours === 'object' ? { on: s.hours.on, from: s.hours.from, to: s.hours.to } : undefined } : {}),
+  autoDialSettings: (s) =>
+    ipcRenderer.invoke(
+      'autodial:settings',
+      s && typeof s === 'object'
+        ? { gapSeconds: s.gapSeconds, ringSeconds: s.ringSeconds, mobileOnly: s.mobileOnly, hours: s.hours && typeof s.hours === 'object' ? { on: s.hours.on, from: s.hours.from, to: s.hours.to } : undefined, source: s.source && typeof s.source === 'object' ? { kind: s.source.kind, listId: s.source.listId } : undefined }
+        : {},
+    ),
+  // SMS through the phone (Bluetooth MAP), apart from WhatsApp.
+  smsState: () => ipcRenderer.invoke('sms:state'),
+  onSmsState: (callback) => subscribe('sms:state', callback),
+  onSmsChanged: (callback) => subscribe('sms:changed', callback),
+  onSmsOpen: (callback) => subscribe('sms:open', callback),
+  smsThreads: () => ipcRenderer.invoke('sms:threads'),
+  smsMessages: (phone) => ipcRenderer.invoke('sms:messages', String(phone ?? '')),
+  smsSend: (phone, text, opts) => ipcRenderer.invoke('sms:send', String(phone ?? ''), String(text ?? ''), { leadId: Number(opts?.leadId) || null, numberId: Number(opts?.numberId) || null }),
+  smsSync: () => ipcRenderer.invoke('sms:sync'),
+  smsRetry: () => ipcRenderer.invoke('sms:retry'),
+  // SMS campaigns: one message to many recipients, sent one at a time.
+  smsCampaigns: () => ipcRenderer.invoke('smsc:list'),
+  onSmsCampaigns: (callback) => subscribe('smsc:changed', callback),
+  createSmsCampaign: (d) => ipcRenderer.invoke('smsc:create', campaignFields(d)),
+  updateSmsCampaign: (id, d) => ipcRenderer.invoke('smsc:update', Number(id), campaignFields(d)),
+  addCampaignLeads: (id, leadIds) => ipcRenderer.invoke('smsc:addLeads', Number(id), Array.isArray(leadIds) ? leadIds.map(Number) : []),
+  addCampaignLeadFilter: (id, filter) => ipcRenderer.invoke('smsc:addLeadFilter', Number(id), filter && typeof filter === 'object' ? { ...filter } : {}),
+  addCampaignNumbers: (id, listId) => ipcRenderer.invoke('smsc:addNumbers', Number(id), Number(listId)),
+  checkCampaignImport: (token, mapping) => ipcRenderer.invoke('smsc:checkImport', String(token ?? ''), mapping && typeof mapping === 'object' ? { ...mapping } : {}),
+  addCampaignImport: (id, token, mapping) => ipcRenderer.invoke('smsc:addImport', Number(id), String(token ?? ''), mapping && typeof mapping === 'object' ? { ...mapping } : {}),
+  campaignRecipients: (id, f) => ipcRenderer.invoke('smsc:recipients', Number(id), f && typeof f === 'object' ? { status: f.status, search: f.search, limit: f.limit, offset: f.offset } : {}),
+  removeCampaignRecipients: (id, list) => ipcRenderer.invoke('smsc:removeRecipients', Number(id), Array.isArray(list) ? list.map(Number) : []),
+  campaignPreview: (id) => ipcRenderer.invoke('smsc:preview', Number(id)),
+  startSmsCampaign: (id) => ipcRenderer.invoke('smsc:start', Number(id)),
+  pauseSmsCampaign: (id) => ipcRenderer.invoke('smsc:pause', Number(id)),
+  stopSmsCampaign: (id) => ipcRenderer.invoke('smsc:stop', Number(id)),
+  retrySmsCampaign: (id) => ipcRenderer.invoke('smsc:retry', Number(id)),
+  deleteSmsCampaign: (id) => ipcRenderer.invoke('smsc:delete', Number(id)),
+  smsTemplates: (list) => ipcRenderer.invoke('sms:templates', Array.isArray(list) ? list.map((t) => ({ id: t?.id, name: t?.name, text: t?.text })) : []),
+  // Imported phone numbers in categories (apart from leads).
+  numberLists: () => ipcRenderer.invoke('numbers:lists'),
+  createNumberList: (name) => ipcRenderer.invoke('numbers:createList', String(name ?? '')),
+  renameNumberList: (id, name) => ipcRenderer.invoke('numbers:renameList', Number(id), String(name ?? '')),
+  deleteNumberList: (id) => ipcRenderer.invoke('numbers:deleteList', Number(id)),
+  listNumbers: (f) => ipcRenderer.invoke('numbers:list', f && typeof f === 'object' ? { listId: f.listId, search: f.search, status: f.status, limit: f.limit, offset: f.offset } : {}),
+  pickNumbersFile: () => ipcRenderer.invoke('numbers:pickFile'),
+  parseNumbersText: (text) => ipcRenderer.invoke('numbers:parseText', String(text ?? '')),
+  importNumbers: (token, mapping, listId) => ipcRenderer.invoke('numbers:import', String(token ?? ''), mapping && typeof mapping === 'object' ? { ...mapping } : {}, Number(listId)),
+  moveNumbers: (list, to) => ipcRenderer.invoke('numbers:move', Array.isArray(list) ? list.map(Number) : [], Number(to)),
+  deleteNumbers: (list) => ipcRenderer.invoke('numbers:delete', Array.isArray(list) ? list.map(Number) : []),
+  setNumberDoNotCall: (id, on) => ipcRenderer.invoke('numbers:doNotCall', Number(id), Boolean(on)),
+  resetNumberListCalls: (id) => ipcRenderer.invoke('numbers:resetCalls', Number(id)),
+  onNumbersChanged: (callback) => subscribe('numbers:changed', callback),
   setDoNotCall: (id, on) => ipcRenderer.invoke('leads:doNotCall', Number(id), Boolean(on)),
   onCallLeads: (callback) => subscribe('leads:call', callback),
   dialerTakeHandsFree: () => ipcRenderer.invoke('dialer:takeHandsFree'),

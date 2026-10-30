@@ -8,6 +8,8 @@ import WhatsAppPanel from './WhatsAppPanel.jsx';
 import OutreachView from './OutreachView.jsx';
 import PodcastsView from './PodcastsView.jsx';
 import DialerView, { useLeadCall } from './DialerView.jsx';
+import NumbersView from './NumbersView.jsx';
+import MessagesView from './MessagesView.jsx';
 import Composer from './Composer.jsx';
 import { currentTheme, setTheme } from './theme.js';
 import Activation, { planNeeded, planPill, statusLine } from './Activation.jsx';
@@ -235,7 +237,7 @@ function CallStatus({ lead: l, notify }) {
   );
 }
 
-const LeadRow = memo(function LeadRow({ lead: l, fresh, selected, pastView, onToggle, onDelete, onWhatsApp, onCompose, onCall, waOpen, notify }) {
+const LeadRow = memo(function LeadRow({ lead: l, fresh, selected, pastView, onToggle, onDelete, onWhatsApp, onCompose, onCall, onText, waOpen, notify }) {
   return (
     <tr className={`${fresh ? 'fresh' : ''} ${selected ? 'selected' : ''}`}>
       <td className="check">
@@ -331,6 +333,7 @@ const LeadRow = memo(function LeadRow({ lead: l, fresh, selected, pastView, onTo
       <td>
         <CallStatus lead={l} notify={notify} />
       </td>
+      <td>{l.smsStatus === 'seen' ? <span className="chip sms-seen" title="An SMS was sent to this lead">SMS sent</span> : <span className="chip call-unseen" title="No SMS sent yet">No SMS</span>}</td>
       <td className="mono date">
         {pastView ? (
           <>
@@ -344,6 +347,11 @@ const LeadRow = memo(function LeadRow({ lead: l, fresh, selected, pastView, onTo
         {l.phone && (
           <button type="button" className="icon-btn call" aria-label={`Call ${l.name}`} title={`Call ${l.phone} from your phone`} onClick={() => onCall(l)}>
             <Icon name="phone" />
+          </button>
+        )}
+        {l.phone && (
+          <button type="button" className="icon-btn" aria-label={`Text ${l.name}`} title={`Send an SMS to ${l.phone} from your phone`} onClick={() => onText(l)}>
+            <Icon name="chat" />
           </button>
         )}
         {l.source === 'linkedin' ? (
@@ -561,7 +569,7 @@ export default function App({ onLock }) {
   // keeps each one's place (scroll, open chat, unsaved templates).
   const [workspace, setWorkspaceState] = useState(() => {
     try {
-      return ['leads', 'podcasts', 'outreach', 'dialer'].includes(localStorage.getItem('workspace')) ? localStorage.getItem('workspace') : 'leads';
+      return ['leads', 'podcasts', 'outreach', 'dialer', 'numbers', 'messages'].includes(localStorage.getItem('workspace')) ? localStorage.getItem('workspace') : 'leads';
     } catch {
       return 'leads';
     }
@@ -605,6 +613,19 @@ export default function App({ onLock }) {
     } catch {}
   }, []);
   const callLead = useLeadCall({ onOpenDialer: openDialer, notify });
+  // SMS: the Messages workspace opens with the conversation.
+  const [smsFill, setSmsFill] = useState(null);
+  const openMessages = useCallback((fill) => {
+    setSmsFill({ ...fill, nonce: Date.now() });
+    setWorkspaceState('messages');
+    setVisited((v) => (v.has('messages') ? v : new Set([...v, 'messages'])));
+    try {
+      localStorage.setItem('workspace', 'messages');
+    } catch {}
+  }, []);
+  const textLead = useCallback((l) => openMessages({ phone: l.phone, leadId: l.id, name: l.kind === 'person' ? l.name : l.contactName || l.name }), [openMessages]);
+  // Call from a conversation: a lead, an imported number or just a number.
+  const callContact = useCallback((c) => callLead(c.numberId ? { numberEntry: true, id: c.numberId, phone: c.phone, name: c.name } : { id: c.leadId || null, phone: c.phone, name: c.name }), [callLead]);
 
   const filter = useMemo(() => {
     const f = { category: catFilter };
@@ -942,9 +963,11 @@ export default function App({ onLock }) {
             ['podcasts', 'Podcasts', 'mic'],
             ['outreach', 'Outreach', 'send'],
             ['dialer', 'Dialer', 'phone'],
+            ['numbers', 'Numbers', 'users'],
+            ['messages', 'Messages', 'chat'],
           ].map(([id, label, icon]) => (
-            <button key={id} type="button" className={workspace === id ? 'on' : ''} aria-pressed={workspace === id} onClick={() => setWorkspace(id)}>
-              <Icon name={icon} size={14} /> {label}
+            <button key={id} type="button" className={workspace === id ? 'on' : ''} aria-pressed={workspace === id} aria-label={label} title={label} onClick={() => setWorkspace(id)}>
+              <Icon name={icon} size={14} /> <span className="ws-label">{label}</span>
             </button>
           ))}
         </nav>
@@ -969,6 +992,8 @@ export default function App({ onLock }) {
       {visited.has('podcasts') && <PodcastsView notify={notify} hidden={workspace !== 'podcasts'} categories={catData.categories} />}
       {visited.has('outreach') && <OutreachView wa={wa} notify={notify} hidden={workspace !== 'outreach'} />}
       {visited.has('dialer') && <DialerView notify={notify} hidden={workspace !== 'dialer'} prefill={dialFill} />}
+      {visited.has('numbers') && <NumbersView notify={notify} hidden={workspace !== 'numbers'} onCall={callLead} onMessage={openMessages} />}
+      {visited.has('messages') && <MessagesView notify={notify} hidden={workspace !== 'messages'} prefill={smsFill} onCall={callContact} />}
       <main className="content" hidden={workspace !== 'leads'}>
         <section className="panel search-panel">
           <form className="search" onSubmit={start}>
@@ -1454,6 +1479,7 @@ export default function App({ onLock }) {
                       <th>Source</th>
                       <th>Campaign</th>
                       <th>Call</th>
+                      <th>SMS</th>
                       <th>Discovered</th>
                       <th className="actions-col">
                         <span className="sr-only">Actions</span>
@@ -1473,6 +1499,7 @@ export default function App({ onLock }) {
                         onWhatsApp={onWhatsAppChanged}
                         onCompose={setComposeLead}
                         onCall={callLead}
+                        onText={textLead}
                         waOpen={wa?.state === 'open'}
                         notify={notify}
                       />

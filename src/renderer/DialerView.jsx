@@ -105,6 +105,103 @@ function useRunner(notify) {
   return [busy, run];
 }
 
+// The call's audio in the window while a bridge carries the call: the phone's
+// voice is played here and the microphone (with echo cancellation) goes back.
+function useBridgeVoice(on) {
+  useEffect(() => {
+    if (!on) return undefined;
+    let ctx;
+    let stream;
+    let stopped = false;
+    let off = () => {};
+    (async () => {
+      ctx = new AudioContext({ latencyHint: 'interactive' });
+      await ctx.audioWorklet.addModule('./voice-worklet.js');
+      if (stopped) return;
+      const player = new AudioWorkletNode(ctx, 'voice-player', { outputChannelCount: [2] });
+      player.connect(ctx.destination);
+      off = api.onDialerVoice((buf) => {
+        const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+        player.port.postMessage(u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength));
+      });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+      if (stopped) return;
+      const recorder = new AudioWorkletNode(ctx, 'voice-recorder');
+      recorder.port.onmessage = (e) => api.dialerMic(new Uint8Array(e.data));
+      ctx.createMediaStreamSource(stream).connect(recorder);
+    })().catch(() => {});
+    return () => {
+      stopped = true;
+      off();
+      stream?.getTracks().forEach((t) => t.stop());
+      ctx?.close().catch(() => {});
+    };
+  }, [on]);
+}
+
+const AUDIO_LABEL = { verified: 'Two-way audio verified', supported: 'Supported (verified after the first call)', unavailable: 'Not available' };
+
+// Where the phone link comes from: this computer, or a bridge found on the network.
+function BridgeCard({ bridge, notify }) {
+  const [busy, run] = useRunner(notify);
+  if (!bridge) return null;
+  const a = bridge.active;
+  const others = bridge.bridges.filter((b) => !b.active);
+  const rec = bridge.reconnect?.state === 'reconnecting' ? 'Reconnecting: looking for another bridge…' : a ? 'Connected' : bridge.discovery ? 'Searching the network…' : 'Off';
+  return (
+    <section className="panel dl-card dl-bridge" aria-label="Bluetooth source">
+      <header className="dl-bridge-head">
+        <div>
+          <strong>Bluetooth source</strong>
+          <span className="dl-sub">{a ? (a.key === 'local' ? 'This computer' : a.name) : 'None yet'}</span>
+        </div>
+        <label className="dl-bridge-switch">
+          <span>Automatic device discovery</span>
+          <button type="button" role="switch" aria-checked={bridge.discovery} aria-label="Automatic device discovery" className={`dl-switch small ${bridge.discovery ? 'on' : ''}`} onClick={() => run('d', () => api.bridgeDiscovery(!bridge.discovery))}>
+            <span />
+          </button>
+        </label>
+      </header>
+      {a && (
+        <dl className="dl-bridge-facts">
+          <div><dt>Device</dt><dd>{a.deviceType}{a.host ? <span className="muted mono"> · {a.host}</span> : null}</dd></div>
+          <div><dt>Bluetooth</dt><dd className={a.bluetooth ? 'dl-ok' : 'dl-warn'}>{a.bluetooth ? (a.hfRole === 'ok' ? 'On · hands-free ready' : 'On · hands-free not available') : 'Off'}</dd></div>
+          <div><dt>Mobile</dt><dd className={a.phone ? 'dl-ok' : 'dl-warn'}>{a.phone ? `${a.phone} connected` : 'No phone connected'}</dd></div>
+          <div><dt>Call audio</dt><dd>{AUDIO_LABEL[a.audio] || AUDIO_LABEL.unavailable}{a.key !== 'local' && a.audio !== 'unavailable' ? ' · played here' : ''}</dd></div>
+          {a.key !== 'local' && <div><dt>Connection</dt><dd>{a.quality ? `${a.quality[0].toUpperCase()}${a.quality.slice(1)}${a.rtt != null ? ` · ${a.rtt} ms` : ''}` : 'Measuring…'}</dd></div>}
+          <div><dt>Reconnect</dt><dd>{rec}</dd></div>
+        </dl>
+      )}
+      {!a && <p className="dl-hint dl-bridge-hint">{rec}. Run <b>Lead Finder Bridge</b> on a Linux laptop on this network (<span className="mono">lead-finder --bridge</span>); it appears here by itself.</p>}
+      {others.length > 0 && (
+        <ul className="dl-bridge-list">
+          {others.map((b) => (
+            <li key={b.fingerprint}>
+              <span className="dl-dev-name">
+                {b.name}
+                <span className="muted">
+                  {b.state === 'ready' ? 'Ready' : b.state === 'busy' ? 'In use by another Lead Finder' : b.state === 'denied' ? 'Pairing refused' : b.trusted ? b.error || 'Connecting…' : 'New: pair it once'}
+                  {b.status?.phone ? ` · ${b.status.phone.name}` : ''}
+                </span>
+              </span>
+              {!b.trusted ? (
+                <button type="button" className="btn btn-sm" disabled={Boolean(busy)} onClick={() => run(b.fingerprint, () => api.bridgePair(b.fingerprint))} aria-label={`Pair ${b.name}`}>Pair</button>
+              ) : b.state === 'ready' ? (
+                <button type="button" className="btn btn-sm btn-ghost" disabled={Boolean(busy)} onClick={() => run(b.fingerprint, () => api.bridgeChoose(b.fingerprint))}>Use</button>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      )}
+      {a && a.key !== 'local' && (
+        <button type="button" className="btn btn-sm btn-ghost btn-danger-text dl-bridge-forget" onClick={() => window.confirm(`Forget the bridge "${a.name}"? It must be paired again to be used.`) && run('f', () => api.bridgeForget(a.key))}>
+          Forget this bridge
+        </button>
+      )}
+    </section>
+  );
+}
+
 // The phone, and the SIM it calls with (what Bluetooth Hands-Free shows).
 function PhoneCard({ st, notify }) {
   const [scanning, setScanning] = useState(false);
@@ -252,7 +349,7 @@ function PhoneCard({ st, notify }) {
 }
 
 function AudioCard({ st }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(true);
   const devs = st?.audioDevices || { outputs: [], inputs: [] };
   const prefs = st?.audioPrefs || {};
   const nameOf = (list, name, def) => list.find((d) => d.name === (name || def))?.description || 'System default';
@@ -334,7 +431,7 @@ function CallCard({ st, number, setNumber, lead, setLead, notify }) {
   const dial = async () => {
     if (!userActed()) return;
     setBusy(true);
-    const r = await api.dialerCall(number, { leadId: lead?.leadId });
+    const r = await api.dialerCall(number, { leadId: lead?.leadId, numberId: lead?.numberId });
     setBusy(false);
     if (!r.ok) notify({ type: 'error', text: r.error });
   };
@@ -487,7 +584,13 @@ const AUTO_STATUS = {
 function AutoDialerCard({ st, auto, notify }) {
   const [busy, run] = useRunner(notify);
   const [showSettings, setShowSettings] = useState(false);
+  const [lists, setLists] = useState([]);
   useTick(auto?.status === 'waiting');
+  useEffect(() => {
+    const load = () => api.numberLists().then((l) => setLists(l || []));
+    load();
+    return api.onNumbersChanged(load);
+  }, []);
   if (!auto) return null;
   const on = auto.status !== 'off';
   const ready = st?.link === 'ready';
@@ -513,10 +616,32 @@ function AutoDialerCard({ st, auto, notify }) {
         </button>
       </header>
 
+      <div className="dl-auto-facts">
+        <label className="dl-auto-source">
+          <span>Calls</span>
+          <select
+            aria-label="Auto Dialer calls"
+            value={set.source.kind === 'list' ? String(set.source.listId) : 'leads'}
+            disabled={on}
+            onChange={(e) => run('src', () => api.autoDialSettings({ source: e.target.value === 'leads' ? { kind: 'leads' } : { kind: 'list', listId: Number(e.target.value) } }))}
+          >
+            <option value="leads">Leads (Call Unseen)</option>
+            {lists.map((l) => (
+              <option key={l.id} value={String(l.id)}>
+                {l.name} · {l.unseen} unseen
+              </option>
+            ))}
+          </select>
+        </label>
+        <span className="dl-auto-sim" title="The phone's default SIM for calls">
+          <Icon name="phone" size={12} /> {st?.phone?.operator ? `SIM: ${st.phone.operator}` : 'SIM: phone not connected'}
+        </span>
+      </div>
+
       {!on && (
         <p className="dl-auto-intro">
-          Calls your <b>Call Unseen</b> leads with a mobile number, one by one. It stops when someone answers, and never calls a lead twice.
-          {auto.eligible != null && <> <b>{auto.eligible}</b> lead{auto.eligible === 1 ? '' : 's'} ready.</>}
+          Calls the <b>Call Unseen</b> {set.source.kind === 'list' ? 'numbers of this category' : 'leads'} with a mobile number, one by one. 60 seconds after each answered call ends, it dials the next. It never calls a number twice.
+          {auto.eligible != null && <> <b>{auto.eligible}</b> ready.</>}
         </p>
       )}
 
@@ -595,7 +720,7 @@ function AutoDialerCard({ st, auto, notify }) {
             <input type="checkbox" checked={set.mobileOnly} onChange={(e) => api.autoDialSettings({ mobileOnly: e.target.checked })} />
             <span>Mobile numbers only</span>
           </label>
-          <p className="dl-fine">After you end a call before it is answered, the next call waits 1 minute. Leads marked Do not call or opted out are never called.</p>
+          <p className="dl-fine">After an answered call ends (from the computer or the phone), or one you end before it is answered, the next call is 60 seconds later. Do-not-call, opted-out and already-called numbers are never called.</p>
         </div>
       )}
     </section>
@@ -660,6 +785,7 @@ function RecentCalls({ onRedial, ready, refreshKey }) {
 // prefill: { number, leadId, name, business, nonce } from a lead's Call button.
 export default function DialerView({ notify, hidden, prefill }) {
   const [st, setSt] = useState(null);
+  const [bridge, setBridge] = useState(null);
   const [auto, setAuto] = useState(null);
   const [number, setNumber] = useState('');
   const [lead, setLead] = useState(null);
@@ -668,13 +794,19 @@ export default function DialerView({ notify, hidden, prefill }) {
   useEffect(() => {
     api.dialerState().then((s) => s && setSt(s));
     api.autoDialState().then((s) => s && setAuto(s));
+    api.bridgeState().then((b) => b && setBridge(b));
     const off1 = api.onDialerState(setSt);
     const off2 = api.onAutoDialState(setAuto);
+    const off3 = api.onBridgeState(setBridge);
     return () => {
       off1();
       off2();
+      off3();
     };
   }, []);
+  // A bridge carries the call and its audio is on the computer: the window plays and records it.
+  const remote = Boolean(bridge?.active && bridge.active.key !== 'local');
+  useBridgeVoice(remote && st?.call?.state !== 'ended' && st?.call?.audio?.state === 'computer');
   // The number of leads ready is counted again when the Dialer is opened.
   useEffect(() => {
     if (!hidden) api.autoDialState().then((s) => s && setAuto(s));
@@ -682,7 +814,7 @@ export default function DialerView({ notify, hidden, prefill }) {
   useEffect(() => {
     if (!prefill) return;
     setNumber(prefill.number || '');
-    setLead(prefill.leadId ? { leadId: prefill.leadId, name: prefill.name, business: prefill.business } : null);
+    setLead(prefill.leadId || prefill.numberId ? { leadId: prefill.leadId || null, numberId: prefill.numberId || null, name: prefill.name, business: prefill.business } : null);
   }, [prefill]);
   const ended = st?.call?.state === 'ended';
   useEffect(() => {
@@ -692,8 +824,8 @@ export default function DialerView({ notify, hidden, prefill }) {
   const redial = async (c) => {
     if (!userActed()) return;
     setNumber(c.number);
-    setLead(c.leadId ? { leadId: c.leadId, name: c.name, business: c.business } : null);
-    const r = await api.dialerCall(c.number, { leadId: c.leadId });
+    setLead(c.leadId || c.numberId ? { leadId: c.leadId, numberId: c.numberId, name: c.name, business: c.business } : null);
+    const r = await api.dialerCall(c.number, { leadId: c.leadId, numberId: c.numberId });
     if (!r.ok) notify({ type: 'error', text: r.error });
   };
 
@@ -702,16 +834,37 @@ export default function DialerView({ notify, hidden, prefill }) {
   return (
     <section className="dialer" hidden={hidden} aria-label="Dialer">
       <div className="dl-grid">
-        <div className="dl-col">
-          <PhoneCard st={st} notify={notify} />
-          <AudioCard st={st} />
-        </div>
-        <CallCard st={st} number={number} setNumber={setNumber} lead={lead} setLead={setLead} notify={notify} />
-        <div className="dl-col">
+        <aside className="dl-col dl-left">
           <AutoDialerCard st={st} auto={auto} notify={notify} />
           <RecentCalls onRedial={redial} ready={st?.link === 'ready' && !busyLine && (!auto || auto.status === 'off')} refreshKey={historyKey} />
+        </aside>
+        <div className="dl-right">
+          <CallCard st={st} number={number} setNumber={setNumber} lead={lead} setLead={setLead} notify={notify} />
+          <div className="dl-col">
+            <BridgeCard bridge={bridge} notify={notify} />
+            <PhoneCard st={st} notify={notify} />
+            <AudioCard st={st} />
+          </div>
         </div>
       </div>
+      {bridge?.pairing && (
+        <div className="modal-scrim">
+          <div className="composer dl-pair" role="dialog" aria-label="Pair bridge">
+            <header className="composer-head">
+              <span className="composer-icon neutral"><Icon name="lock" /></span>
+              <div>
+                <strong>Pair with the bridge “{bridge.pairing.name}”</strong>
+                <span className="muted">Check that the bridge shows the same code, then confirm here and on the bridge.</span>
+              </div>
+            </header>
+            <div className="dl-code big mono">{bridge.pairing.code}</div>
+            <div className="dl-pair-actions">
+              <button type="button" className="btn" onClick={() => api.bridgeConfirm(bridge.pairing.fingerprint, false)}>Cancel</button>
+              <button type="button" className="btn btn-primary" onClick={() => api.bridgeConfirm(bridge.pairing.fingerprint, true)}>Codes match</button>
+            </div>
+          </div>
+        </div>
+      )}
       {pairing && (
         <div className="modal-scrim">
           <div className="composer dl-pair" role="dialog" aria-label="Pair phone">
@@ -746,12 +899,15 @@ export function useLeadCall({ onOpenDialer, notify }) {
   return useMemo(
     () => async (lead) => {
       const person = lead.kind === 'person';
-      const fill = { number: lead.phone, leadId: lead.id, name: person ? lead.name : lead.contactName || lead.name, business: person ? lead.companyName : lead.name, nonce: Date.now() };
+      // An imported number (numberEntry) or a lead.
+      const fill = lead.numberEntry
+        ? { number: lead.phone, numberId: lead.id, name: lead.name || lead.business, business: lead.business, nonce: Date.now() }
+        : { number: lead.phone, leadId: lead.id, name: person ? lead.name : lead.contactName || lead.name, business: person ? lead.companyName : lead.name, nonce: Date.now() };
       onOpenDialer(fill);
       if (!userActed()) return;
       const st = await api.dialerState();
-      if (st?.link !== 'ready') return notify({ type: 'info', text: 'Connect your phone in the Dialer to call this lead.' });
-      const r = await api.dialerCall(lead.phone, { leadId: lead.id });
+      if (st?.link !== 'ready') return notify({ type: 'info', text: 'Connect your phone in the Dialer to call this number.' });
+      const r = await api.dialerCall(lead.phone, lead.numberEntry ? { numberId: lead.id } : { leadId: lead.id });
       if (!r.ok) notify({ type: 'error', text: r.error });
     },
     [onOpenDialer, notify],

@@ -39,11 +39,12 @@ class FakeDialer extends EventEmitter {
     this.calls = [];
     this.hangups = [];
   }
-  async call(number, { leadId, auto }) {
+  async call(number, { leadId, numberId, auto }) {
     if (this.s.link !== 'ready') return { ok: false, error: 'Connect your phone first.' };
     if (this.s.call && this.s.call.state !== 'ended') return { ok: false, error: 'A call is already in progress.' };
-    this.calls.push({ number, leadId, auto });
-    this.store.markCallSeen(leadId);
+    this.calls.push({ number, leadId, numberId, auto });
+    if (leadId) this.store.markCallSeen(leadId);
+    if (numberId) this.store.markNumberCallSeen(numberId);
     this.s.call = { number, leadId, auto, state: 'dialing', name: `Lead ${leadId}` };
     this.emit('state', this.s);
     return { ok: true };
@@ -107,19 +108,70 @@ test('calls Call Unseen leads in order; not answered -> the next one after the g
   assert.deepEqual(new Set(dialer.calls.map((c) => c.leadId)).size, 3); // nobody twice
 });
 
-test('answered: no more dialling; after the call it waits for the user to continue', async () => {
+test('answered: nothing is dialled during the call; 60 seconds after it ended (from the computer or the phone), the next one', async () => {
   const { dialer, timers, auto } = setup();
   auto.start();
   await timers.fire();
   dialer.answer();
   assert.match(auto.state().reason, /Answered/);
-  dialer.end('answered');
-  assert.equal(auto.state().status, 'paused');
-  assert.equal(timers.pending.size, 0); // nothing scheduled
+  // Still talking: no countdown, no second call.
+  assert.equal([...timers.pending.values()].some((t) => t.ms === 60_000), false);
+  await auto.step();
   assert.equal(dialer.calls.length, 1);
-  assert.equal(auto.resume().ok, true);
-  await timers.fire();
+  // The phone reports the call as ended (here: hung up on the phone).
+  dialer.end('answered', undefined);
+  assert.equal(auto.state().status, 'waiting');
+  const waits = [...timers.pending.values()].filter((t) => t.ms === 60_000);
+  assert.equal(waits.length, 1); // one timer, not two
+  assert.ok(auto.state().nextAt);
+  await timers.fire((t) => t.ms === 60_000);
   assert.equal(dialer.calls.length, 2);
+  // Ended from the computer after answering: the same 60 seconds.
+  dialer.answer();
+  await dialer.hangup({ by: 'user' });
+  assert.equal([...timers.pending.values()].filter((t) => t.ms === 60_000).length, 1);
+});
+
+test('at the end of the countdown the phone and the next number are checked again', async () => {
+  const { store, ids, dialer, timers, auto } = setup();
+  auto.start();
+  await timers.fire();
+  dialer.answer();
+  dialer.end('answered');
+  // Meanwhile: the next lead was called by hand, and Bluetooth dropped.
+  store.markCallSeen(ids[1]);
+  dialer.s.link = 'idle';
+  await timers.fire((t) => t.ms === 60_000);
+  assert.equal(dialer.calls.length, 1);
+  assert.equal(auto.state().status, 'paused');
+  dialer.s.link = 'ready';
+  auto.resume();
+  await timers.fire();
+  assert.deepEqual(dialer.calls.map((c) => c.leadId), [ids[0], ids[2]]); // the lead called meanwhile is skipped
+});
+
+test('a number category: only its Call Unseen numbers, each number once, never one already called elsewhere', async () => {
+  const { store, dialer, timers, auto } = setup(['+923001111111']);
+  const list = store.createNumberList('SEO USA');
+  store.importNumbers(list, [
+    { phone: '+923005550001', valid: true, name: 'One' },
+    { phone: '+923005550002', valid: true, name: 'Two' },
+    { phone: '+923001111111', valid: true, name: 'Also a lead' },
+    { phone: '+923005550003', valid: true, name: 'Three' },
+    { phone: '12345', valid: false, name: 'Invalid' },
+  ]);
+  const nums = store.listNumbers({ listId: list }).rows;
+  store.markNumberCallSeen(nums[1].id);
+  store.markCallSeen(store.listLeads()[0].id); // +923001111111 was called as a lead
+  assert.equal(auto.setSettings({ source: { kind: 'list', listId: list } }).ok, true);
+  assert.equal(auto.state().sourceName, 'SEO USA');
+  assert.equal(auto.start().ok, true);
+  assert.equal(auto.state().total, 2);
+  await timers.fire();
+  assert.deepEqual(dialer.calls.map((c) => c.number), ['+923005550001']);
+  assert.equal(dialer.calls[0].numberId, nums[0].id);
+  // The source cannot change while it runs.
+  assert.equal(auto.setSettings({ source: { kind: 'leads' } }).ok, false);
 });
 
 test('ended by the user before an answer: the next call 1 minute later; turning it off cancels that call', async () => {
