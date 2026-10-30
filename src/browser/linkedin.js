@@ -364,6 +364,223 @@ function collectCompaniesInPage() {
   return [...out.values()];
 }
 
+// --- people -------------------------------------------------------------------
+
+// LinkedIn's location ids (geoUrn) for countries, by the names people type.
+// Other places are added to the search words instead, and each profile's
+// location is checked.
+const GEO = [
+  [/^(usa|us|u\.s\.a?\.?|united states( of america)?|america)$/i, '103644278', 'United States'],
+  [/^(uk|u\.k\.|united kingdom|great britain|britain|england)$/i, '101165590', 'United Kingdom'],
+  [/^canada$/i, '101174742', 'Canada'],
+  [/^australia$/i, '101452733', 'Australia'],
+  [/^india$/i, '102713980', 'India'],
+  [/^pakistan$/i, '101022442', 'Pakistan'],
+  [/^(germany|deutschland)$/i, '101282230', 'Germany'],
+  [/^france$/i, '105015875', 'France'],
+  [/^(uae|u\.a\.e\.|united arab emirates|emirates)$/i, '104305776', 'United Arab Emirates'],
+  [/^(ksa|saudi arabia|saudi)$/i, '100459316', 'Saudi Arabia'],
+  [/^(netherlands|holland)$/i, '102890719', 'Netherlands'],
+  [/^singapore$/i, '102454443', 'Singapore'],
+  [/^ireland$/i, '104738515', 'Ireland'],
+  [/^spain$/i, '105646813', 'Spain'],
+  [/^italy$/i, '103350119', 'Italy'],
+  [/^brazil$/i, '106057199', 'Brazil'],
+];
+
+// { geoUrn, name } for a typed location, or { geoUrn: null, name: typed }.
+function geoFor(location) {
+  const t = String(location || '').trim();
+  if (!t) return null;
+  const hit = GEO.find(([re]) => re.test(t));
+  return hit ? { geoUrn: hit[1], name: hit[2] } : { geoUrn: null, name: t };
+}
+
+const peopleSearchUrl = (q, { geoUrn = null, page = 1 } = {}) =>
+  `${LI}/search/results/people/?keywords=${encodeURIComponent(q)}${geoUrn ? `&geoUrn=${encodeURIComponent(JSON.stringify([geoUrn]))}` : ''}&origin=${geoUrn ? 'FACETED_SEARCH' : 'GLOBAL_SEARCH_HEADER'}${page > 1 ? `&page=${page}` : ''}`;
+
+// https://www.linkedin.com/in/<id>, or '' when it is not a profile.
+function cleanProfileUrl(href) {
+  try {
+    const u = new URL(href, LI);
+    const m = u.pathname.match(/^\/in\/([^/?#]+)/);
+    if (!isLinkedInHost(u.hostname) || !m) return '';
+    return `${LI}/in/${decodeURIComponent(m[1])}`;
+  } catch {
+    return '';
+  }
+}
+
+function peopleReadyInPage() {
+  const main = document.querySelector('main') || document.body;
+  if (main.querySelector('a[href*="/in/"]')) return 'ok';
+  return /no results found|try removing filters|we couldn('|’)t find/i.test(main.innerText || '') ? 'empty' : null;
+}
+
+// People on a people search page: { profileUrl, name, headline, location }.
+// Cards are found by their profile links; the text inside a card is read
+// line by line (name, connection degree, headline, location), with
+// LinkedIn's class names as hints.
+function collectPeopleInPage() {
+  const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+  const out = new Map();
+  const main = document.querySelector('main') || document.body;
+  for (const a of main.querySelectorAll('a[href*="/in/"]')) {
+    const m = a.href.match(/\/in\/([^/?#]+)/);
+    if (!m) continue;
+    const id = decodeURIComponent(m[1]);
+    // The card: the largest ancestor with links to this profile only.
+    let card = a;
+    while (card.parentElement && card.parentElement !== main && [...card.parentElement.querySelectorAll('a[href*="/in/"]')].every((x) => x.href.includes(`/in/${m[1]}`))) card = card.parentElement;
+    const existing = out.get(id);
+    const nameEl = card.querySelector('.entity-result__title-text a span[aria-hidden="true"], span[dir="ltr"] > span[aria-hidden="true"], a[href*="/in/"] span[aria-hidden="true"]');
+    let name = clean(nameEl?.textContent) || clean(a.textContent).replace(/^View\s+|’s profile$|'s profile$/gi, '');
+    name = name.replace(/\s*•.*$/, '').replace(/View .*profile/i, '').replace(/\s+is open to work.*$/i, '').trim();
+    // Some layouts write the name twice (visible text and its screen-reader copy).
+    const half = name.split(' ');
+    if (half.length % 2 === 0 && half.slice(0, half.length / 2).join(' ') === half.slice(half.length / 2).join(' ')) name = half.slice(0, half.length / 2).join(' ');
+    const firstHalf = name.match(/^(.+?)\1$/);
+    if (firstHalf && firstHalf[1].length > 3) name = firstHalf[1].trim();
+    if (!name || /^linkedin member$/i.test(name)) continue;
+    const lines = (card.innerText || '').split('\n').map(clean).filter(Boolean);
+    const rest = lines.filter(
+      (l) =>
+        l !== name &&
+        !l.startsWith(`${name} `) &&
+        !/^(•\s*)?(1st|2nd|3rd\+?|3rd)( degree connection)?$/i.test(l) &&
+        !/^(view .*profile|connect|follow|following|message|pending|current:|past:|summary:|skills:)/i.test(l) &&
+        !/mutual connections?|is a mutual connection|followers$|^·/i.test(l) &&
+        !/^•/.test(l),
+    );
+    const headline = clean(card.querySelector('.entity-result__primary-subtitle')?.textContent) || rest.find((l) => l.length > 2 && l !== name) || '';
+    const location = clean(card.querySelector('.entity-result__secondary-subtitle')?.textContent) || rest.slice(rest.indexOf(headline) + 1).find((l) => /,|area|region|united|kingdom|states/i.test(l) && l.length < 80) || '';
+    if (!existing || (!existing.headline && headline)) out.set(id, { profileUrl: `https://www.linkedin.com/in/${id}`, name: name.slice(0, 120), headline: headline.slice(0, 300), location: location.slice(0, 120) });
+  }
+  return [...out.values()];
+}
+
+// Ready once the top card is there: an h1 (earlier layout), or (current
+// layout, no h1) the page title's name shown as a heading in the page.
+function profileReadyInPage() {
+  if (document.querySelector('main h1, h1.text-heading-xlarge, .top-card-layout__title')) return 'ok';
+  const name = (document.title || '').replace(/^\(\d+\+?\)\s*/, '').split(' | ')[0].trim();
+  if (!name || /^linkedin$/i.test(name)) return null;
+  return [...document.querySelectorAll('main h2, main [role="heading"], main p, main strong')].some((e) => e.textContent.replace(/\s+/g, ' ').trim() === name) ? 'ok' : null;
+}
+
+// An open profile: { name, headline, location, title, company, companyHref,
+// about, links }. The top card is read by its structure (the name, then the
+// headline, then the location before "Contact info"); the current job from
+// the Experience section, else from the headline ("SEO Lead at Acme").
+function readProfileInPage() {
+  const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+  // The name: the page title ("Jane Doe | LinkedIn"), else the h1.
+  const titleName = clean((document.title || '').replace(/^\(\d+\+?\)\s*/, '').split(' | ')[0]);
+  const h1 = document.querySelector('main h1') || document.querySelector('h1');
+  const name = clean(h1?.textContent) || (/^linkedin$/i.test(titleName) ? '' : titleName);
+  // The top card: the section around the name's heading (h1, or the current layout's h2).
+  const heading = h1 || [...document.querySelectorAll('main h2, main [role="heading"]')].find((e) => clean(e.textContent) === name) || null;
+  let top = heading;
+  while (top && top.parentElement && !(top.tagName === 'SECTION' || /top-card|pv-top-card/.test(top.className || ''))) top = top.parentElement;
+  if (!top || top === document.documentElement) top = [...document.querySelectorAll('main section')].find((sec) => clean(sec.innerText).startsWith(name)) || document.querySelector('main') || document.body;
+  const lines = (top.innerText || '').split('\n').map(clean).filter(Boolean);
+  const NOISE = /^(\(?(he|she|they)\/\w+\)?|·?\s*(1st|2nd|3rd\+?)|·|verified|premium|open to work|hiring|message|connect|follow|following|more|pending|\d[\d,+]* (followers|connections)|.* (is|are) (a )?mutual connections?|.*mutual connections?)$/i;
+  const after = lines.slice(Math.max(0, lines.indexOf(name)) + 1).filter((l) => l !== name && !NOISE.test(l));
+  const headline = clean(document.querySelector('.text-body-medium.break-words, .top-card-layout__headline')?.textContent) || after[0] || '';
+  // "United States · Contact info" (one line), or the location on the line before "Contact info".
+  const contactIdx = after.findIndex((l) => /(^|·\s*)contact info$/i.test(l));
+  const contactLine = contactIdx >= 0 ? after[contactIdx] : '';
+  const location =
+    clean(document.querySelector('.pv-text-details__left-panel .text-body-small.inline, span.text-body-small.inline.t-black--light.break-words, .top-card__subline-item, .top-card-layout__first-subline .not-first-middot')?.textContent) ||
+    clean(contactLine.replace(/\s*·?\s*contact info$/i, '')) ||
+    (contactIdx > 0 ? after[contactIdx - 1].replace(/\s*·\s*$/, '') : '') ||
+    '';
+  // Experience: the first position (when the section is on the page).
+  const expAnchor = document.querySelector('#experience');
+  const expSection = expAnchor ? expAnchor.closest('section') : [...document.querySelectorAll('main section')].find((sec) => /^\s*experience\b/i.test(sec.innerText || ''));
+  let title = '';
+  let company = '';
+  let companyHref = '';
+  if (expSection) {
+    const item = expSection.querySelector('li');
+    if (item) {
+      // Its lines, without the company logo link.
+      const spans = [...item.querySelectorAll('span[aria-hidden="true"]')].filter((sp) => !sp.closest('a[data-field*="logo"], a:has(img)')).map((sp) => clean(sp.textContent)).filter(Boolean);
+      const itemLines = spans.length ? spans : (item.innerText || '').split('\n').map(clean).filter(Boolean);
+      title = clean(item.querySelector('.t-bold span[aria-hidden="true"]')?.textContent) || itemLines[0] || '';
+      company = (clean(item.querySelector('.t-14.t-normal span[aria-hidden="true"]')?.textContent) || itemLines[1] || '').split(' · ')[0];
+      const link = item.querySelector('a[href*="/company/"]');
+      companyHref = link ? link.href : '';
+    }
+  }
+  const currentBtn = document.querySelector('button[aria-label^="Current company:"]');
+  if (currentBtn) company = clean(currentBtn.getAttribute('aria-label').replace(/^Current company:\s*/i, '').replace(/\.\s*Click.*$/i, '')) || company;
+  // The current layout's top card lists the current company (then the school) after the location.
+  if (!company && contactIdx >= 0) company = after.slice(contactIdx + 1).find((l) => l.length < 80 && !NOISE.test(l) && !/connections?|followers/i.test(l)) || '';
+  if (!companyHref && top !== document.body) companyHref = [...top.querySelectorAll('a[href*="/company/"]')].map((a) => a.href)[0] || '';
+  const at = headline.match(/^(.*?)\s+(?:at|@)\s+([^|·,]+)/i);
+  if (!title && at) title = clean(at[1]);
+  if (!company && at) company = clean(at[2]);
+  if (!title) title = clean(headline.split(/[|·]/)[0]);
+  const aboutSec = document.querySelector('#about')?.closest('section') || [...document.querySelectorAll('main section')].find((sec) => /^\s*about\b/i.test(sec.innerText || ''));
+  return {
+    name: name.slice(0, 120),
+    headline: headline.slice(0, 300),
+    location: location.slice(0, 120),
+    title: title.slice(0, 200),
+    company: company.slice(0, 200),
+    companyHref,
+    about: (aboutSec?.innerText || '').slice(0, 2000),
+    contactHref: (document.querySelector('a[href*="/overlay/contact-info"]') || {}).href || '',
+  };
+}
+
+function contactInfoReadyInPage() {
+  const box = document.querySelector('[role="dialog"], .pv-contact-info, section.pv-contact-info__contact-type');
+  return box && /contact info/i.test(box.innerText || '') ? 'ok' : null;
+}
+
+// The profile's Contact info: { emails, phones, websites }. Only what
+// LinkedIn shows this user (the member's own sharing settings decide).
+function readContactInfoInPage() {
+  const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+  const box = document.querySelector('[role="dialog"]') || document.querySelector('.pv-contact-info') || document.body;
+  const emails = [...box.querySelectorAll('a[href^="mailto:"]')].map((a) => a.getAttribute('href').replace(/^mailto:/i, '').split('?')[0].trim());
+  const phones = [];
+  const websites = [];
+  for (const sec of box.querySelectorAll('section, .pv-contact-info__contact-type')) {
+    const head = clean(sec.querySelector('h3, header')?.textContent);
+    if (/^phone/i.test(head)) for (const li of sec.querySelectorAll('li, span.t-14')) phones.push(clean(li.textContent).replace(/\((mobile|work|home)\)/i, '').trim());
+    if (/^website/i.test(head)) for (const a of sec.querySelectorAll('a[href]')) websites.push(a.href);
+  }
+  for (const a of box.querySelectorAll('a[href^="tel:"]')) phones.push(a.getAttribute('href').replace(/^tel:/i, ''));
+  return { emails: [...new Set(emails)].slice(0, 5), phones: [...new Set(phones.filter((p) => /\d{5,}/.test(p.replace(/\D/g, ''))))].slice(0, 5), websites: [...new Set(websites)].slice(0, 5) };
+}
+
+async function searchPeople(page, q, { geoUrn = null, n = 1 } = {}) {
+  const r = await open(page, peopleSearchUrl(q, { geoUrn, page: n }), peopleReadyInPage);
+  if (r.mode !== 'ok') return { ...r, people: [] };
+  // Results render as they scroll into view.
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight)).catch(() => {});
+  await page.waitForTimeout(1200);
+  return { mode: 'ok', people: await page.evaluate(collectPeopleInPage) };
+}
+
+async function readProfile(page, profileUrl) {
+  const r = await open(page, profileUrl, profileReadyInPage);
+  if (r.mode !== 'ok') return r;
+  // The Experience section loads lazily.
+  await page.evaluate(() => window.scrollTo(0, 1600)).catch(() => {});
+  await page.waitForTimeout(1000);
+  return { mode: 'ok', profile: await page.evaluate(readProfileInPage) };
+}
+
+async function readContactInfo(page, profileUrl) {
+  const r = await open(page, `${profileUrl.replace(/\/$/, '')}/overlay/contact-info/`, contactInfoReadyInPage, { timeout: 15_000 });
+  if (r.mode !== 'ok') return r;
+  return { mode: 'ok', info: await page.evaluate(readContactInfoInPage) };
+}
+
 // Scrolls a results list (the box it scrolls in, or the page) for more.
 // Returns how many result links there are afterwards.
 async function scrollMore(page, linkSelector) {
@@ -489,6 +706,15 @@ module.exports = {
   morePosts,
   jobsPage,
   searchCompanies,
+  geoFor,
+  peopleSearchUrl,
+  cleanProfileUrl,
+  searchPeople,
+  readProfile,
+  readContactInfo,
+  collectPeopleInPage,
+  readProfileInPage,
+  readContactInfoInPage,
   collectJobsInPage,
   readJobInPage,
   readCompanyInPage,

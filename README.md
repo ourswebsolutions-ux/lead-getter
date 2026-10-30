@@ -241,6 +241,7 @@ What each source needs:
 **LinkedIn Lead Search** is the LinkedIn switch. It searches what you type in the **LinkedIn search** bar and finds **companies that need what it describes** (for `Full Stack Developer`: companies hiring one, or asking for one in a post) and their **public business contact details**. It runs at the same time as Google Maps and Facebook, in its own Chrome window, using that profile's LinkedIn login.
 
 **Modes** (checkboxes under the LinkedIn search bar, each can be switched off):
+- **People** (the default): people matching the search and location, each with their professional email and phone found by contact discovery. See *LinkedIn People search and contact discovery* below.
 - **Jobs:** *every* page of LinkedIn's job results for the search (LinkedIn's public results, page after page, until a page comes back empty), and the hiring company of each job. Job seekers are never the target. A job whose title isn't about the search is skipped.
 - **Posts:** posts about hiring, projects or outsourcing for the search, scrolled for more. A post counts when it's by a company, links to one, or publishes business contact details for that need.
 - **Companies:** LinkedIn's company search, page after page. A company is kept only when its own description or industry matches the search; a matching name alone isn't enough.
@@ -265,6 +266,81 @@ For example: *"phone: found (Google Maps); email: not published (checked: Linked
 - **Problems:** a security check or limit message stops the LinkedIn pages; a login page stops the pages that need a login (company pages, posts, company search) but **not LinkedIn's public job results**, which go on page after page until there are no more. Lead Finder never logs in or works around them. Companies are still completed from Google Maps and their websites, and each lead's status lists what was checked and what could not be (for example "email: not found (checked: Google Maps, website); could not check: LinkedIn page (login)").
 - **Leads table:** a *LinkedIn* source chip (opens the job, company or post), the business email and job title under the name, a *LinkedIn* option in the Source filter, and *Email, Website, LinkedIn Company URL, LinkedIn Job URL, LinkedIn Post URL, Job Title, Discovery* in the CSV export. WhatsApp campaigns use only leads with a validated phone, as before.
 - **LinkedIn's terms:** the [LinkedIn User Agreement](https://www.linkedin.com/legal/user-agreement) prohibits automated access and scraping. Lead Finder reads only what your own account is shown, slowly and in small numbers, but LinkedIn may still restrict accounts that use automation. You're responsible for how you use it.
+
+### LinkedIn People search and contact discovery
+
+With **People** ticked (the default LinkedIn mode), LinkedIn search finds **people**, not jobs. Type what they do in **LinkedIn search** (`SEO`) and where in **Location** (`USA`).
+
+- **Search:** LinkedIn's People search, every results page in turn (a safety stop at 100 pages), until a page brings nobody new.
+  - **Countries:** a country LinkedIn has a location filter for is applied as that filter. These are the USA, UK, Canada, Australia, India, Pakistan, Germany, France, UAE, Saudi Arabia, Netherlands, Singapore, Ireland, Spain, Italy and Brazil.
+  - **Other places:** any other place (a city, say) is added to the search words, and each profile's location must contain it.
+  - **Order:** the people on a page are completed before the next page is opened.
+- **Each person, one at a time:**
+  1. **Open the profile.** Read the name, headline, location, current title and company (from Experience, else the headline), and the profile address.
+  2. **Open Contact info**, which shows only what the member shares with your account.
+  3. **Find the company:** its LinkedIn page (website, phone), else Google Maps by the exact name and city.
+  4. **Run contact discovery** (below).
+  5. **Save** the person as a lead of their own, then move to the next.
+- **Skipped people:**
+  - **Duplicates:** a profile already saved (or deleted) is not opened again, in this search or later ones.
+  - **Not relevant:** someone whose headline, title and About don't mention the search.
+  - **Wrong place:** for a place without a LinkedIn filter, someone whose profile is elsewhere.
+
+**Contact discovery** (`src/browser/contact-discovery.js`) works like ContactOut-style enrichment, but with free and self-hosted means only. LinkedIn gives the identity; the email and phone come from these sources:
+
+1. **LinkedIn Contact info:** what the profile shares with you.
+2. **Local contact datasets:**
+   - **Imported CSVs:** use **Contact data → Import contacts CSV…**. Columns are recognised by name: Name (or First/Last), Email, Phone, Company, Website/Domain, Title, LinkedIn.
+   - **Saved leads:** the leads you already have for the same company.
+   - **Matching:** a record counts as the person's when it has the same LinkedIn profile, or the same name at the same company or domain. Other people's addresses at the domain are only used as evidence of the company's email format.
+3. **The company website:** home, team, people, about, contact and similar pages, read only where robots.txt allows.
+   - An email or number counts as the **person's** only when it is written right after their name (a team card), or when the address is made of their name at the company's domain.
+   - Role addresses (info@, sales@ …) and numbers on the home and contact pages are kept as the **company's**.
+   - A colleague's details are never taken.
+4. **The company's email format:** addresses built from the name at the company's own domain (first.last, first, flast …, most likely first, based on the domain's known addresses).
+   - One is kept only when the domain's mail server confirms the mailbox.
+   - Nothing is built for free-mail domains, or when the server accepts every address (catch-all).
+
+**Verification** (`src/browser/email-verify.js`, the **Verify emails** switch, on by default) asks each domain's mail server whether a mailbox exists: EHLO, `MAIL FROM:<>`, `RCPT TO`, QUIT. No message is ever sent.
+- **Catch-all check:** a random address is tried first, to recognise servers that accept everything.
+- **Statuses:**
+  - **Verified:** the server accepted this mailbox and rejected a random one.
+  - **Unverified:** published, but not confirmed. The reason is one of: catch-all, no clear answer, port 25 blocked, or verification off.
+  - **Invalid:** the server says the mailbox doesn't exist, or the domain has no mail server.
+- **Policy refusals:** a refusal for a reason other than the mailbox (spam lists, policy) is "no clear answer", never "invalid".
+- **Port 25 and blocklists:** many home connections can't reach mail servers on port 25, or are refused by blocklists. Microsoft 365, for example, refuses IPs listed by Spamhaus. For these, set a **self-hosted verifier** in **Contact data**: a [Reacher](https://reacher.email) server (open source) on a machine that can reach port 25. Lead Finder then asks it instead.
+
+**What a person lead keeps:**
+- the name, title, company, location and LinkedIn profile;
+- every email found, each with its status and where it came from;
+- every phone, marked direct (the person's) or company, each checked against its country's numbering plan;
+- a discovery note, saying what was found, what was checked and what could not be checked.
+
+The lead's main email is the person's best address that isn't invalid, and its phone is the person's direct number only, never the company's switchboard. A person lead is never merged with a business lead, because colleagues share a company's website and phone.
+
+**Where it shows:** LinkedIn chip and Source filter, title · company under the name, a Verified / Unverified / Invalid badge, and the CSV columns *LinkedIn Profile URL, Person Title, Company, All Phones* (with *Email Status* and *All Emails*). Live test with your own logged-in Chrome: `node test/integration/linkedin-people.js "SEO" "USA" 3`.
+
+**ContactOut extension as the contact provider.** With **Contacts from: ContactOut extension** (the default when ContactOut is installed in this computer's Chrome), people's emails and phones come from the [ContactOut](https://contactout.com) Chrome extension, used as you would use it yourself:
+- **Where it runs:** Lead Finder works in your own Chrome (the DevTools connection), so the extensions of that Chrome profile run as usual on the LinkedIn pages it opens.
+- **Before the search:** ContactOut must be installed, enabled and signed in in the profile Lead Finder is connected to. Lead Finder checks this from that profile's settings (only ContactOut's own entry). If it isn't there, it says so and names the profiles that have it, without opening any profile.
+  - A separately launched Playwright browser would not work: Chrome 137+ ignores `--load-extension`, and it would not be signed in to ContactOut.
+- **On each profile:** ContactOut adds its panel to the page, an iframe (`#main-iframe`) from `contactout.com/extension/app`.
+  - Lead Finder opens the panel with ContactOut's own button when it is closed.
+  - It waits (up to 25 s) until the panel shows this person, then reads the emails and numbers it displays, with their labels (work, personal, mobile…).
+  - Masked values (`j***@…`) are ignored, and a panel still showing the previous person is not used.
+- **Only what ContactOut displays is read.** Lead Finder never reads its storage, cookies, network traffic or account.
+- **Saved with ContactOut as the source:** each email and phone says `ContactOut (work)` and so on; the lead gets a *ContactOut* chip and a *Contact Provider* CSV column. Details LinkedIn's own Contact info shows are credited to LinkedIn.
+- **Verify emails** still checks ContactOut's emails with the mail servers when it is on.
+- **Reveal with credits** (off by default): also clicks ContactOut's "Find email" / "Show phone" buttons. This uses your ContactOut credits, exactly as clicking them yourself does. Off: only what ContactOut shows by itself is read.
+- **Never worked around:** a ContactOut login prompt, used-up credits or limits, or a security check ends ContactOut's use for that search. If ContactOut was the only source, the search stops. So does a panel that doesn't appear on two profiles in a row.
+- **Other choices:** *Built-in discovery* uses the engine above instead; *ContactOut + built-in* uses both.
+- **Terms:** ContactOut's terms may restrict automated use of its extension or service, and it may limit or suspend accounts. You are responsible for using it within your plan and their terms.
+- **Live test** (your Chrome, the ContactOut profile, logged in to LinkedIn): `node test/integration/linkedin-people.js "SEO" "USA" 3 contactout`.
+
+**Use it responsibly:**
+- Contact discovery finds professional contact details that are published or confirmable. These are still personal data.
+- Privacy and marketing laws (GDPR, CAN-SPAM, PECR and similar) apply to how you store and use them, and the people you contact can ask you to delete them.
+- LinkedIn's terms prohibit automated access, and LinkedIn limits how many profiles an account may view. Lead Finder reads slowly, through your own account, and stops at login pages, checks and limits, but LinkedIn may still restrict your account.
 
 ### Website rules (conservative)
 
@@ -459,6 +535,86 @@ The **Leads | Podcasts | Outreach** switch in the header changes the workspace; 
 - **Kept in the main process:** the session never reaches the app's window. The window only receives the connection state, the QR image while linking, and the linked number.
 - **No logging:** Baileys runs with a silent logger, so message content and keys aren't written anywhere.
 
+## Dialer (calls through your phone over Bluetooth Hands-Free)
+
+The **Dialer** tab makes and receives real cellular calls on your phone's SIM, with the call's sound on this computer: you hear the other person on its speakers or headphones and speak into its microphone. It uses only the laptop's built-in Bluetooth and the phone's standard Bluetooth Hands-Free Profile (HFP), the way a car kit does. Nothing is installed on the phone, and it is not internet calling: calls go out on your SIM and carrier, from your number.
+
+### How it works
+
+```
+Lead Finder = Hands-Free unit (HF) ══RFCOMM: AT commands══> phone = Audio Gateway (AG)
+                                   <══SCO: the call's voice══>
+```
+
+- **Control** ([hfp.js](src/dialer/hfp.js)): `bt-helper.py` registers this computer's Hands-Free profile with BlueZ, so the phone sees it as a hands-free device. Lead Finder then speaks HFP 1.7's AT commands: `ATD<number>;` dials, `ATA` answers, `AT+CHUP` ends or rejects, and `AT+VTS` sends keypad tones. The phone reports the call through its indicators: *callsetup* (incoming, dialing, ringing at the other end) and *call* (answered). It also sends caller ID (`+CLIP`), the call list (`+CLCC`), the operator (`+COPS`), its own number (`+CNUM`), signal and battery.
+- **Voice**: the phone sends the call's audio over an SCO link, using the CVSD codec (8 kHz). `bt-helper.py` plays it with `pacat` on the speaker or headphones you chose and sends your microphone (`parec`) back, paced by the phone's packets. WebRTC echo cancellation (PipeWire's `module-echo-cancel`) sits between speaker and microphone when it is on. During a call, the audio can be moved to the phone and back. Nothing is recorded.
+- **Outcome**: it comes from the phone's own indicators. Answered (with talk time from answer to hang-up), no answer, busy, missed, rejected, or failed (with the phone's reason, for example *No network service*).
+- **History**: every call is saved in the `calls` table: number, lead, name and business at the time, direction, status, talk time, the network it went out on, date and time. Deleting a lead keeps its calls, and leads themselves are never changed.
+
+### Tested with a vivo 1920 (Android, HFP 1.7) on Debian 12 (BlueZ 5.66, PipeWire 0.3.65)
+
+| Feature | Result |
+|---|---|
+| Hands-Free connection, no app on the phone | Works. Service Level Connection set up (`AT+BRSF`, `CIND`, `CMER`, `CHLD`). |
+| Phone features (`+BRSF: 2927`) | Three-way calling, echo cancelling/noise reduction, voice recognition, in-band ring, **reject call**, **enhanced call status**, extended error codes, codec negotiation, eSCO |
+| Operator, own number, signal, battery | Jazz, +923270583075, 5/5, 2/5 (read live) |
+| Caller ID, call waiting, error codes | Turned on (`CLIP`, `CCWA`, `CMEE`): OK |
+| Two-way voice over the built-in adapter | SCO set up by the phone; voice received and sent (CVSD, 48-byte packets) |
+| SIM 1 / SIM 2 choice | **Not possible over HFP**: see below |
+
+### Setup
+
+1. **This computer (Linux)**: BlueZ, PipeWire (or PulseAudio) with `pactl`, `pacat` and `parec`, and Python 3 with `python3-dbus` and `python3-gi`. The .deb recommends them.
+2. **Hands-Free role**: only one program can be the computer's hands-free unit. PipeWire's WirePlumber takes that role by default but cannot dial. The first time, the Dialer asks to **use this computer for calls**. It then writes a WirePlumber user setting that keeps WirePlumber's other headset roles, so Bluetooth headsets keep their microphones, and drops only `hfp_hf`. The files are `~/.config/wireplumber/bluetooth.lua.d/51-lead-finder-hfp.lua` and `~/.config/wireplumber/wireplumber.conf.d/51-lead-finder-hfp.conf`. To undo it, delete both files and run `systemctl --user restart wireplumber`.
+3. **Pair**: press **Find phone** and **Pair** (check that both screens show the same code), or press *Pair from the phone instead*. In the phone's Bluetooth settings for this computer, keep **Phone calls** on.
+
+Lead Finder remembers the phone and reconnects when it comes back into range, whenever it was not disconnected by hand.
+
+### Calling
+
+- Type a number or use the keypad (right-click 0 for +), then press **Call**. During a call: **Mute**, **Keypad** (tones for phone menus), the audio on *this computer* or the *phone*, and **End call**.
+- Every lead with a phone number has a **Call** button in the Leads table. One click opens the Dialer with the lead's name and business and calls it.
+- Incoming calls ring in the Dialer and as a system notification, with the caller's lead when the number matches one. **Answer** or **Reject** from the computer.
+- **Recent calls** shows the last two calls: name, number, direction, the SIM's network, status and time. Every call stays saved in the `calls` table.
+
+### SIM
+
+The Dialer shows the SIM the phone calls on: its network (`AT+COPS?`) and the number(s) it reports (`AT+CNUM`). Lead Finder reads them again before every call and saves the network with the call. **Bluetooth Hands-Free has no way to choose SIM 1 or SIM 2**: no HFP command (1.0–1.9) selects a SIM or subscription, and `ATD` always dials through the phone's *default SIM for calls*. To call from the other SIM, change that default on the phone (*Settings → SIM → Calls*); the Dialer then shows the new network. With *Ask every time*, the phone asks on its own screen. The other Bluetooth services an Android phone offers can't select a SIM either: phonebook (PBAP), messages (MAP), and SIM Access (SAP), which hands the SIM to the computer's own modem and takes the phone off the network.
+
+### Call Seen / Call Unseen
+
+Each lead has a call status of its own, next to its WhatsApp campaign status (Seen/Unseen) and stored separately: `businesses.call_seen_at` and `businesses.call_dnc`, schema version 15.
+
+- **Call Seen**: an outgoing call to the lead actually started, meaning the phone accepted the dial. Loading a number into the Dialer doesn't count, and neither does a dial the phone refused.
+- **Call Unseen**: never called. **Do not call**: click a lead's call status to mark it, and click again to allow calls. Leads opted out on WhatsApp are never called automatically either.
+- The Leads table has a **Call** column and a **Call** filter.
+
+### Auto Dialer
+
+Turn on **Auto Dialer** in the Dialer to call the Call Unseen leads one after another, oldest first, through the same Bluetooth calls.
+
+- **Who it calls:** only leads with a valid number, mobile numbers only by default (landlines are skipped and logged), that are Call Unseen, not marked Do not call and not opted out. It calls each lead at most once per run.
+- **Answered:** dialling stops at once and you talk normally. After the call it **pauses** until you press **Continue**.
+- **Not answered:** "not answered" means no answer, busy, rejected, failed or unreachable, as far as the phone shows it. The lead is Call Seen and the next lead is called after the gap (10 s by default). A call that rings longer than 45 s is ended as not answered.
+- **Ended by you before it was answered:** the next call waits **1 minute**. Turning the Auto Dialer off during that wait cancels it.
+- It never dials while a call is going on, while the phone isn't connected, or outside the calling hours (09:00–20:00 by default, under *Calling rules*). Bluetooth lost: paused until you continue.
+- **Stop**, or the switch, ends the run immediately; a call in progress is left alone. The Auto Dialer is always off when Lead Finder starts and never restarts by itself.
+- The card shows the lead being called, its number, progress (done / total), the countdown to the next call, and why each recent call ended.
+
+What the phone does *not* report over HFP: it doesn't say why an unanswered call ended. No answer, rejected by the other person, switched off and unreachable all end the same way (the call setup ends without the call connecting). Only *busy* is sometimes reported (`BUSY`). The Dialer therefore shows these as **No answer** and doesn't guess further.
+
+### Limits (exact)
+
+- **No SIM choice from the computer**: see *SIM* above.
+- **Narrowband audio (CVSD, 8 kHz)**, like most car kits. Wideband (mSBC) would need codec negotiation and an mSBC encoder in the voice path, which are not included.
+- **Linux only for now.** On Windows and macOS the Dialer says so. Windows does not let an application be the Hands-Free unit for a phone, so the same design is not possible there.
+- **One hands-free program at a time.** While Lead Finder holds the role, other programs can't use this computer as a phone's hands-free. That's PipeWire's `hfp_hf`, which other apps don't use for calls anyway.
+- If the phone keeps the audio (for example, *Phone calls* is off for this computer), the call still works on the phone. The Dialer shows "Call audio is on the phone" and offers to move it.
+
+### Security
+
+Calls are placed only when you press Call or a lead's Call button. The renderer also checks for a real click or key press, and nothing dials automatically. Only the paired phone you chose is accepted as the hands-free phone. The link uses Bluetooth's own authentication and encryption. No call audio is recorded or stored.
+
 ## Chrome closing during a search
 
 If Chrome, or Lead Finder's tab, closes while a search is running, the search pauses and Lead Finder reopens Chrome with the **same profile folder and profile**. It makes up to 3 attempts, after 5 s, 15 s and 30 s, and you can click Stop at any time. Then it reconnects and continues the same keyword and category, skipping every business already processed, so nothing is duplicated.
@@ -493,7 +649,7 @@ If Chrome, or Lead Finder's tab, closes while a search is running, the search pa
 - Table `businesses` is keyed by the Google Maps place id, so a business is never stored twice. Every checked listing is recorded so it isn't revisited. Phone and address are kept **only for qualified leads**. A later search fills in missing fields but never blanks existing ones, and a failed re-check never demotes a verified lead. Each lead has `category_id` (pointing to `categories`) and `discovered_date`, the local calendar date. A lead keeps the category and date from when it was first found.
 - Phone columns: `phone` (E.164 when validated, else as found), `phone_raw` (original), `phone_status` (`valid` / `unverified` / `invalid`), `phone_country`. Table `whatsapp_checks` holds the per-number result you recorded, and `app_state` holds the last search, for resuming after a crash.
 - Table `categories` stores each category once, with a normalised key that ignores case and spacing.
-- Schema upgrades are versioned (`PRAGMA user_version`, currently 2) and each runs once in a transaction. Version 2 converts stored phone numbers with the address's country and keeps the originals. Upgrading from the first version keeps every existing lead, computes its date from its recorded discovery time, and leaves its category empty (*Uncategorized*), because no category was ever recorded for it.
+- Schema upgrades are versioned (`PRAGMA user_version`, currently 15) and each runs once in a transaction. Version 2 converts stored phone numbers with the address's country and keeps the originals. Upgrading from the first version keeps every existing lead, computes its date from its recorded discovery time, and leaves its category empty (*Uncategorized*), because no category was ever recorded for it.
 - Nothing is uploaded anywhere. Lead Finder doesn't read cookies or passwords.
 
 ## Google Maps terms: read this
@@ -513,6 +669,9 @@ src/browser/    chrome.js (discovery + CDP attach), maps.js (Maps page ops),
                 search-sources.js (Maps and Facebook side by side when it is on)
 src/database/   SQLite store (node:sqlite, built into Electron)
 src/export/     CSV generation
+src/dialer/     Dialer: dialer.js (calls, history, reconnects), hfp.js (Hands-Free AT protocol),
+                bluetooth.js + bt-helper.py (BlueZ over D-Bus, the call's SCO voice),
+                audio.js (devices, echo cancellation), pipewire-hfp.js (the Hands-Free role)
 test/           Unit tests, Electron E2E test, real-Chrome integration script
 scripts/        dev.js (npm run dev), release.js (npm run release)
 tools/activation/  Activation setup (not packaged): writes the build's settings, tests SMTP
@@ -520,6 +679,16 @@ build/          App icon
 ```
 
 Security: context isolation on, Node integration off, sandboxed renderer, strict CSP in builds, IPC accepted only from the app's own page, navigation and new windows blocked, and only Google Maps and Facebook URLs (plus the administrator's WhatsApp/phone from the app's own config) can be opened externally.
+
+## Dialer live test
+
+With the phone paired (close the Lead Finder window first, because only one program can be the hands-free unit):
+
+```
+node test/integration/dialer-live.js <phone address>                     # connect, show what the phone reports, wait for incoming calls
+node test/integration/dialer-live.js <phone address> --answer            # also answer incoming calls from the computer
+node test/integration/dialer-live.js <phone address> --call <number> --seconds 20
+```
 
 ## Real-Chrome integration tests
 

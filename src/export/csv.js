@@ -8,10 +8,16 @@ const HEADER = [
   'Facebook Post URL', 'Facebook Page URL', 'Contact Name', 'Post Text',
   'Email', 'Website', 'LinkedIn Company URL', 'LinkedIn Job URL', 'LinkedIn Post URL', 'Job Title', 'Discovery',
   'Podcast Host', 'Apple Podcasts URL', 'RSS Feed URL', 'All Emails', 'Podcast Platforms', 'Search Keyword', 'Email Status',
+  'LinkedIn Profile URL', 'Person Title', 'Company', 'All Phones', 'Contact Provider',
 ];
 
 const PLATFORM_TEXT = { apple: 'Apple Podcasts', spotify: 'Spotify', youtube: 'YouTube', amazon: 'Amazon Music', podcastindex: 'Podcast Index', website: 'Website' };
-const EMAIL_STATUS_TEXT = { found: 'Email found', none: 'No public email', platform: 'Platform address only', failed: 'Could not check', pending: 'Discovery pending' };
+const EMAIL_STATUS_TEXT = {
+  found: 'Email found', none: 'No public email', platform: 'Platform address only', failed: 'Could not check', pending: 'Discovery pending',
+  // People (contact discovery).
+  verified: 'Verified', unverified: 'Unverified', invalid: 'Invalid',
+};
+const PROVIDER_TEXT = { contactout: 'ContactOut' };
 const SOURCE_TEXT = { maps: 'Google Maps', facebook: 'Facebook', linkedin: 'LinkedIn', podcast: 'Podcast' };
 
 // Cells that a spreadsheet would evaluate as a formula get a leading
@@ -76,11 +82,17 @@ function leadsToCsv(leads) {
       l.podcastUrl || '',
       l.rssUrl || '',
       // Every email found, with where (hosting-platform addresses marked).
-      (l.emails || []).map((e) => `${e.email}${e.kind === 'platform' ? ' (hosting platform)' : ''} [${e.from}]`).join('; '),
+      (l.emails || []).map((e) => `${e.email}${e.kind === 'platform' ? ' (hosting platform)' : e.kind === 'company' && l.kind === 'person' ? ' (company)' : ''}${l.kind === 'person' && e.status ? ` (${e.status})` : ''} [${e.from}]`).join('; '),
       // The podcast on each platform it was found on.
       Object.entries(l.podcastLinks || {}).map(([k, u]) => `${PLATFORM_TEXT[k] || k}: ${u}`).join('; '),
       l.keyword || '',
-      EMAIL_STATUS_TEXT[l.emailStatus] || '',
+      // A person without any email found says so (business leads leave it empty).
+      EMAIL_STATUS_TEXT[l.emailStatus] || (l.kind === 'person' ? 'No email found' : ''),
+      l.profileUrl || '',
+      l.personTitle || '',
+      l.companyName || '',
+      (l.phones || []).map((p) => `${p.phone} (${p.kind === 'direct' ? 'direct' : 'company'}, ${p.status === 'valid' ? 'valid' : 'unverified'}) [${p.from}]`).join('; '),
+      (l.contactProviders || []).map((k) => PROVIDER_TEXT[k] || k).join(', '),
     ]);
   }
   return '﻿' + rows.map((r) => r.map(escapeCell).join(',')).join('\r\n') + '\r\n';

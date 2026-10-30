@@ -7,6 +7,7 @@ import CategoryManager from './CategoryManager.jsx';
 import WhatsAppPanel from './WhatsAppPanel.jsx';
 import OutreachView from './OutreachView.jsx';
 import PodcastsView from './PodcastsView.jsx';
+import DialerView, { useLeadCall } from './DialerView.jsx';
 import Composer from './Composer.jsx';
 import { currentTheme, setTheme } from './theme.js';
 import Activation, { planNeeded, planPill, statusLine } from './Activation.jsx';
@@ -189,8 +190,52 @@ function PhoneCell({ lead, onCompose }) {
   return <span className="mono phone">{lead.phone}</span>;
 }
 
+// A person's email status (contact discovery): verified by the mail server,
+// unverified (published, not confirmed), or invalid.
+const EMAIL_BADGE = { verified: ['Verified', 'chip-ok', 'The mail server confirmed this mailbox.'], unverified: ['Unverified', 'chip-warn', 'Published for this person, but the mail server could not confirm it.'], invalid: ['Invalid', 'chip-danger', 'The mail server says this mailbox does not exist.'] };
+function EmailBadge({ status }) {
+  const b = EMAIL_BADGE[status];
+  return b ? (
+    <span className={`chip ${b[1]}`} title={b[2]}>
+      {b[0]}
+    </span>
+  ) : null;
+}
+
+function personEmailTitle(l) {
+  const lines = (l.emails || []).map((e) => `${e.email}: ${e.status}${e.kind === 'company' ? ' (company address)' : ''}${e.from ? ` [${e.from}]` : ''}`);
+  const phones = (l.phones || []).map((p) => `${p.phone}: ${p.kind === 'direct' ? 'direct' : 'company'}${p.from ? ` [${p.from}]` : ''}`);
+  return [...lines, ...phones].join('\n') || 'Email';
+}
+
 // One table row; memoised so live updates only render rows that changed.
-const LeadRow = memo(function LeadRow({ lead: l, fresh, selected, pastView, onToggle, onDelete, onWhatsApp, onCompose, waOpen, notify }) {
+// Call status (the Dialer), kept apart from the WhatsApp campaign status.
+// Clicking it marks the lead Do not call, or allows calls again.
+function CallStatus({ lead: l, notify }) {
+  const label = { seen: 'Call Seen', unseen: 'Call Unseen', dnc: 'Do not call' }[l.callStatus || 'unseen'];
+  const title =
+    l.callStatus === 'seen'
+      ? `Called ${l.callSeenAt ? new Date(l.callSeenAt).toLocaleString() : ''}. The Auto Dialer will not call it again.`
+      : l.callStatus === 'dnc'
+        ? 'Marked do not call: it is never called automatically. Click to allow calls again.'
+        : l.phone
+          ? 'Not called yet. Click to mark it do not call.'
+          : 'No phone number';
+  const toggle = async () => {
+    if (l.callStatus === 'seen' || !l.phone) return;
+    const on = l.callStatus !== 'dnc';
+    if (on && !window.confirm(`Never call ${l.name} automatically?`)) return;
+    const r = await api.setDoNotCall(l.id, on);
+    if (!r?.ok) notify({ type: 'error', text: r?.error || 'Could not change the call status.' });
+  };
+  return (
+    <button type="button" className={`chip call-${l.callStatus || 'unseen'}`} title={title} aria-label={`${label}: ${l.name}`} onClick={toggle} disabled={l.callStatus === 'seen' || !l.phone}>
+      {label}
+    </button>
+  );
+}
+
+const LeadRow = memo(function LeadRow({ lead: l, fresh, selected, pastView, onToggle, onDelete, onWhatsApp, onCompose, onCall, waOpen, notify }) {
   return (
     <tr className={`${fresh ? 'fresh' : ''} ${selected ? 'selected' : ''}`}>
       <td className="check">
@@ -198,12 +243,17 @@ const LeadRow = memo(function LeadRow({ lead: l, fresh, selected, pastView, onTo
       </td>
       <td className="name" dir="auto">
         {l.name}
+        {l.kind === 'person' && (l.personTitle || l.companyName) && (
+          <span className="name-extra person-role" title={l.description || undefined}>
+            {[l.personTitle, l.companyName].filter(Boolean).join(' · ')}
+          </span>
+        )}
         {(l.email || l.jobTitle || l.podcastHost) && (
           <span className="name-extra">
             {l.email && (
               <a
                 href={`mailto:${l.email}`}
-                title="Business email"
+                title={l.kind === 'person' ? personEmailTitle(l) : 'Business email'}
                 onClick={(e) => {
                   e.preventDefault(); // the window never navigates: the mail app opens
                   api.openPodcastLink(`mailto:${l.email}`);
@@ -212,6 +262,7 @@ const LeadRow = memo(function LeadRow({ lead: l, fresh, selected, pastView, onTo
                 {l.email}
               </a>
             )}
+            {l.kind === 'person' && l.email && <EmailBadge status={l.emailStatus} />}
             {l.jobTitle && <span title="LinkedIn job">{l.jobTitle}</span>}
             {l.podcastHost && <span title="Podcast host">{l.podcastHost}</span>}
           </span>
@@ -242,12 +293,17 @@ const LeadRow = memo(function LeadRow({ lead: l, fresh, selected, pastView, onTo
           <button
             type="button"
             className="chip src-linkedin"
-            title={`Found on LinkedIn${l.jobTitle ? `: ${l.jobTitle}` : ''}${l.discovery ? `\n${l.discovery}` : ''}`}
+            title={`Found on LinkedIn${l.kind === 'person' ? ' (People search)' : ''}${l.jobTitle ? `: ${l.jobTitle}` : ''}${l.discovery ? `\n${l.discovery}` : ''}`}
             aria-label={`Open ${l.name} on LinkedIn`}
-            onClick={() => api.openListing(l.jobUrl || l.linkedinUrl || l.linkedinPostUrl)}
+            onClick={() => api.openListing(l.profileUrl || l.jobUrl || l.linkedinUrl || l.linkedinPostUrl)}
           >
             LinkedIn
           </button>
+        )}
+        {(l.contactProviders || []).includes('contactout') && (
+          <span className="chip src-contactout" title="Contact details read from the ContactOut extension">
+            ContactOut
+          </span>
         )}
         {(l.sources || []).includes('podcast') && (
           <button
@@ -272,6 +328,9 @@ const LeadRow = memo(function LeadRow({ lead: l, fresh, selected, pastView, onTo
           </span>
         )}
       </td>
+      <td>
+        <CallStatus lead={l} notify={notify} />
+      </td>
       <td className="mono date">
         {pastView ? (
           <>
@@ -282,8 +341,13 @@ const LeadRow = memo(function LeadRow({ lead: l, fresh, selected, pastView, onTo
         )}
       </td>
       <td className="row-actions">
+        {l.phone && (
+          <button type="button" className="icon-btn call" aria-label={`Call ${l.name}`} title={`Call ${l.phone} from your phone`} onClick={() => onCall(l)}>
+            <Icon name="phone" />
+          </button>
+        )}
         {l.source === 'linkedin' ? (
-          <button type="button" className="icon-btn" aria-label={`Open ${l.name} on LinkedIn`} title="Open on LinkedIn" onClick={() => api.openListing(l.linkedinUrl || l.jobUrl || l.linkedinPostUrl)}>
+          <button type="button" className="icon-btn" aria-label={`Open ${l.name} on LinkedIn`} title="Open on LinkedIn" onClick={() => api.openListing(l.profileUrl || l.linkedinUrl || l.jobUrl || l.linkedinPostUrl)}>
             <Icon name="external" />
           </button>
         ) : l.source === 'facebook' ? (
@@ -466,6 +530,7 @@ export default function App({ onLock }) {
   const [siteView, setSiteView] = useState('all'); // table: all | without | with
   const [waView, setWaView] = useState('all'); // all | available | unavailable (WhatsApp's own check)
   const [campaignView, setCampaignView] = useState('all'); // all | seen | unseen
+  const [callView, setCallView] = useState('all'); // all | seen | unseen | dnc (the Dialer)
   const [sourceView, setSourceView] = useState('all'); // all | maps | facebook | linkedin | podcast
   const [mapsOn, setMapsOn] = useState(true); // Google Maps search (stored in the app)
   const [facebookOn, setFacebookOn] = useState(false); // Facebook Lead Search (stored in the app)
@@ -478,7 +543,15 @@ export default function App({ onLock }) {
   }); // LinkedIn's own search
   const [linkedinOn, setLinkedinOn] = useState(false); // LinkedIn Lead Search (stored in the app)
   const [country, setCountry] = useState(null); // { setting, effective, countries }: how local numbers are read
-  const [liSettings, setLiSettings] = useState({ modes: { jobs: true, posts: true, companies: true } }); // LinkedIn modes
+  const [liSettings, setLiSettings] = useState({ modes: { people: true, jobs: false, posts: false, companies: false }, contact: { verify: true, verifierUrl: '', provider: 'builtin', reveal: true, installedIn: [] }, datasets: [] }); // LinkedIn modes, contact discovery
+  const [liLocation, setLiLocation] = useState(() => {
+    try {
+      return localStorage.getItem('lf-linkedin-location') || '';
+    } catch {
+      return '';
+    }
+  }); // where LinkedIn People search looks
+  const [contactOpen, setContactOpen] = useState(null); // contact data panel: null | { top, left }
   const [tableSearch, setTableSearch] = useState('');
   const [searchQuery, setSearchQuery] = useState(''); // debounced
   const [plan, setPlan] = useState(null); // this computer's subscription (activation.js)
@@ -488,7 +561,7 @@ export default function App({ onLock }) {
   // keeps each one's place (scroll, open chat, unsaved templates).
   const [workspace, setWorkspaceState] = useState(() => {
     try {
-      return ['leads', 'podcasts', 'outreach'].includes(localStorage.getItem('workspace')) ? localStorage.getItem('workspace') : 'leads';
+      return ['leads', 'podcasts', 'outreach', 'dialer'].includes(localStorage.getItem('workspace')) ? localStorage.getItem('workspace') : 'leads';
     } catch {
       return 'leads';
     }
@@ -521,11 +594,24 @@ export default function App({ onLock }) {
   }, []);
   const dismiss = (id) => setToasts((list) => list.filter((x) => x.id !== id));
 
+  // A lead's Call button: the Dialer opens with the lead and calls it.
+  const [dialFill, setDialFill] = useState(null);
+  const openDialer = useCallback((fill) => {
+    setDialFill(fill);
+    setWorkspaceState('dialer');
+    setVisited((v) => (v.has('dialer') ? v : new Set([...v, 'dialer'])));
+    try {
+      localStorage.setItem('workspace', 'dialer');
+    } catch {}
+  }, []);
+  const callLead = useLeadCall({ onOpenDialer: openDialer, notify });
+
   const filter = useMemo(() => {
     const f = { category: catFilter };
     if (siteView !== 'all') f.website = siteView;
     if (waView !== 'all') f.whatsapp = waView;
     if (campaignView !== 'all') f.campaign = campaignView;
+    if (callView !== 'all') f.call = callView;
     if (sourceView !== 'all') f.source = sourceView;
     if (searchQuery) f.search = searchQuery;
     if (view === 'today') f.date = today;
@@ -535,7 +621,7 @@ export default function App({ onLock }) {
       if (range.to) f.to = range.to;
     } else f.before = today;
     return f;
-  }, [view, today, pastMode, pastDate, range, catFilter, siteView, waView, campaignView, sourceView, searchQuery]);
+  }, [view, today, pastMode, pastDate, range, catFilter, siteView, waView, campaignView, callView, sourceView, searchQuery]);
   const filterRef = useRef(filter);
   filterRef.current = filter;
   const viewKey = JSON.stringify(filter);
@@ -651,6 +737,8 @@ export default function App({ onLock }) {
     // Background WhatsApp checks: the leads with that number are applied
     // like new ones (with "WhatsApp only", a confirmed number now shows).
     const offWaLeads = api.onWhatsAppLeads(({ leads: updated }) => queueLive(updated.map((u) => u.id)));
+    // A lead became Call Seen (a call to it started) or Do not call.
+    const offCallLeads = api.onCallLeads(({ ids }) => queueLive(ids));
     // Leads found by Google Maps and Facebook (both may be searching at
     // once); category counts are refreshed at most twice a second.
     let catTimer = 0;
@@ -668,6 +756,7 @@ export default function App({ onLock }) {
       offPlan();
       window.removeEventListener('lead-finder:plan-needed', onPlanNeeded);
       offWaLeads();
+      offCallLeads();
       offLead();
       clearInterval(timer);
       clearTimeout(catTimer);
@@ -723,7 +812,21 @@ export default function App({ onLock }) {
 
   async function changeLinkedIn(next) {
     const res = await api.setLinkedInSettings(next).catch((e) => ({ ok: false, error: e.message }));
-    if (res.ok) setLiSettings({ modes: res.modes });
+    if (res.ok) setLiSettings({ modes: res.modes, contact: res.contact, datasets: res.datasets || [] });
+    else notify({ type: 'error', text: res.error });
+  }
+
+  async function importContacts() {
+    const res = await api.importContacts().catch((e) => ({ ok: false, error: e.message }));
+    if (res.canceled) return;
+    if (!res.ok) return notify({ type: 'error', text: res.error });
+    setLiSettings({ modes: res.modes, contact: res.contact, datasets: res.datasets || [] });
+    notify({ type: 'ok', text: `Imported ${res.imported} contact${res.imported === 1 ? '' : 's'} from "${res.dataset}"${res.skipped ? ` (${res.skipped} rows without a name or email skipped)` : ''}.` });
+  }
+
+  async function deleteDataset(name) {
+    const res = await api.deleteContactDataset(name).catch((e) => ({ ok: false, error: e.message }));
+    if (res.ok) setLiSettings({ modes: res.modes, contact: res.contact, datasets: res.datasets || [] });
     else notify({ type: 'error', text: res.error });
   }
 
@@ -733,11 +836,12 @@ export default function App({ onLock }) {
     else notify({ type: 'error', text: `Could not change the phone country: ${res.error}` });
   }
 
-  async function runSearch(kw, cat, li = liKeyword) {
+  async function runSearch(kw, cat, li = liKeyword, loc = liLocation) {
     try {
       localStorage.setItem('lf-linkedin-keyword', li);
+      localStorage.setItem('lf-linkedin-location', loc);
     } catch {}
-    const res = await api.startSearch(kw, cat, websiteFilter, li);
+    const res = await api.startSearch(kw, cat, websiteFilter, li, liSettings.modes.people ? loc : '');
     if (!res.ok) {
       // No active plan: show the Activate panel with the reason.
       if (!planNeeded(res)) notify({ type: 'error', text: res.error });
@@ -761,7 +865,8 @@ export default function App({ onLock }) {
     setKeyword(interrupted.keyword);
     setCategory(interrupted.category);
     if (interrupted.linkedinKeyword) setLiKeyword(interrupted.linkedinKeyword);
-    await runSearch(interrupted.keyword, interrupted.category, interrupted.linkedinKeyword || liKeyword);
+    if (interrupted.linkedinLocation) setLiLocation(interrupted.linkedinLocation);
+    await runSearch(interrupted.keyword, interrupted.category, interrupted.linkedinKeyword || liKeyword, interrupted.linkedinLocation ?? liLocation);
   }
 
   async function exportCsv(scope) {
@@ -802,12 +907,13 @@ export default function App({ onLock }) {
   }, []);
 
   // Filters that can hide leads (besides the date view).
-  const narrowed = catFilter !== 'all' || siteView !== 'all' || waView !== 'all' || campaignView !== 'all' || sourceView !== 'all' || Boolean(searchQuery);
+  const narrowed = catFilter !== 'all' || siteView !== 'all' || waView !== 'all' || campaignView !== 'all' || callView !== 'all' || sourceView !== 'all' || Boolean(searchQuery);
   const showAll = () => {
     setCatFilter('all');
     setSiteView('all');
     setWaView('all');
     setCampaignView('all');
+    setCallView('all');
     setSourceView('all');
     setTableSearch('');
     setSearchQuery('');
@@ -835,6 +941,7 @@ export default function App({ onLock }) {
             ['leads', 'Leads', 'inbox'],
             ['podcasts', 'Podcasts', 'mic'],
             ['outreach', 'Outreach', 'send'],
+            ['dialer', 'Dialer', 'phone'],
           ].map(([id, label, icon]) => (
             <button key={id} type="button" className={workspace === id ? 'on' : ''} aria-pressed={workspace === id} onClick={() => setWorkspace(id)}>
               <Icon name={icon} size={14} /> {label}
@@ -861,6 +968,7 @@ export default function App({ onLock }) {
 
       {visited.has('podcasts') && <PodcastsView notify={notify} hidden={workspace !== 'podcasts'} categories={catData.categories} />}
       {visited.has('outreach') && <OutreachView wa={wa} notify={notify} hidden={workspace !== 'outreach'} />}
+      {visited.has('dialer') && <DialerView notify={notify} hidden={workspace !== 'dialer'} prefill={dialFill} />}
       <main className="content" hidden={workspace !== 'leads'}>
         <section className="panel search-panel">
           <form className="search" onSubmit={start}>
@@ -894,12 +1002,26 @@ export default function App({ onLock }) {
                     id="li-kw"
                     value={liKeyword}
                     onChange={(e) => setLiKeyword(e.target.value)}
-                    placeholder="e.g. Full Stack Developer"
+                    placeholder={liSettings.modes.people ? 'e.g. SEO' : 'e.g. Full Stack Developer'}
                     maxLength={120}
                     disabled={active}
-                    title="Jobs, posts and companies on LinkedIn: the companies that need this"
+                    title={liSettings.modes.people ? 'People on LinkedIn matching this (title, skills, headline)' : 'Jobs, posts and companies on LinkedIn: the companies that need this'}
                   />
                 </div>
+              </div>
+            )}
+            {linkedinOn && liSettings.modes.people && (
+              <div className="field li-loc">
+                <label htmlFor="li-loc">Location</label>
+                <input
+                  id="li-loc"
+                  value={liLocation}
+                  onChange={(e) => setLiLocation(e.target.value)}
+                  placeholder="e.g. USA"
+                  maxLength={80}
+                  disabled={active}
+                  title="Where the people are: a country (USA, UK, Canada, Pakistan…) uses LinkedIn's location filter; a city is checked on each profile. Empty: anywhere."
+                />
               </div>
             )}
             <div className="field cat">
@@ -931,6 +1053,7 @@ export default function App({ onLock }) {
             <div className="li-options" role="group" aria-label="LinkedIn modes">
               <span className="muted">LinkedIn finds</span>
               {[
+                ['people', 'People', 'LinkedIn People search: each profile is opened and the person\'s professional email and phone are discovered'],
                 ['jobs', 'Jobs', 'Job listings for the LinkedIn search: the companies hiring'],
                 ['posts', 'Posts', 'Posts about hiring, projects or outsourcing for the LinkedIn search'],
                 ['companies', 'Companies', 'Companies whose own description matches the LinkedIn search'],
@@ -946,6 +1069,85 @@ export default function App({ onLock }) {
                   <span>{label}</span>
                 </label>
               ))}
+              {liSettings.modes.people && (
+                <>
+                  <span className="li-sep" aria-hidden="true" />
+                  <label className="select-wrap provider-select" title={liSettings.contact?.installedIn?.length ? `ContactOut is enabled in your Chrome profile${liSettings.contact.installedIn.length === 1 ? '' : 's'} ${liSettings.contact.installedIn.join(', ')}. Lead Finder must be connected to that profile to use it.` : 'ContactOut is not installed in this computer\'s Chrome.'}>
+                    <span>Contacts from</span>
+                    <select aria-label="Contacts from" value={liSettings.contact?.provider || 'builtin'} disabled={active} onChange={(e) => changeLinkedIn({ contact: { ...liSettings.contact, provider: e.target.value } })}>
+                      <option value="contactout">ContactOut extension</option>
+                      <option value="builtin">Built-in discovery</option>
+                      <option value="both">ContactOut + built-in</option>
+                    </select>
+                  </label>
+                  {liSettings.contact?.provider !== 'builtin' && (
+                    <label className="check-wrap" title="Click ContactOut's View email / View phone buttons, as you would: ContactOut shows emails and phones masked until then. This uses your ContactOut credits, exactly as clicking them yourself does. Off: only what ContactOut shows by itself is read.">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(liSettings.contact?.reveal)}
+                        disabled={active}
+                        aria-label="Reveal with ContactOut credits"
+                        onChange={(e) => changeLinkedIn({ contact: { ...liSettings.contact, reveal: e.target.checked } })}
+                      />
+                      <span>Reveal with credits</span>
+                    </label>
+                  )}
+                  <label className="check-wrap" title="Ask each email's mail server whether the mailbox exists (no message is sent). Addresses built from a name are kept only when confirmed.">
+                    <input
+                      type="checkbox"
+                      checked={liSettings.contact?.verify !== false}
+                      disabled={active}
+                      aria-label="Verify emails"
+                      onChange={(e) => changeLinkedIn({ contact: { ...liSettings.contact, verify: e.target.checked } })}
+                    />
+                    <span>Verify emails</span>
+                  </label>
+                  <div className="menu-anchor">
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      aria-expanded={Boolean(contactOpen)}
+                      aria-haspopup="dialog"
+                      onClick={(e) => {
+                        // Placed in the window (the search panel clips its content).
+                        const r = e.currentTarget.getBoundingClientRect();
+                        setContactOpen((v) => (v ? null : { top: r.bottom + 6, left: Math.max(8, Math.min(r.left, window.innerWidth - 350)) }));
+                      }}
+                    >
+                      Contact data{liSettings.datasets?.length ? ` (${liSettings.datasets.reduce((n, d) => n + d.records, 0)})` : ''}
+                    </button>
+                    {contactOpen && (
+                      <div className="menu contact-menu" role="dialog" aria-label="Contact data" style={{ top: contactOpen.top, left: contactOpen.left }}>
+                        <p className="menu-title">Local contact datasets</p>
+                        <p className="menu-note">Contact discovery also searches CSV files you import (name, email, phone, company, website, title, LinkedIn columns) and your saved leads.</p>
+                        {(liSettings.datasets || []).map((d) => (
+                          <div key={d.dataset} className="dataset-row">
+                            <span>
+                              {d.dataset} <span className="muted">· {d.records} records</span>
+                            </span>
+                            <button type="button" className="icon-btn danger" aria-label={`Remove dataset ${d.dataset}`} title="Remove dataset" onClick={() => deleteDataset(d.dataset)}>
+                              <Icon name="trash" />
+                            </button>
+                          </div>
+                        ))}
+                        <button type="button" className="btn btn-sm" onClick={importContacts}>
+                          Import contacts CSV…
+                        </button>
+                        <label className="menu-field">
+                          <span>Self-hosted verifier (optional)</span>
+                          <input
+                            defaultValue={liSettings.contact?.verifierUrl || ''}
+                            placeholder="http://localhost:8080"
+                            aria-label="Self-hosted verifier address"
+                            onBlur={(e) => e.target.value.trim() !== (liSettings.contact?.verifierUrl || '') && changeLinkedIn({ contact: { ...liSettings.contact, verifierUrl: e.target.value.trim() } })}
+                          />
+                          <span className="menu-note">A Reacher server (open source), for computers that cannot reach mail servers on port 25. Empty: Lead Finder asks the mail servers itself.</span>
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
             </div>
           )}
           <div className="source-row">
@@ -983,7 +1185,9 @@ export default function App({ onLock }) {
               className="source-item"
               title={
                 linkedinOn
-                  ? 'Companies hiring or asking for the keyword (LinkedIn jobs and posts) are found at the same time, with their public business phone, email and website (in a separate Chrome window, using your LinkedIn login).'
+                  ? liSettings.modes.people
+                    ? 'People matching the LinkedIn search (and location): each profile is opened, and their professional email and phone are discovered from LinkedIn, local datasets, the company website and its mail server (in a separate Chrome window, using your LinkedIn login).'
+                    : 'Companies hiring or asking for the keyword (LinkedIn jobs and posts) are found at the same time, with their public business phone, email and website (in a separate Chrome window, using your LinkedIn login).'
                   : 'Off: LinkedIn is not searched.'
               }
             >
@@ -1144,6 +1348,15 @@ export default function App({ onLock }) {
               </select>
             </label>
             <label className="select-wrap">
+              <span>Call</span>
+              <select aria-label="Show call status" value={callView} onChange={(e) => setCallView(e.target.value)}>
+                <option value="all">All leads</option>
+                <option value="seen">Call Seen (called)</option>
+                <option value="unseen">Call Unseen (not called)</option>
+                <option value="dnc">Do not call</option>
+              </select>
+            </label>
+            <label className="select-wrap">
               <span>Source</span>
               <select aria-label="Show source" value={sourceView} onChange={(e) => setSourceView(e.target.value)}>
                 <option value="all">All sources</option>
@@ -1240,6 +1453,7 @@ export default function App({ onLock }) {
                       <th>Category</th>
                       <th>Source</th>
                       <th>Campaign</th>
+                      <th>Call</th>
                       <th>Discovered</th>
                       <th className="actions-col">
                         <span className="sr-only">Actions</span>
@@ -1258,6 +1472,7 @@ export default function App({ onLock }) {
                         onDelete={deleteIds}
                         onWhatsApp={onWhatsAppChanged}
                         onCompose={setComposeLead}
+                        onCall={callLead}
                         waOpen={wa?.state === 'open'}
                         notify={notify}
                       />

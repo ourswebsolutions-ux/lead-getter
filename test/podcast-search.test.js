@@ -464,7 +464,7 @@ test('Upgrade to version 11: existing podcast leads are kept and get their email
     // As a version 10 database: no status, no search tables.
     store.db.exec("UPDATE businesses SET email_status = NULL; DROP TABLE search_hits; DROP TABLE searches; PRAGMA user_version = 10;");
     store.migrate();
-    assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, 11);
+    assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, 15);
     const rows = store.podcastLeads({ sort: 'name', dir: 'asc' }).rows.map((r) => [r.name, r.emailStatus]);
     assert.deepEqual(rows, [['Has email', 'found'], ['No email', 'none'], ['Not checked', 'failed']]);
     assert.ok(store.startSearch({ keyword: 'x', platforms: [] }) > 0, 'search tables created');

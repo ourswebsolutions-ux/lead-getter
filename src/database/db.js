@@ -155,6 +155,95 @@ class LeadStore {
     this.migrateV9();
     this.migrateV10();
     this.migrateV11();
+    this.migrateV12();
+    this.migrateV13();
+    this.migrateV14();
+    this.migrateV15();
+  }
+
+  // Version 15: the call status of each lead, kept apart from its WhatsApp
+  // status: call_seen_at is set when an outgoing call to the lead actually
+  // started (Call Seen); call_dnc marks a lead not to be called.
+  migrateV15() {
+    if (this.db.prepare('PRAGMA user_version').get().user_version >= 15) return;
+    this.transaction(() => {
+      const has = (col) => this.db.prepare("SELECT 1 FROM pragma_table_info('businesses') WHERE name = ?").get(col);
+      if (!has('call_seen_at')) this.db.exec('ALTER TABLE businesses ADD COLUMN call_seen_at INTEGER');
+      if (!has('call_dnc')) this.db.exec('ALTER TABLE businesses ADD COLUMN call_dnc INTEGER NOT NULL DEFAULT 0');
+      this.db.exec('PRAGMA user_version = 15;');
+    });
+  }
+
+  // Version 14: calls made and received through the Dialer (the phone's
+  // SIM). A call keeps the lead's name and business as they were, so its
+  // history stays readable after the lead is deleted; no audio is stored.
+  migrateV14() {
+    if (this.db.prepare('PRAGMA user_version').get().user_version >= 14) return;
+    this.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS calls (
+          id INTEGER PRIMARY KEY,
+          lead_id INTEGER,
+          number TEXT NOT NULL DEFAULT '',
+          name TEXT,
+          business TEXT,
+          direction TEXT NOT NULL CHECK (direction IN ('outgoing', 'incoming')),
+          status TEXT NOT NULL,
+          started_at INTEGER NOT NULL,
+          ended_at INTEGER,
+          duration INTEGER NOT NULL DEFAULT 0,
+          sim TEXT,
+          device TEXT,
+          detail TEXT
+        );
+        CREATE INDEX IF NOT EXISTS calls_lead ON calls (lead_id);
+        CREATE INDEX IF NOT EXISTS calls_started ON calls (started_at);
+        PRAGMA user_version = 14;`);
+    });
+  }
+
+  // Version 13: which contact provider (a browser extension such as
+  // ContactOut) supplied a person's contact details.
+  migrateV13() {
+    if (this.db.prepare('PRAGMA user_version').get().user_version >= 13) return;
+    this.transaction(() => {
+      if (!this.db.prepare("SELECT 1 FROM pragma_table_info('businesses') WHERE name = 'contact_providers'").get()) this.db.exec('ALTER TABLE businesses ADD COLUMN contact_providers TEXT');
+      this.db.exec('PRAGMA user_version = 13;');
+    });
+  }
+
+  // Version 12: people found on LinkedIn (People search) as leads of their
+  // own, and local contact datasets. A person lead keeps the profile
+  // address, title, company and every email and phone contact discovery
+  // found, each with its status; contact_records holds imported datasets
+  // (CSV files) that contact discovery searches.
+  migrateV12() {
+    if (this.db.prepare('PRAGMA user_version').get().user_version >= 12) return;
+    this.transaction(() => {
+      const has = (col) => this.db.prepare("SELECT 1 FROM pragma_table_info('businesses') WHERE name = ?").get(col);
+      for (const col of ['li_profile_url', 'person_title', 'company_name', 'company_url', 'phones']) if (!has(col)) this.db.exec(`ALTER TABLE businesses ADD COLUMN ${col} TEXT`);
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS businesses_profile ON businesses (li_profile_url);
+        CREATE TABLE IF NOT EXISTS contact_records (
+          id          INTEGER PRIMARY KEY,
+          dataset     TEXT NOT NULL,
+          name        TEXT,
+          name_key    TEXT,
+          email       TEXT,
+          phone       TEXT,
+          company     TEXT,
+          company_key TEXT,
+          domain      TEXT,
+          title       TEXT,
+          linkedin    TEXT,
+          address     TEXT,
+          imported_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS contact_records_name ON contact_records (name_key);
+        CREATE INDEX IF NOT EXISTS contact_records_domain ON contact_records (domain);
+        CREATE INDEX IF NOT EXISTS contact_records_linkedin ON contact_records (linkedin);
+        PRAGMA user_version = 12;`);
+    });
   }
 
   // Version 11: podcast searches and email status. Every podcast found is
@@ -670,9 +759,9 @@ class LeadStore {
     }
     // Source: found on Google Maps (Facebook leads have a 'fb:' key) and/or
     // in a Facebook post.
-    if (filter.source === 'maps') clauses.push("b.place_key NOT LIKE 'fb:%' AND b.place_key NOT LIKE 'li:%' AND b.place_key NOT LIKE 'pc:%'");
+    if (filter.source === 'maps') clauses.push("b.place_key NOT LIKE 'fb:%' AND b.place_key NOT LIKE 'li:%' AND b.place_key NOT LIKE 'lp:%' AND b.place_key NOT LIKE 'pc:%'");
     else if (filter.source === 'facebook') clauses.push('b.fb_post_url IS NOT NULL');
-    else if (filter.source === 'linkedin') clauses.push('(b.li_company_url IS NOT NULL OR b.li_job_url IS NOT NULL OR b.li_post_url IS NOT NULL)');
+    else if (filter.source === 'linkedin') clauses.push('(b.li_company_url IS NOT NULL OR b.li_job_url IS NOT NULL OR b.li_post_url IS NOT NULL OR b.li_profile_url IS NOT NULL)');
     else if (filter.source === 'podcast') clauses.push("b.place_key LIKE 'pc:%'");
     if (filter.website === 'without') clauses.push("b.website_status IN ('no_website', 'social_only')");
     else if (filter.website === 'with') clauses.push("b.website_status IN ('has_website', 'possible_website')");
@@ -683,13 +772,17 @@ class LeadStore {
       clauses.push(`${filter.campaign === 'unseen' ? 'NOT ' : ''}EXISTS (SELECT 1 FROM outreach_sends s
         WHERE s.phone = b.phone AND s.test = 0 AND s.status IN ('sent', 'delivered', 'read'))`);
     }
+    // Call status (the Dialer): Seen once an outgoing call to the lead started.
+    if (filter.call === 'seen') clauses.push('b.call_seen_at IS NOT NULL');
+    else if (filter.call === 'unseen') clauses.push('b.call_seen_at IS NULL AND b.call_dnc = 0');
+    else if (filter.call === 'dnc') clauses.push('b.call_dnc = 1');
     // Search: business or contact name, or (by digits) the phone number.
     const q = typeof filter.search === 'string' ? filter.search.trim().slice(0, 100) : '';
     if (q) {
       const like = (v) => `%${v.replace(/[\\%_]/g, '\\$&')}%`;
       const digits = q.replace(/\D/g, '');
-      clauses.push(`(b.name LIKE ? ESCAPE '\\' OR b.contact_name LIKE ? ESCAPE '\\'${digits.length >= 3 ? " OR b.phone LIKE ? ESCAPE '\\' OR b.phone_raw LIKE ? ESCAPE '\\'" : ''})`);
-      params.push(like(q), like(q));
+      clauses.push(`(b.name LIKE ? ESCAPE '\\' OR b.contact_name LIKE ? ESCAPE '\\' OR b.company_name LIKE ? ESCAPE '\\' OR b.email LIKE ? ESCAPE '\\'${digits.length >= 3 ? " OR b.phone LIKE ? ESCAPE '\\' OR b.phone_raw LIKE ? ESCAPE '\\'" : ''})`);
+      params.push(like(q), like(q), like(q), like(q));
       if (digits.length >= 3) params.push(like(digits), like(digits));
     }
     // Only these leads (the table checking which new leads match its filter).
@@ -867,8 +960,8 @@ class LeadStore {
         // number to check) a validated lead ending in its national digits.
         const national = digits.replace(/^0+/, '');
         const existing = (marker && { id: marker.id }) || (unverified
-          ? this.db.prepare('SELECT id FROM businesses WHERE qualified = 1 AND (phone = ? OR phone_raw = ? OR (phone_status = \'valid\' AND length(?) >= 9 AND phone LIKE \'%\' || ?)) ORDER BY id LIMIT 1').get(r.phone, r.phone, national, national)
-          : this.db.prepare('SELECT id FROM businesses WHERE phone = ? AND qualified = 1 ORDER BY id LIMIT 1').get(r.phone));
+          ? this.db.prepare('SELECT id FROM businesses WHERE qualified = 1 AND place_key NOT LIKE \'lp:%\' AND (phone = ? OR phone_raw = ? OR (phone_status = \'valid\' AND length(?) >= 9 AND phone LIKE \'%\' || ?)) ORDER BY id LIMIT 1').get(r.phone, r.phone, national, national)
+          : this.db.prepare("SELECT id FROM businesses WHERE phone = ? AND qualified = 1 AND place_key NOT LIKE 'lp:%' ORDER BY id LIMIT 1").get(r.phone));
         let id;
         if (existing) {
           id = existing.id;
@@ -942,9 +1035,9 @@ class LeadStore {
         const existing =
           (marker && marker.qualified ? marker : null) ||
           (companyUrl && q('SELECT id FROM businesses WHERE qualified = 1 AND li_company_url = ? ORDER BY id LIMIT 1', companyUrl)) ||
-          (ph?.status === 'valid' && q('SELECT id FROM businesses WHERE qualified = 1 AND phone = ? ORDER BY id LIMIT 1', ph.phone)) ||
-          (host && q("SELECT id FROM businesses WHERE qualified = 1 AND (website_url LIKE ? OR website_url LIKE ? OR website_detail = ? OR website_detail LIKE ?) ORDER BY id LIMIT 1", `%://${host}%`, `%://www.${host}%`, host, `${host}/%`)) ||
-          (r.email && q('SELECT id FROM businesses WHERE qualified = 1 AND lower(email) = lower(?) ORDER BY id LIMIT 1', r.email));
+          (ph?.status === 'valid' && q("SELECT id FROM businesses WHERE qualified = 1 AND place_key NOT LIKE 'lp:%' AND phone = ? ORDER BY id LIMIT 1", ph.phone)) ||
+          (host && q("SELECT id FROM businesses WHERE qualified = 1 AND place_key NOT LIKE 'lp:%' AND (website_url LIKE ? OR website_url LIKE ? OR website_detail = ? OR website_detail LIKE ?) ORDER BY id LIMIT 1", `%://${host}%`, `%://www.${host}%`, host, `${host}/%`)) ||
+          (r.email && q("SELECT id FROM businesses WHERE qualified = 1 AND place_key NOT LIKE 'lp:%' AND lower(email) = lower(?) ORDER BY id LIMIT 1", r.email));
         let id;
         if (existing) {
           id = existing.id;
@@ -1006,6 +1099,194 @@ class LeadStore {
         return { lead: toLead(this.db.prepare(`${LEAD_SELECT} WHERE b.id = ?`).get(id)), isNewLead: !existing, newSource: added > 0 };
       }),
     );
+  }
+
+  // --- LinkedIn people ----------------------------------------------------------
+
+  // Saves a person found with LinkedIn People search and contact discovery:
+  // { profileUrl, name, title, headline, company, companyUrl, location,
+  // website, email (the best email for the person), emailStatus ('verified'
+  // | 'unverified' | 'invalid' | 'none'), emails ([{ email, kind, status,
+  // source, reason }]), phone (the person's direct number { phone, raw,
+  // status, country } or null), phones ([{ ..., kind: 'direct' |
+  // 'company', source }]), discovery, sourceUrl, keyword, categoryId }.
+  // One lead per profile, never merged with a business lead (colleagues
+  // share a company's website and phone). The same profile found again is
+  // updated: newly found emails and phones are added, a verified email
+  // replaces an unverified one. A deleted person is not added back.
+  // Returns { lead, isNewLead } or { lead: null, skipped }.
+  savePersonLead(r, now = new Date().toISOString()) {
+    const profileUrl = String(r.profileUrl || '').replace(/\/$/, '');
+    const name = String(r.name || '').trim();
+    if (!/^https:\/\/www\.linkedin\.com\/in\/[^/?#]+$/.test(profileUrl) || !name) throw Object.assign(new Error('A person lead needs a name and a LinkedIn profile.'), { code: 'invalid_lead' });
+    const key = personKey(profileUrl);
+    const host = siteHost(r.website);
+    const ph = r.phone && r.phone.phone ? r.phone : null;
+    const emailList = (r.emails || []).filter((e) => e && e.email).map((e) => ({ email: String(e.email).toLowerCase(), kind: e.kind || 'person', status: e.status || 'unverified', from: e.source || '', reason: e.reason || '' })).slice(0, 30);
+    const phoneList = (r.phones || []).filter((x) => x && x.phone).map((x) => ({ phone: x.phone, raw: x.raw || x.phone, status: x.status || 'unverified', country: x.country || null, kind: x.kind || 'company', from: x.source || '' })).slice(0, 20);
+    const rank = { verified: 3, unverified: 2, invalid: 1, none: 0 };
+    return this.withRetry(() =>
+      this.transaction(() => {
+        const marker = this.stmt.get.get(key);
+        if (marker && !marker.qualified) return { lead: null, skipped: 'deleted' };
+        const old = marker ? this.db.prepare('SELECT * FROM businesses WHERE id = ?').get(marker.id) : null;
+        // Earlier findings are kept: lists merged, the better email status wins.
+        const mergedEmails = mergeBy([...emailList, ...parseJson(old?.emails, [])], 'email', (a, b) => (rank[a.status] >= rank[b.status] ? a : b));
+        const mergedPhones = mergeBy([...phoneList, ...parseJson(old?.phones, [])], 'phone', (a, b) => (a.kind === 'direct' || b.kind !== 'direct' ? a : b));
+        const keepOld = old && old.email && rank[old.email_status] > rank[r.emailStatus || 'none'];
+        const email = keepOld ? old.email : r.email || old?.email || null;
+        const emailStatus = keepOld ? old.email_status : r.email ? r.emailStatus || 'unverified' : old?.email ? old.email_status : r.emailStatus || 'none';
+        const description = r.headline ? String(r.headline).slice(0, 2000) : null;
+        const providers = [...new Set([...(Array.isArray(r.providers) ? r.providers : []), ...String(old?.contact_providers || '').split(',')].filter((x) => /^[a-z]{2,20}$/.test(x)))].join(',') || null;
+        let id;
+        if (old) {
+          id = old.id;
+          this.db
+            .prepare(
+              `UPDATE businesses SET name = ?, person_title = COALESCE(?, person_title), company_name = COALESCE(?, company_name), company_url = COALESCE(?, company_url),
+                 address = COALESCE(?, address), website_url = COALESCE(?, website_url), email = ?, email_status = ?, emails = ?, phones = ?,
+                 description = COALESCE(?, description), discovery = ?, checked_at = ?, category_id = COALESCE(category_id, ?),
+                 website_status = CASE WHEN ? IS NOT NULL THEN 'has_website' ELSE website_status END, website_detail = COALESCE(?, website_detail), contact_providers = ?
+               WHERE id = ?`,
+            )
+            .run(name, r.title || null, r.company || null, r.companyUrl || null, r.location || null, r.website || null, email, emailStatus, JSON.stringify(mergedEmails), JSON.stringify(mergedPhones), description, r.discovery || null, now, r.categoryId ?? null, host, host, providers, id);
+          if (ph) {
+            this.db
+              .prepare(`UPDATE businesses SET phone = ?, phone_raw = ?, phone_status = ?, phone_country = ? WHERE id = ? AND (phone IS NULL OR (phone_status != 'valid' AND ? = 'valid'))`)
+              .run(ph.phone, ph.raw || ph.phone, ph.status, ph.country || null, id, ph.status);
+          }
+        } else {
+          const ins = this.stmt.insert.run({
+            place_key: key,
+            maps_url: profileUrl,
+            name,
+            phone: ph?.phone ?? null,
+            phone_raw: ph ? ph.raw || ph.phone : null,
+            phone_status: ph?.status ?? null,
+            phone_country: ph?.country ?? null,
+            address: r.location || null,
+            website_status: host ? 'has_website' : 'not_checked',
+            website_detail: host,
+            qualified: 1,
+            keyword: r.keyword || null,
+            category_id: r.categoryId ?? null,
+            now,
+            today: localDate(new Date(now)),
+          });
+          id = Number(ins.lastInsertRowid);
+          this.db
+            .prepare(
+              `UPDATE businesses SET li_profile_url = ?, person_title = ?, company_name = ?, company_url = ?, website_url = ?, email = ?, email_status = ?,
+                 emails = ?, phones = ?, description = ?, discovery = ?, contact_providers = ? WHERE id = ?`,
+            )
+            .run(profileUrl, r.title || null, r.company || null, r.companyUrl || null, r.website || null, email, emailStatus, JSON.stringify(mergedEmails), JSON.stringify(mergedPhones), description, r.discovery || null, providers, id);
+        }
+        this.db
+          .prepare(
+            `INSERT INTO lead_sources (business_id, source, url, page_url, author, text, phone, found_at, kind, title)
+             VALUES (?, 'linkedin', ?, ?, ?, ?, '', ?, 'person', ?) ON CONFLICT(source, url, phone) DO NOTHING`,
+          )
+          .run(id, profileUrl, r.sourceUrl || null, name, description, now, r.title || null);
+        return { lead: toLead(this.db.prepare(`${LEAD_SELECT} WHERE b.id = ?`).get(id)), isNewLead: !old };
+      }),
+    );
+  }
+
+  // A LinkedIn profile already saved as a person lead (or deleted): not opened again.
+  hasPersonLead(profileUrl) {
+    return Boolean(this.withRetry(() => this.stmt.get.get(personKey(String(profileUrl || '').replace(/\/$/, '')))));
+  }
+
+  // --- Local contact datasets --------------------------------------------------
+
+  // Imports contact records (parsed CSV rows: { name, first, last, email,
+  // phone, company, website, domain, title, linkedin, address }) as one
+  // dataset. Rows without a name or an email are skipped. Returns
+  // { imported, skipped }.
+  importContactRecords(dataset, rows, now = new Date().toISOString()) {
+    const label = String(dataset || 'Contacts').trim().slice(0, 80) || 'Contacts';
+    const ins = this.db.prepare(
+      `INSERT INTO contact_records (dataset, name, name_key, email, phone, company, company_key, domain, title, linkedin, address, imported_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    let imported = 0;
+    let skipped = 0;
+    this.withRetry(() =>
+      this.transaction(() => {
+        for (const row of rows.slice(0, 200_000)) {
+          const name = String(row.name || [row.first, row.last].filter(Boolean).join(' ')).trim().slice(0, 200);
+          const email = /^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(String(row.email || '').trim()) ? String(row.email).trim().toLowerCase() : '';
+          const phone = String(row.phone || '').trim().slice(0, 40);
+          if (!name && !email) {
+            skipped++;
+            continue;
+          }
+          const domain = siteHost(row.website) || (row.domain ? String(row.domain).toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0] : '') || (email ? email.split('@')[1] : '');
+          const linkedin = (String(row.linkedin || '').match(/linkedin\.com\/in\/([^/?#\s]+)/i) || [])[1];
+          ins.run(label, name || null, personNameKey(name) || null, email || null, phone || null, row.company ? String(row.company).slice(0, 200) : null, companyKey(row.company) || null, domain || null, row.title ? String(row.title).slice(0, 200) : null, linkedin ? `https://www.linkedin.com/in/${decodeURIComponent(linkedin)}` : null, row.address ? String(row.address).slice(0, 300) : null, now);
+          imported++;
+        }
+      }),
+    );
+    return { imported, skipped };
+  }
+
+  // Imported datasets: [{ dataset, records, importedAt }].
+  contactDatasets() {
+    return this.withRetry(() => this.db.prepare('SELECT dataset, COUNT(*) AS records, MAX(imported_at) AS importedAt FROM contact_records GROUP BY dataset ORDER BY importedAt DESC').all());
+  }
+
+  deleteContactDataset(dataset) {
+    return this.withRetry(() => this.db.prepare('DELETE FROM contact_records WHERE dataset = ?').run(String(dataset)).changes);
+  }
+
+  // Records about a person or their company, for contact discovery:
+  // [{ match: 'person' | 'company' | 'domain', name, email, phone, address, dataset }].
+  //   person:  same LinkedIn profile, or same name at the same company/domain
+  //   company: the company's own records (no person name: its general
+  //            email and phone), from datasets and from saved business leads
+  //   domain:  other people's addresses at the domain (its email format)
+  findContactRecords({ name, domain, company, profileUrl } = {}) {
+    const nk = personNameKey(name);
+    const ck = companyKey(company);
+    const d = String(domain || '').toLowerCase();
+    const out = [];
+    return this.withRetry(() => {
+      const rows = this.db
+        .prepare(
+          `SELECT * FROM contact_records WHERE (linkedin IS NOT NULL AND linkedin = ?) OR (name_key IS NOT NULL AND name_key = ?)
+             OR (? != '' AND (domain = ? OR domain LIKE ?)) OR (? != '' AND company_key = ?) LIMIT 500`,
+        )
+        .all(profileUrl || '', nk || '', d, d, `%.${d}`, ck || '', ck || '');
+      for (const r of rows) {
+        const sameOrg = (d && r.domain && (r.domain === d || r.domain.endsWith(`.${d}`))) || (ck && r.company_key === ck);
+        let match = null;
+        if (profileUrl && r.linkedin === profileUrl) match = 'person';
+        else if (nk && r.name_key === nk && (sameOrg || !d)) match = 'person';
+        else if (sameOrg && !r.name_key) match = 'company';
+        else if (sameOrg) match = 'domain';
+        if (match) out.push({ match, name: r.name, email: r.email, phone: r.phone, address: r.address, dataset: r.dataset });
+      }
+      // Saved business leads of the same company (its website).
+      if (d) {
+        const leads = this.db
+          .prepare(
+            `SELECT email, emails, phone, phone_raw, address FROM businesses WHERE qualified = 1 AND place_key NOT LIKE 'lp:%'
+               AND (website_detail = ? OR website_detail LIKE ? OR website_url LIKE ? OR website_url LIKE ?) LIMIT 20`,
+          )
+          .all(d, `${d}/%`, `%://${d}%`, `%://www.${d}%`);
+        for (const l of leads) {
+          const emails = new Set([l.email, ...parseEmails(l.emails).map((e) => e.email)].filter(Boolean));
+          for (const e of emails) out.push({ match: 'company', email: e, phone: null, address: l.address, dataset: null });
+          if (l.phone) out.push({ match: 'company', email: null, phone: l.phone, address: l.address, dataset: null });
+        }
+        // Other people already found at the domain (its email format).
+        for (const p of this.db.prepare("SELECT email FROM businesses WHERE qualified = 1 AND place_key LIKE 'lp:%' AND email_status = 'verified' AND email LIKE ? LIMIT 50").all(`%@${d}`)) {
+          out.push({ match: 'domain', email: p.email, phone: null, dataset: null });
+        }
+      }
+      return out;
+    });
   }
 
   // --- Podcasts --------------------------------------------------------------------
@@ -1322,6 +1603,95 @@ class LeadStore {
     return { ...row };
   }
 
+  // --- calls (the Dialer) ---
+
+  addCall({ leadId = null, number = '', name = null, business = null, direction, status, startedAt, sim = null, device = null }) {
+    return Number(
+      this.withRetry(() =>
+        this.db
+          .prepare('INSERT INTO calls (lead_id, number, name, business, direction, status, started_at, sim, device) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+          .run(leadId, number, name, business, direction, status, startedAt, sim, device).lastInsertRowid,
+      ),
+    );
+  }
+
+  updateCall(id, { status, duration, detail = null, endedAt = null, number, leadId, name, business }) {
+    this.withRetry(() =>
+      this.db
+        .prepare('UPDATE calls SET status = ?, duration = ?, detail = ?, ended_at = ?, number = COALESCE(NULLIF(?, \'\'), number), lead_id = COALESCE(?, lead_id), name = COALESCE(?, name), business = COALESCE(?, business) WHERE id = ?')
+        .run(status, Math.max(0, Math.round(duration || 0)), detail, endedAt, number ?? '', leadId ?? null, name ?? null, business ?? null, id),
+    );
+  }
+
+  // Newest first. search: name, business or number; direction: outgoing |
+  // incoming; status: answered | missed | rejected | failed | ...; leadId.
+  listCalls({ search = '', direction = '', status = '', leadId = null, limit = 200 } = {}) {
+    const where = [];
+    const args = [];
+    if (leadId) {
+      where.push('c.lead_id = ?');
+      args.push(Number(leadId));
+    }
+    if (direction === 'outgoing' || direction === 'incoming') {
+      where.push('c.direction = ?');
+      args.push(direction);
+    }
+    if (status === 'not_answered') where.push("c.status IN ('no_answer', 'busy', 'missed')");
+    else if (status) {
+      where.push('c.status = ?');
+      args.push(String(status));
+    }
+    const q = String(search || '').trim().toLowerCase();
+    if (q) {
+      const digits = q.replace(/\D/g, '');
+      where.push(`(lower(COALESCE(c.name, '')) LIKE ? ESCAPE '\\' OR lower(COALESCE(c.business, '')) LIKE ? ESCAPE '\\'${digits.length >= 3 ? " OR replace(c.number, '+', '') LIKE ?" : ''})`);
+      const like = `%${q.replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
+      args.push(like, like);
+      if (digits.length >= 3) args.push(`%${digits}%`);
+    }
+    const rows = this.withRetry(() =>
+      this.db.prepare(`SELECT c.* FROM calls c ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY c.started_at DESC, c.id DESC LIMIT ?`).all(...args, Math.min(Math.max(Number(limit) || 200, 1), 2000)),
+    );
+    return rows.map((r) => ({ id: r.id, leadId: r.lead_id, number: r.number, name: r.name, business: r.business, direction: r.direction, status: r.status, startedAt: r.started_at, endedAt: r.ended_at, duration: r.duration, sim: r.sim, device: r.device, detail: r.detail }));
+  }
+
+  // Call Seen: an outgoing call to this lead started (only the first time is kept).
+  markCallSeen(leadId, at = Date.now()) {
+    if (!leadId) return;
+    this.withRetry(() => this.db.prepare('UPDATE businesses SET call_seen_at = ? WHERE id = ? AND qualified = 1 AND call_seen_at IS NULL').run(at, leadId));
+  }
+
+  setDoNotCall(leadId, on) {
+    this.withRetry(() => this.db.prepare('UPDATE businesses SET call_dnc = ? WHERE id = ? AND qualified = 1').run(on ? 1 : 0, leadId));
+  }
+
+  // Leads the Auto Dialer may call, oldest first: a valid number, Call
+  // Unseen, not marked "do not call", not opted out (WhatsApp opt-outs
+  // count too), and not already tried in this run (exclude).
+  callableLeads({ exclude = [], limit = 50 } = {}) {
+    const ex = [...new Set(exclude.map(Number).filter(Number.isInteger))];
+    const rows = this.withRetry(() =>
+      this.db
+        .prepare(
+          `${LEAD_SELECT} WHERE b.qualified = 1 AND b.phone IS NOT NULL AND b.phone != '' AND b.phone_status = 'valid' AND b.call_seen_at IS NULL AND b.call_dnc = 0
+             AND NOT EXISTS (SELECT 1 FROM outreach_optouts o WHERE o.phone = b.phone)
+             ${ex.length ? `AND b.id NOT IN (${ex.map(() => '?').join(',')})` : ''}
+           ORDER BY b.discovered_at ASC, b.id ASC LIMIT ?`,
+        )
+        .all(...ex, Math.max(1, Math.min(Number(limit) || 50, 5000))),
+    );
+    return rows.map(toLead);
+  }
+
+  // The saved lead with this number (the last 9 digits match), for incoming calls.
+  findLeadByPhone(number) {
+    const digits = String(number || '').replace(/\D/g, '');
+    if (digits.length < 7) return null;
+    const tail = digits.slice(-9);
+    const row = this.withRetry(() => this.db.prepare(`${LEAD_SELECT} WHERE b.qualified = 1 AND replace(replace(replace(b.phone, '+', ''), ' ', ''), '-', '') LIKE ? ORDER BY b.id DESC LIMIT 1`).get(`%${tail}`));
+    return row ? toLead(row) : null;
+  }
+
   leadById(id) {
     const row = this.withRetry(() => this.db.prepare(`${LEAD_SELECT} WHERE b.id = ? AND b.qualified = 1`).get(id));
     return row ? toLead(row) : null;
@@ -1411,13 +1781,19 @@ function toLead(row) {
     // Campaign status: 'seen' once a campaign message was sent to this
     // number; campaignDelivery is the best receipt (sent/delivered/read).
     campaign: row.camp_rank > 0 ? 'seen' : 'unseen',
+    // Call status, separate from WhatsApp: 'seen' once an outgoing call
+    // started, 'dnc' when the lead must not be called.
+    callStatus: row.call_dnc ? 'dnc' : row.call_seen_at ? 'seen' : 'unseen',
+    callSeenAt: row.call_seen_at ?? null,
     // Where the lead was found: Google Maps, a Facebook post and/or LinkedIn.
-    source: { fb: 'facebook', li: 'linkedin', pc: 'podcast' }[String(row.place_key).slice(0, 2)] || 'maps',
+    source: { fb: 'facebook', li: 'linkedin', lp: 'linkedin', pc: 'podcast' }[String(row.place_key).slice(0, 2)] || 'maps',
+    // A person found with LinkedIn People search (not a business).
+    kind: String(row.place_key).startsWith('lp:') ? 'person' : 'business',
     sources: [
-      ...(/^(fb|li|pc):/.test(String(row.place_key)) ? [] : ['maps']),
+      ...(/^(fb|li|lp|pc):/.test(String(row.place_key)) ? [] : ['maps']),
       ...(String(row.place_key).startsWith('pc:') ? ['podcast'] : []),
       ...(row.fb_post_url ? ['facebook'] : []),
-      ...(row.li_company_url || row.li_job_url || row.li_post_url ? ['linkedin'] : []),
+      ...(row.li_company_url || row.li_job_url || row.li_post_url || row.li_profile_url ? ['linkedin'] : []),
     ],
     email: row.email || '',
     websiteUrl: row.website_url || '',
@@ -1432,6 +1808,13 @@ function toLead(row) {
     podcastLinks: parseLinks(row.podcast_links),
     emailStatus: row.email_status || (String(row.place_key).startsWith('pc:') ? (row.email ? 'found' : 'none') : ''),
     artworkUrl: row.artwork_url || '',
+    profileUrl: row.li_profile_url || '',
+    personTitle: row.person_title || '',
+    companyName: row.company_name || '',
+    companyUrl: row.company_url || '',
+    phones: parseJson(row.phones, []),
+    // Contact providers that supplied the details (e.g. ['contactout']).
+    contactProviders: row.contact_providers ? String(row.contact_providers).split(',') : [],
     emails: parseEmails(row.emails),
     // What contact details the lead has.
     contacts: { phone: Boolean(row.phone), email: Boolean(row.email), website: Boolean(row.website_url || ['has_website', 'possible_website'].includes(row.website_status)) },
@@ -1453,10 +1836,51 @@ const LEAD_SELECT = `SELECT b.*, c.name AS category_name, w.status AS wa_status,
 const TOMBSTONE = `qualified = 0, website_status = 'deleted', website_detail = NULL, name = '', phone = NULL, phone_raw = NULL,
   phone_status = NULL, phone_country = NULL, address = NULL, maps_url = '', fb_post_url = NULL, fb_page_url = NULL, contact_name = NULL, description = NULL,
   email = NULL, website_url = NULL, li_job_url = NULL, li_post_url = NULL, job_title = NULL, discovery = NULL,
-  host_name = NULL, emails = NULL`;
+  host_name = NULL, emails = NULL, person_title = NULL, company_name = NULL, company_url = NULL, phones = NULL, email_status = NULL, contact_providers = NULL,
+  call_seen_at = NULL, call_dnc = 0`;
 
 // Email status of a finished check (processPodcast's status).
 const EMAIL_STATUS = { found: 'found', platform_only: 'platform', not_found: 'none', incomplete: 'failed', failed: 'failed' };
+
+const personKey = (profileUrl) => `lp:${crypto.createHash('sha256').update(String(profileUrl).toLowerCase()).digest('hex').slice(0, 32)}`;
+
+// Names and companies compared without case, accents, punctuation, titles
+// and legal suffixes.
+function personNameKey(name) {
+  let n = String(name || '').trim();
+  // "Doe, Jane" -> "Jane Doe"; "Jane Doe, MBA" -> "Jane Doe".
+  const comma = n.match(/^([^,]+),\s*([^,]+)$/);
+  if (comma) n = /^(mba|phd|ph\.d\.?|cpa|pmp|cfa|acca|msc|bsc|md|esq|jr|sr|ii|iii)\.?$/i.test(comma[2].trim()) || comma[1].trim().includes(' ') ? comma[1] : `${comma[2]} ${comma[1]}`;
+  return n
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\(.*?\)|,.*$/g, ' ')
+    .replace(/[^\p{L}\s]/gu, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length > 1 && !/^(mr|mrs|ms|dr|prof|mba|phd|jr|sr)$/.test(w))
+    .join(' ');
+}
+
+function companyKey(name) {
+  return String(name || '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\b(pvt|private|ltd|limited|llc|inc|incorporated|co|company|corp|corporation|plc|gmbh|llp|the)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// One entry per key (the first wins unless `pick` prefers the other).
+function mergeBy(list, key, pick) {
+  const out = new Map();
+  for (const x of list) {
+    if (!x || !x[key]) continue;
+    out.set(x[key], out.has(x[key]) ? pick(out.get(x[key]), x) : x);
+  }
+  return [...out.values()];
+}
 
 function parseJson(text, fallback) {
   try {

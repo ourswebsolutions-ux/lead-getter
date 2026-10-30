@@ -2,11 +2,11 @@
 
 const path = require('node:path');
 const fs = require('node:fs/promises');
-const { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage, shell } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, ipcMain, Notification, safeStorage, shell } = require('electron');
 const { LeadStore, DATE_RE, formatCategory } = require('../database/db');
 const { E164, resolvePhoneCountry, phoneCountries } = require('../database/phone');
 const { leadsToCsv } = require('../export/csv');
-const { ChromeConnection, ChromeError, ConnectCancelled } = require('../browser/chrome');
+const { ChromeConnection, ChromeError, ConnectCancelled, defaultUserDataDir } = require('../browser/chrome');
 const { SearchSession, WEBSITE_FILTERS } = require('../browser/search-session');
 const { FacebookSession } = require('../browser/facebook-session');
 const { LinkedInSession } = require('../browser/linkedin-session');
@@ -15,6 +15,9 @@ const podcastLib = require('../browser/podcasts');
 const { PodcastSearch } = require('../browser/podcast-search');
 const { PLATFORMS, ADAPTERS, browserFindOf } = require('../browser/podcast-platforms');
 const { robotsChecker } = require('../browser/robots');
+const { EmailVerifier } = require('../browser/email-verify');
+const { contactRowsFromCsv } = require('../export/csv-import');
+const { PROVIDERS: CONTACT_PROVIDERS, extensionState, installedIn } = require('../browser/extension-contacts');
 
 // Requests from here (Apple Podcasts, feeds, websites) try IPv6 and IPv4
 // side by side; Node gives each address only 250ms to connect, so a slow
@@ -269,6 +272,7 @@ function validateFilter(raw) {
     if (typeof f[k] === 'string' && DATE_RE.test(f[k])) out[k] = f[k];
   }
   if (f.campaign === 'seen' || f.campaign === 'unseen') out.campaign = f.campaign;
+  if (['seen', 'unseen', 'dnc'].includes(f.call)) out.call = f.call;
   if (['maps', 'facebook', 'linkedin', 'podcast'].includes(f.source)) out.source = f.source;
   if (typeof f.search === 'string' && f.search.trim()) out.search = f.search.trim().slice(0, 100);
   return out;
@@ -334,7 +338,7 @@ function profileLabel(profile) {
 
 // rawKeyword/rawCategory: the Google Maps and Facebook search; rawLinkedIn:
 // LinkedIn's own search (its search bar). Only the sources switched on run.
-async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn) {
+async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn, rawLocation = '') {
   // The source switches above the Leads table, as they are now.
   const withMaps = mapsSearchOn();
   const withFacebook = facebookSearchOn();
@@ -350,10 +354,12 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn) {
     if (cat.error) return { ok: false, error: cat.error };
   }
   let linkedinKeyword = '';
+  let linkedinLocation = '';
   if (withLinkedIn) {
     const k = validateKeyword(rawLinkedIn);
     if (k.error) return { ok: false, error: `LinkedIn search: ${k.error.replace(/^Enter a search keyword/, 'enter what to search for')}` };
     linkedinKeyword = k.keyword;
+    linkedinLocation = String(rawLocation || '').replace(/\s+/g, ' ').trim().slice(0, 80);
     // LinkedIn alone: its leads go to the category given, else one named after its search.
     if (!keyword) {
       keyword = linkedinKeyword;
@@ -378,7 +384,7 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn) {
   const controller = new AbortController();
   search = { controller };
   // Remembered so a search cut short by a crash can be resumed.
-  store.setState('lastSearch', { keyword, category: category.name, linkedinKeyword, sources, state: 'running', startedAt: new Date().toISOString() });
+  store.setState('lastSearch', { keyword, category: category.name, linkedinKeyword, linkedinLocation, sources, state: 'running', startedAt: new Date().toISOString() });
   interrupted = null;
   let expectedProfilePath = null;
   const startedAt = new Date().toISOString();
@@ -465,7 +471,15 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn) {
         createLinkedIn: (emit) =>
           new LinkedInSession({
             keyword: linkedinKeyword,
+            location: linkedinLocation,
             modes: linkedinModes(),
+            // People: contact discovery checks emails with mail servers (or
+            // the user's self-hosted verifier) and reads company websites
+            // only where their robots.txt allows.
+            verifier: contactSettings().verify ? new EmailVerifier({ reacherUrl: contactSettings().verifierUrl || null }) : null,
+            // ContactOut: read in the connected Chrome profile, which must have it enabled.
+            extension: contactExtension(expectedProfilePath),
+            allow: robotsChecker({ signal: controller.signal }),
             categoryId: category.id,
             country,
             store,
@@ -488,7 +502,7 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn) {
       updater?.idle(); // an update waiting for the search can install now
       sendSummary({ keyword, category: category.name, startedAt, stats });
       try {
-        store.setState('lastSearch', { keyword, category: category.name, linkedinKeyword, sources, state: lastStatus.state, endedAt: new Date().toISOString() });
+        store.setState('lastSearch', { keyword, category: category.name, linkedinKeyword, linkedinLocation, sources, state: lastStatus.state, endedAt: new Date().toISOString() });
       } catch {}
     }
   })();
@@ -550,23 +564,107 @@ function setLinkedInSearch(on) {
   return { ok: true, on };
 }
 
-// LinkedIn discovery modes (Jobs, Posts, Companies).
+// LinkedIn discovery modes (People, Jobs, Posts, Companies). People search
+// is the default; settings saved before it existed start with People only.
 function linkedinModes() {
-  const m = store.getState('linkedinModes') || {};
-  return { jobs: m.jobs !== false, posts: m.posts !== false, companies: m.companies !== false };
+  const m = store.getState('linkedinModes');
+  if (!m || typeof m.people !== 'boolean') return { people: true, jobs: false, posts: false, companies: false };
+  return { people: m.people, jobs: m.jobs === true, posts: m.posts === true, companies: m.companies === true };
+}
+
+// Contact discovery for People: verify emails with mail servers (default
+// on), optionally through a self-hosted verifier (Reacher) address.
+// provider: where people's contacts come from: 'contactout' (the ContactOut
+// extension in the user's Chrome), 'builtin' (contact discovery) or 'both'.
+// Default: ContactOut when it is installed in this computer's Chrome.
+// reveal: also click ContactOut's "View email" / "View phone" (uses the
+// user's credits, as clicking them by hand does; ContactOut 5.18 shows
+// values masked until then). On unless switched off.
+function contactSettings() {
+  const c = store.getState('contactDiscovery') || {};
+  const provider = ['contactout', 'builtin', 'both'].includes(c.provider) ? c.provider : contactOutInstalled().length ? 'contactout' : 'builtin';
+  return { verify: c.verify !== false, verifierUrl: typeof c.verifierUrl === 'string' ? c.verifierUrl : '', provider, reveal: c.reveal !== false, installedIn: contactOutInstalled().map((p) => p.name) };
+}
+
+// Chrome profiles of this computer with ContactOut enabled (names only).
+let contactOutCache = null;
+function contactOutInstalled() {
+  if (!contactOutCache || Date.now() - contactOutCache.at > 30_000) {
+    let list = [];
+    try {
+      list = installedIn(process.env.LEAD_FINDER_CHROME_USER_DATA || defaultUserDataDir(), CONTACT_PROVIDERS.contactout).filter((p) => p.enabled);
+    } catch {}
+    contactOutCache = { at: Date.now(), list };
+  }
+  return contactOutCache.list;
 }
 
 function linkedinSettings() {
-  return { modes: linkedinModes() };
+  return { modes: linkedinModes(), contact: contactSettings(), datasets: store.contactDatasets() };
 }
 
 function setLinkedInSettings(raw) {
   if (!raw || typeof raw !== 'object') return { ok: false, error: 'Invalid value' };
   if (raw.modes) {
-    const m = { jobs: raw.modes.jobs === true, posts: raw.modes.posts === true, companies: raw.modes.companies === true };
-    if (!m.jobs && !m.posts && !m.companies) return { ok: false, error: 'Keep at least one LinkedIn mode on.' };
+    const m = { people: raw.modes.people === true, jobs: raw.modes.jobs === true, posts: raw.modes.posts === true, companies: raw.modes.companies === true };
+    if (!m.people && !m.jobs && !m.posts && !m.companies) return { ok: false, error: 'Keep at least one LinkedIn mode on.' };
     store.setState('linkedinModes', m);
   }
+  if (raw.contact && typeof raw.contact === 'object') {
+    const url = String(raw.contact.verifierUrl ?? contactSettings().verifierUrl).trim();
+    if (url) {
+      let u;
+      try {
+        u = new URL(url);
+      } catch {}
+      if (!u || !/^https?:$/.test(u.protocol)) return { ok: false, error: 'The verifier address must start with http:// or https://' };
+    }
+    const prev = contactSettings();
+    const provider = ['contactout', 'builtin', 'both'].includes(raw.contact.provider) ? raw.contact.provider : prev.provider;
+    store.setState('contactDiscovery', { verify: raw.contact.verify !== false, verifierUrl: url, provider, reveal: typeof raw.contact.reveal === 'boolean' ? raw.contact.reveal : prev.reveal });
+  }
+  return { ok: true, ...linkedinSettings() };
+}
+
+// The ContactOut provider for People search, as set, for the Chrome profile
+// Lead Finder is connected to (profilePath), or null.
+function contactExtension(profilePath) {
+  const c = contactSettings();
+  if (!linkedinModes().people || c.provider === 'builtin') return null;
+  let st = { installed: false, enabled: false };
+  try {
+    st = extensionState(profilePath, CONTACT_PROVIDERS.contactout);
+  } catch {}
+  return { provider: CONTACT_PROVIDERS.contactout, only: c.provider === 'contactout', reveal: c.reveal, preflight: { ...st, where: profilePath ? installedIn(path.dirname(profilePath), CONTACT_PROVIDERS.contactout).filter((p) => p.enabled).map((p) => p.name) : [] } };
+}
+
+// Imports a CSV of contacts as a local dataset for contact discovery.
+async function importContactDataset() {
+  const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+    title: 'Import a contacts CSV',
+    filters: [{ name: 'CSV files', extensions: ['csv', 'txt'] }],
+    properties: ['openFile'],
+  });
+  if (canceled || !filePaths?.[0]) return { ok: false, canceled: true };
+  let text;
+  try {
+    const stat = await fs.stat(filePaths[0]);
+    if (stat.size > 50 * 1024 * 1024) return { ok: false, error: 'The file is larger than 50 MB.' };
+    text = await fs.readFile(filePaths[0], 'utf8');
+  } catch (err) {
+    return { ok: false, error: `Could not read the file (${err.message}).` };
+  }
+  const { rows, columns } = contactRowsFromCsv(text);
+  if (!columns.includes('email') && !columns.includes('phone')) return { ok: false, error: 'No email or phone column was found. Name the columns, for example: Name, Email, Phone, Company, Website, Title, LinkedIn.' };
+  if (!columns.includes('name') && !(columns.includes('first') && columns.includes('last')) && !columns.includes('linkedin')) return { ok: false, error: 'No name (or first and last name) column was found.' };
+  const dataset = path.basename(filePaths[0]).replace(/\.[^.]+$/, '');
+  const res = store.importContactRecords(dataset, rows);
+  return { ok: true, dataset, ...res, columns, ...linkedinSettings() };
+}
+
+function deleteContactDataset(name) {
+  if (typeof name !== 'string' || !name) return { ok: false, error: 'Invalid value' };
+  store.deleteContactDataset(name);
   return { ok: true, ...linkedinSettings() };
 }
 
@@ -1363,7 +1461,7 @@ function openListing(url) {
   }
   const maps = /^(www\.)?google\.[a-z.]+$/.test(u.hostname) && u.pathname.startsWith('/maps/');
   const facebook = /^(www|m|web)\.facebook\.com$/.test(u.hostname);
-  const linkedin = /^([a-z]{2,3}\.|www\.)?linkedin\.com$/.test(u.hostname) && /^\/(company|jobs\/view|feed\/update|posts)\//.test(u.pathname);
+  const linkedin = /^([a-z]{2,3}\.|www\.)?linkedin\.com$/.test(u.hostname) && /^\/(company|jobs\/view|feed\/update|posts|in)\//.test(u.pathname);
   // A podcast's page on Apple Podcasts, Spotify, YouTube or Amazon Music.
   const podcast =
     (u.hostname === 'podcasts.apple.com' && /\/id\d+/.test(u.pathname)) ||
@@ -1485,7 +1583,7 @@ app.whenReady().then(() => {
     store.setState('lastSearch', { state: 'dismissed' });
     return { ok: true };
   });
-  handle('search:start', (keyword, category, website, linkedin) => startSearch(keyword, category, website, linkedin));
+  handle('search:start', (keyword, category, website, linkedin, location) => startSearch(keyword, category, website, linkedin, location));
   handle('search:stop', () => stopSearch());
   handle('maps:get', () => ({ on: mapsSearchOn() }));
   handle('maps:set', (on) => setMapsSearch(on));
@@ -1495,6 +1593,41 @@ app.whenReady().then(() => {
   handle('linkedin:set', (on) => setLinkedInSearch(on));
   handle('linkedin:settings', () => linkedinSettings());
   handle('linkedin:setSettings', (raw) => setLinkedInSettings(raw));
+  handle('contacts:import', () => importContactDataset());
+  handle('dialer:state', () => dialer?.state() || null);
+  handle('dialer:scan', (on) => dialerDo((d) => d.scan(Boolean(on))));
+  handle('dialer:visible', (on) => dialerDo((d) => d.visible(Boolean(on))));
+  handle('dialer:power', (on) => dialerDo((d) => d.power(Boolean(on))));
+  handle('dialer:connect', (address) => dialerDo((d) => d.connect(String(address || ''))));
+  handle('dialer:confirmPairing', (accept) => dialerDo((d) => d.confirmPairing(Boolean(accept))));
+  handle('dialer:disconnect', () => dialerDo((d) => d.disconnect({ keep: true })));
+  handle('dialer:reconnect', () => dialerDo((d) => d.reconnectNow()));
+  handle('dialer:forget', (address) => dialerDo((d) => d.forget(String(address || ''))));
+  handle('dialer:call', (number, opts) => dialerDo((d) => d.call(String(number || ''), { leadId: Number(opts?.leadId) || null })));
+  handle('dialer:hangup', () => dialerDo((d) => d.hangup()));
+  handle('dialer:answer', () => dialerDo((d) => d.answer()));
+  handle('dialer:reject', () => dialerDo((d) => d.reject()));
+  handle('dialer:mute', (on) => dialerDo((d) => d.mute(Boolean(on))));
+  handle('dialer:takeHandsFree', () => dialerDo((d) => d.takeHandsFree()));
+  handle('dialer:refreshSim', () => dialerDo((d) => d.refreshSim()));
+  handle('autodial:state', () => autoDialer?.state() || null);
+  handle('autodial:start', () => (autoDialer ? autoDialer.start() : { ok: false, error: 'The Dialer is not ready.' }));
+  handle('autodial:pause', () => autoDialer?.pause() || { ok: false });
+  handle('autodial:resume', () => (autoDialer ? autoDialer.resume() : { ok: false }));
+  handle('autodial:stop', () => autoDialer?.stop() || { ok: false });
+  handle('autodial:settings', (raw) => (autoDialer ? autoDialer.setSettings(raw && typeof raw === 'object' ? raw : {}) : { ok: false }));
+  handle('leads:doNotCall', (id, on) => {
+    const leadId = Number(id);
+    if (!Number.isInteger(leadId) || leadId <= 0) return { ok: false, error: 'Unknown lead.' };
+    store.setDoNotCall(leadId, Boolean(on));
+    send('leads:call', { ids: [leadId] });
+    return { ok: true };
+  });
+  handle('dialer:dtmf', (key) => dialerDo((d) => d.dtmf(String(key || ''))));
+  handle('dialer:audioTo', (where) => dialerDo((d) => d.audioTo(where === 'phone' ? 'phone' : 'computer')));
+  handle('dialer:setAudio', (prefs) => dialerDo((d) => d.setAudio({ output: typeof prefs?.output === 'string' ? prefs.output : undefined, input: typeof prefs?.input === 'string' ? prefs.input : undefined, echoCancel: typeof prefs?.echoCancel === 'boolean' ? prefs.echoCancel : undefined })));
+  handle('dialer:history', (filter) => store.listCalls({ search: String(filter?.search || '').slice(0, 100), direction: String(filter?.direction || ''), status: String(filter?.status || ''), leadId: Number(filter?.leadId) || null, limit: Number(filter?.limit) || 300 }));
+  handle('contacts:deleteDataset', (name) => deleteContactDataset(name));
   handle('phoneCountry:get', () => phoneCountrySettings());
   handle('phoneCountry:set', (code) => setPhoneCountry(code === null ? null : String(code || '').toUpperCase()));
   handle('search:status', () => lastStatus);
@@ -1584,6 +1717,59 @@ function afterUnlock() {
   unlockedOnce = true;
   watchActivation();
   initWhatsApp();
+  initDialer();
+}
+
+// --- Dialer (calls through the user's Android phone; see src/dialer) ------------------
+
+let dialer = null;
+let autoDialer = null;
+
+function initDialer() {
+  const { Dialer } = require('../dialer/dialer');
+  const { Bluetooth, supported } = require('../dialer/bluetooth');
+  const { CallAudio } = require('../dialer/audio');
+  const handover = require('../dialer/pipewire-hfp');
+  // Tests may run a stand-in for the Bluetooth helper; never in a packaged app.
+  const script = !app.isPackaged && process.env.LEAD_FINDER_BT_HELPER ? process.env.LEAD_FINDER_BT_HELPER : undefined;
+  dialer = new Dialer({
+    bluetooth: new Bluetooth(script ? { script } : {}),
+    audio: new CallAudio(),
+    store,
+    handover,
+    supported: supported() || Boolean(script),
+  });
+  dialer.on('state', (st) => send('dialer:state', st));
+  dialer.on('incoming', (call) => {
+    send('dialer:incoming', call);
+    const who = [call.name, call.business].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join(' · ');
+    if (Notification.isSupported()) {
+      const n = new Notification({ title: 'Incoming call', body: `${who || call.number || 'Unknown number'}${who && call.number ? `\n${call.number}` : ''}`, urgency: 'critical' });
+      n.on('click', () => {
+        if (win && !win.isDestroyed()) {
+          win.show();
+          win.focus();
+        }
+      });
+      n.show();
+    }
+  });
+  dialer.on('ended', () => send('dialer:history', {}));
+  dialer.on('seen', (id) => send('leads:call', { ids: [id] }));
+  const { AutoDialer } = require('../dialer/auto-dialer');
+  autoDialer = new AutoDialer({ dialer, store });
+  autoDialer.on('state', (st) => send('autodial:state', st));
+  dialer.start().catch((err) => console.error('dialer:', err.message));
+}
+
+// Dialer calls answer { ok, error } instead of throwing.
+async function dialerDo(fn) {
+  if (!dialer) return { ok: false, error: 'The Dialer is not ready.' };
+  try {
+    return await fn(dialer);
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
 }
 
 app.on('window-all-closed', () => app.quit());
@@ -1598,6 +1784,8 @@ app.on('before-quit', (e) => {
   podcastRun?.controller.abort();
   Promise.all([search?.promise, podcastRun?.promise].map((p) => Promise.resolve(p).catch(() => {})))
     .then(() => outreach?.dispose())
+    .then(() => autoDialer?.stop())
+    .then(() => dialer?.stop())
     .then(() => chrome.disconnect())
     .then(() => wa?.disconnect()) // closes the connection; the linked session is kept
     .finally(() => {

@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8" /><title>LinkedIn people (test fixture)</title>
+<style>body{font:14px sans-serif;margin:0} li{min-height:80px}</style></head>
+<body>
+<main id="main"></main>
+<script>
+  // LinkedIn People pages in the shapes they render for a logged-in member:
+  // people search (cards with /in/ links; one card in the classless layout,
+  // one "LinkedIn Member" without a profile), a profile (top card, location,
+  // Contact info link, Experience section), its Contact info overlay, and a
+  // company About page. window.CONFIG can turn pages into a login wall.
+  const C = window.CONFIG || {};
+  const PEOPLE = {
+    'jane-doe-seo': { name: 'Jane Doe', headline: 'SEO Lead at Acme Growth | Technical SEO', location: 'Austin, Texas, United States', title: 'SEO Lead', company: 'Acme Growth', slug: 'acme-growth' },
+    'omar-khan-1': { name: 'Omar Khan', headline: 'SEO Specialist', location: 'San Francisco Bay Area', title: 'SEO Specialist', company: 'Beta Rank', slug: 'beta-rank' },
+    'lena-fischer': { name: 'Lena Fischer 🚀', headline: 'Independent SEO consultant', location: 'Berlin, Germany', title: 'SEO Consultant', company: 'Catch Corp', slug: 'catch-corp', email: 'lena.fischer@gmail.example', phone: '+49 30 1234567' },
+    'pat-lee': { name: 'Pat Lee', headline: 'Head Chef at Food Place', location: 'Denver, Colorado, United States', title: 'Head Chef', company: 'Food Place', slug: 'food-place' },
+    'sam-roe': { name: 'Sam Roe', headline: 'SEO Manager at Acme Growth', location: 'Dallas, Texas, United States', title: 'SEO Manager', company: 'Acme Growth', slug: 'acme-growth' },
+  };
+  const PAGES = [['jane-doe-seo', 'omar-khan-1', 'member', 'lena-fischer'], ['jane-doe-seo', 'pat-lee', 'sam-roe']];
+  const COMPANIES = {
+    'acme-growth': { name: 'Acme Growth', website: 'https://acmegrowth.example/', phone: '+1 512 555 0100' },
+    'beta-rank': { name: 'Beta Rank', website: 'https://betarank.example' },
+    'catch-corp': { name: 'Catch Corp', website: 'https://catchcorp.example' },
+    'food-place': { name: 'Food Place' },
+  };
+  const main = document.getElementById('main');
+  const p = location.pathname;
+  const q = new URLSearchParams(location.search);
+  window.VISITS = (window.VISITS || 0) + 1;
+  let m;
+  const card = (id, i) => {
+    if (id === 'member') return '<li class="reusable-search__result-container"><div><span>LinkedIn Member</span><div>SEO</div></div></li>';
+    const x = PEOPLE[id];
+    // The second card of each page: the newer layout without class names.
+    if (i === 1) return `<li><div><a href="https://www.linkedin.com/in/${id}?miniProfileUrn=urn"><span dir="ltr"><span aria-hidden="true">${x.name}</span><span class="visually-hidden">View ${x.name}’s profile</span></span></a>
+      <div>• 2nd</div><div>${x.headline}</div><div>${x.location}</div><button>Connect</button></div></li>`;
+    return `<li class="reusable-search__result-container"><div class="entity-result">
+      <span class="entity-result__title-text"><a href="https://www.linkedin.com/in/${id}/?miniProfileUrn=urn"><span dir="ltr"><span aria-hidden="true">${x.name}</span><span class="visually-hidden">View ${x.name}’s profile</span></span></a></span>
+      <div class="entity-result__primary-subtitle">${x.headline}</div><div class="entity-result__secondary-subtitle">${x.location}</div></div></li>`;
+  };
+  const profile = (id) => {
+    const x = PEOPLE[id];
+    document.title = `${x.name} | LinkedIn`;
+    // LinkedIn's 2026 layout: no h1 (the name is an h2), "Location · Contact
+    // info" on one line, the current company then the school after it, no
+    // Experience section on first load.
+    if (C.layout === '2026') return `<section><div><div><h2>${x.name}</h2></div><p>· 2nd</p></div><p>${x.headline}</p>
+      <p>${x.location} · <a href="/in/${id}/overlay/contact-info/">Contact info</a></p><p>${x.company}</p><p>State University</p>
+      <p>Tushar and Arslan are mutual connections</p><button>Connect</button><button>Message</button></section>
+      <section><h2>About</h2><p>${x.headline}. Helping teams grow.</p></section>`;
+    return `<section class="artdeco-card pv-top-card"><div><h1 class="text-heading-xlarge">${x.name}</h1><span>(She/Her)</span><span>· 2nd</span></div>
+      <div class="text-body-medium break-words">${x.headline}</div>
+      <div><span class="text-body-small inline t-black--light break-words">${x.location}</span> · <a id="top-card-text-details-contact-info" href="/in/${id}/overlay/contact-info/">Contact info</a></div>
+      <div>500+ connections</div></section>
+      <section class="artdeco-card"><div id="about"></div><h2>About</h2><p>${x.headline}. Helping teams grow.</p></section>
+      <section class="artdeco-card"><div id="experience"></div><h2>Experience</h2><ul><li>
+        <a data-field="experience_company_logo" href="https://www.linkedin.com/company/${x.slug}/"><img alt="${x.company} logo" width="48" height="48"></a>
+        <div><span aria-hidden="true">${x.title}</span></div><div><span aria-hidden="true">${x.company} · Full-time</span></div><div><span aria-hidden="true">2021 - Present</span></div>
+      </li></ul></section>`;
+  };
+  if (C.authwall && (C.authwall === 'all' || p.startsWith(C.authwall))) {
+    main.innerHTML = '<form class="authwall-join-form"><input id="session_key"><button>Sign in</button></form>';
+  } else if (p.startsWith('/search/results/people')) {
+    window.LAST_SEARCH = location.href;
+    const n = Number(q.get('page') || 1);
+    const ids = PAGES[n - 1];
+    main.innerHTML = ids ? `<ul>${ids.map(card).join('')}</ul>` : '<h2>No results found</h2><p>Try removing filters</p>';
+  } else if ((m = p.match(/^\/in\/([^/]+)\/overlay\/contact-info/))) {
+    const x = PEOPLE[m[1]];
+    main.innerHTML = `${profile(m[1])}<div role="dialog"><h2>Contact info</h2>
+      <section class="pv-contact-info__contact-type"><h3>${x.name}’s Profile</h3><a href="https://www.linkedin.com/in/${m[1]}">linkedin.com/in/${m[1]}</a></section>
+      ${x.email ? `<section class="pv-contact-info__contact-type"><h3>Email</h3><a href="mailto:${x.email}">${x.email}</a></section>` : ''}
+      ${x.phone ? `<section class="pv-contact-info__contact-type"><h3>Phone</h3><ul><li><span class="t-14">${x.phone}</span> (Mobile)</li></ul></section>` : ''}</div>`;
+  } else if ((m = p.match(/^\/in\/([^/]+)/))) {
+    main.innerHTML = PEOPLE[m[1]] ? profile(m[1]) : '<h1>This page doesn’t exist</h1>';
+    // The ContactOut extension (when C.contactout): its toolbar, closed, with
+    // its panel iframe loading its own site for this profile.
+    if (C.contactout === 'v2' && PEOPLE[m[1]]) {
+      // ContactOut 5.18: its button is an iframe on the right edge; its panel
+      // an iframe off screen until the button is clicked.
+      const btn = document.createElement('iframe');
+      btn.src = 'https://contactout.com/extension/action_button/497';
+      btn.style.cssText = 'position:fixed;right:0;top:192px;width:32px;height:84px;border:0;z-index:1000';
+      const side = document.createElement('iframe');
+      side.src = `https://contactout.com/extension/app/?source=sidebar&p=${m[1]}`;
+      side.style.cssText = 'position:fixed;left:100vw;top:55px;width:320px;height:640px;border:0;z-index:999';
+      document.body.append(btn, side);
+      window.addEventListener('message', (e) => e.data === 'co-toggle' && (side.style.left = 'calc(100vw - 360px)'));
+    } else if (C.contactout && PEOPLE[m[1]]) {
+      const bar = document.createElement('div');
+      bar.style.cssText = 'position:fixed;right:0;top:120px;z-index:999';
+      bar.innerHTML = `<button style="cursor:grab">⋮⋮</button><button class="co-toggle"><img alt="" src="data:image/svg+xml;base64,PHN2Zy8+"></button>
+        <iframe id="main-iframe" src="https://contactout.com/extension/app?p=${m[1]}" style="position:fixed;right:0;top:100px;width:380px;height:560px;display:none"></iframe>`;
+      document.body.appendChild(bar);
+      bar.querySelector('.co-toggle').onclick = () => (document.getElementById('main-iframe').style.display = 'block');
+    }
+  } else if ((m = p.match(/^\/company\/([^/]+)/))) {
+    const c = COMPANIES[m[1]] || { name: m[1] };
+    main.innerHTML = `<h1>${c.name}</h1><section><h2>Overview</h2><dl>
+      ${c.website ? `<dt>Website</dt><dd><a href="https://www.linkedin.com/redir/redirect?url=${encodeURIComponent(c.website)}">${c.website}</a></dd>` : ''}
+      ${c.phone ? `<dt>Phone</dt><dd>${c.phone}</dd>` : ''}<dt>Industry</dt><dd>Marketing Services</dd></dl></section>`;
+  }
+</script>
+</body>
+</html>

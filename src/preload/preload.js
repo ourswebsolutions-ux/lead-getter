@@ -20,8 +20,9 @@ contextBridge.exposeInMainWorld('leadFinder', {
   renameCategory: (id, name) => ipcRenderer.invoke('categories:rename', Number(id), String(name ?? '')),
   deleteCategory: (id) => ipcRenderer.invoke('categories:delete', Number(id)),
   // linkedin: LinkedIn's own search (used when LinkedIn Lead Search is on).
-  startSearch: (keyword, category, website, linkedin) =>
-    ipcRenderer.invoke('search:start', String(keyword ?? ''), String(category ?? ''), String(website ?? 'without'), String(linkedin ?? '')),
+  // location: where LinkedIn People search looks (e.g. "USA").
+  startSearch: (keyword, category, website, linkedin, location) =>
+    ipcRenderer.invoke('search:start', String(keyword ?? ''), String(category ?? ''), String(website ?? 'without'), String(linkedin ?? ''), String(location ?? '')),
   // App lock (4-digit PIN)
   lockState: () => ipcRenderer.invoke('lock:state'),
   lockSetup: (pin, confirm) => ipcRenderer.invoke('lock:setup', String(pin ?? ''), String(confirm ?? '')),
@@ -61,7 +62,10 @@ contextBridge.exposeInMainWorld('leadFinder', {
   setLinkedInSearch: (on) => ipcRenderer.invoke('linkedin:set', Boolean(on)),
   // LinkedIn modes { jobs, posts, companies }.
   linkedinSettings: () => ipcRenderer.invoke('linkedin:settings'),
-  setLinkedInSettings: (settings) => ipcRenderer.invoke('linkedin:setSettings', settings && typeof settings === 'object' ? { modes: settings.modes } : null),
+  setLinkedInSettings: (settings) => ipcRenderer.invoke('linkedin:setSettings', settings && typeof settings === 'object' ? { modes: settings.modes, contact: settings.contact } : null),
+  // Local contact datasets (CSV) for contact discovery.
+  importContacts: () => ipcRenderer.invoke('contacts:import'),
+  deleteContactDataset: (name) => ipcRenderer.invoke('contacts:deleteDataset', String(name ?? '')),
   // The country local numbers ("0300 1234567") are read with; null = automatic.
   phoneCountry: () => ipcRenderer.invoke('phoneCountry:get'),
   setPhoneCountry: (code) => ipcRenderer.invoke('phoneCountry:set', code === null ? null : String(code ?? '')),
@@ -112,4 +116,38 @@ contextBridge.exposeInMainWorld('leadFinder', {
   updateStatus: () => ipcRenderer.invoke('update:status'),
   openUpdateDownload: () => ipcRenderer.invoke('update:openDownload'),
   onUpdate: (cb) => subscribe('update:status', cb),
+  // Dialer: real calls on the user's phone over Bluetooth Hands-Free, audio on this computer.
+  dialerState: () => ipcRenderer.invoke('dialer:state'),
+  onDialerState: (callback) => subscribe('dialer:state', callback),
+  onDialerIncoming: (callback) => subscribe('dialer:incoming', callback),
+  onDialerHistory: (callback) => subscribe('dialer:history', callback),
+  dialerScan: (on) => ipcRenderer.invoke('dialer:scan', Boolean(on)),
+  dialerVisible: (on) => ipcRenderer.invoke('dialer:visible', Boolean(on)),
+  dialerPower: (on) => ipcRenderer.invoke('dialer:power', Boolean(on)),
+  dialerConnect: (address) => ipcRenderer.invoke('dialer:connect', String(address ?? '')),
+  dialerConfirmPairing: (accept) => ipcRenderer.invoke('dialer:confirmPairing', Boolean(accept)),
+  dialerDisconnect: () => ipcRenderer.invoke('dialer:disconnect'),
+  dialerReconnect: () => ipcRenderer.invoke('dialer:reconnect'),
+  dialerForget: (address) => ipcRenderer.invoke('dialer:forget', String(address ?? '')),
+  dialerCall: (number, opts) => ipcRenderer.invoke('dialer:call', String(number ?? ''), { leadId: Number(opts?.leadId) || null }),
+  dialerHangup: () => ipcRenderer.invoke('dialer:hangup'),
+  dialerAnswer: () => ipcRenderer.invoke('dialer:answer'),
+  dialerReject: () => ipcRenderer.invoke('dialer:reject'),
+  dialerMute: (on) => ipcRenderer.invoke('dialer:mute', Boolean(on)),
+  dialerRefreshSim: () => ipcRenderer.invoke('dialer:refreshSim'),
+  // Auto Dialer: calls Call Unseen leads one after another while it is on.
+  autoDialState: () => ipcRenderer.invoke('autodial:state'),
+  onAutoDialState: (callback) => subscribe('autodial:state', callback),
+  autoDialStart: () => ipcRenderer.invoke('autodial:start'),
+  autoDialPause: () => ipcRenderer.invoke('autodial:pause'),
+  autoDialResume: () => ipcRenderer.invoke('autodial:resume'),
+  autoDialStop: () => ipcRenderer.invoke('autodial:stop'),
+  autoDialSettings: (s) => ipcRenderer.invoke('autodial:settings', s && typeof s === 'object' ? { gapSeconds: s.gapSeconds, ringSeconds: s.ringSeconds, mobileOnly: s.mobileOnly, hours: s.hours && typeof s.hours === 'object' ? { on: s.hours.on, from: s.hours.from, to: s.hours.to } : undefined } : {}),
+  setDoNotCall: (id, on) => ipcRenderer.invoke('leads:doNotCall', Number(id), Boolean(on)),
+  onCallLeads: (callback) => subscribe('leads:call', callback),
+  dialerTakeHandsFree: () => ipcRenderer.invoke('dialer:takeHandsFree'),
+  dialerDtmf: (key) => ipcRenderer.invoke('dialer:dtmf', String(key ?? '')),
+  dialerAudioTo: (where) => ipcRenderer.invoke('dialer:audioTo', where === 'phone' ? 'phone' : 'computer'),
+  dialerSetAudio: (prefs) => ipcRenderer.invoke('dialer:setAudio', prefs && typeof prefs === 'object' ? { output: prefs.output, input: prefs.input, echoCancel: prefs.echoCancel } : {}),
+  dialerHistory: (filter) => ipcRenderer.invoke('dialer:history', filter && typeof filter === 'object' ? { search: filter.search, direction: filter.direction, status: filter.status, leadId: filter.leadId, limit: filter.limit } : {}),
 });
