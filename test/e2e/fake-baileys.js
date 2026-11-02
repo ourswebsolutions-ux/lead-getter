@@ -13,6 +13,7 @@ const LOG = process.env.LEAD_FINDER_TEST_BAILEYS_LOG;
 const ON_WHATSAPP = new Set((process.env.LEAD_FINDER_TEST_BAILEYS_NUMBERS || '').split(',').filter(Boolean));
 const HISTORY = process.env.LEAD_FINDER_TEST_BAILEYS_HISTORY === '1';
 let seq = 0;
+let linked = 0; // numbers handed out: +923000000001, +923000000002, ...
 
 function logSend(entry) {
   if (!LOG) return;
@@ -24,12 +25,16 @@ const secs = (ms) => Math.floor(ms / 1000);
 function makeSocket(opts) {
   const ev = new EventEmitter();
   const sock = { ev, opts, user: null };
+  // Each new link is a different WhatsApp number, kept in its session (creds.me).
+  const creds = opts.auth?.creds || {};
+  const me = creds.me || { id: `92300000000${++linked}:7@s.whatsapp.net`, name: linked === 1 ? 'Test Account' : `Test Account ${linked}` };
+  const own = me.id.split(':')[0];
   sock.end = async () => {};
   sock.logout = async () => {};
   sock.onWhatsApp = async (n) => (ON_WHATSAPP.has(n) ? [{ jid: `${n}@s.whatsapp.net`, exists: true }] : []);
   sock.sendMessage = async (jid, content) => {
     const id = `OUT${Date.now()}${++seq}`;
-    logSend({ jid, text: content.text, id, at: Date.now() });
+    logSend({ jid, text: content.text, id, at: Date.now(), from: own });
     const msg = { key: { remoteJid: jid, id, fromMe: true }, messageTimestamp: secs(Date.now()), status: 2, message: { conversation: content.text } };
     setTimeout(() => ev.emit('messages.upsert', { type: 'append', messages: [msg] }), 10);
     return msg;
@@ -39,7 +44,9 @@ function makeSocket(opts) {
   sock.fetchMessageHistory = async () => 'req';
   sock.signalRepository = { lidMapping: { getPNForLID: async () => null } };
   setTimeout(() => {
-    sock.user = { id: '923000000001:7@s.whatsapp.net', name: 'Test Account' };
+    sock.user = me;
+    creds.me = me;
+    ev.emit('creds.update', { me });
     ev.emit('connection.update', { connection: 'open' });
     if (HISTORY) {
       const t = Date.now() - 3 * 3600_000;
@@ -55,7 +62,7 @@ function makeSocket(opts) {
       });
     }
   }, 50);
-  globalThis.__fakeWA = {
+  const api = {
     sock,
     // A message from a contact, as WhatsApp would deliver it.
     incoming(phoneDigits, text, pushName = null) {
@@ -66,6 +73,9 @@ function makeSocket(opts) {
       ev.emit('messages.update', [{ key: { remoteJid: jid, id, fromMe: true }, update: { status } }]);
     },
   };
+  // __fakeWA: the first number's socket; __fakeWAs: every socket by number.
+  globalThis.__fakeWAs = { ...globalThis.__fakeWAs, [own]: api };
+  if (own === '923000000001' || !globalThis.__fakeWA) globalThis.__fakeWA = api;
   return sock;
 }
 

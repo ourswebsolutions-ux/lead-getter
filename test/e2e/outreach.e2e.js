@@ -145,6 +145,12 @@ test('WhatsApp outreach: no Chats tab, campaign, replies, restart', async (t) =>
   assert.equal(await out.locator('.campaign-sent tbody tr').count(), 0, 'the simulation was cleared');
   await win.waitForFunction(() => document.querySelectorAll('.campaign-contacts .stage-dots span.on').length === 0);
   await sw().click();
+  // Which WhatsApp account sends: the one connected, chosen by default.
+  const pick = win.getByRole('dialog', { name: 'Choose WhatsApp account' });
+  await pick.waitFor();
+  assert.equal(await pick.getByRole('radio').count(), 1);
+  assert.ok(await pick.getByRole('radio').isChecked());
+  await pick.getByRole('button', { name: 'Start' }).click();
   const ack = win.getByRole('dialog', { name: 'Start live outreach' });
   await ack.waitFor();
   assert.ok(await ack.getByRole('button', { name: 'Start sending' }).isDisabled());
@@ -186,7 +192,7 @@ test('WhatsApp outreach: no Chats tab, campaign, replies, restart', async (t) =>
   await app.evaluate(() => globalThis.__fakeWA.incoming('923001234567', 'Walaikum assalam, kaun?', 'Zahid'));
   await win.locator('.toast').filter({ hasText: /replied/ }).waitFor();
   await rows.filter({ hasText: '+923001234567' }).locator('.st-chip').filter({ hasText: 'Replied' }).waitFor();
-  // The reply ends Zahid's sequence; the next contact is 45-60 minutes after
+  // The reply ends Zahid's sequence; the next contact is the campaign interval (30 minutes) after
   // his last message.
   let replyState;
   for (let i = 0; i < 90; i++) {
@@ -197,7 +203,7 @@ test('WhatsApp outreach: no Chats tab, campaign, replies, restart', async (t) =>
   assert.equal(replyState.current, null);
   const nextDue = replyState.nextDueAt;
   const gap = (nextDue - live[0].at) / 60_000;
-  assert.ok(gap >= 45 && gap <= 60.1, `next contact in ${gap.toFixed(1)} minutes: ${JSON.stringify({ status: replyState.status, waiting: replyState.waiting, current: replyState.current, nextDueAt: nextDue, live0: live[0].at, contacts: replyState.contacts.map((c) => [c.phone, c.state, c.stage, c.lastSentAt]), sends: replyState.sends.map((x) => [x.phone, x.stage, x.status, x.sentAt]) })}`);
+  assert.ok(Math.abs(gap - 30) < 0.1, `next contact in ${gap.toFixed(1)} minutes: ${JSON.stringify({ status: replyState.status, waiting: replyState.waiting, current: replyState.current, nextDueAt: nextDue, live0: live[0].at, contacts: replyState.contacts.map((c) => [c.phone, c.state, c.stage, c.lastSentAt]), sends: replyState.sends.map((x) => [x.phone, x.stage, x.status, x.sentAt]) })}`);
   assert.equal(sends(log).length, 1, 'no further message to Zahid');
 
   // --- Restart: still running, same count and next time; nothing re-sent.

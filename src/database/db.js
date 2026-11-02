@@ -84,6 +84,12 @@ class LeadStore {
     this.db.exec('PRAGMA foreign_keys = ON;');
     this.db.exec(SCHEMA);
     this.migrate();
+    // Every way a lead is found goes through these: the daily allowance is
+    // checked and used in the same transaction as the save.
+    for (const [method, source] of [['save', 'maps'], ['saveFacebookLead', 'facebook'], ['saveLinkedInLead', 'linkedin'], ['savePersonLead', 'linkedin'], ['savePodcastLead', 'podcast']]) {
+      const original = this[method].bind(this);
+      this[method] = (...args) => this.guardedSave(source, () => original(...args));
+    }
     this.stmt = {
       get: this.db.prepare('SELECT * FROM businesses WHERE place_key = ?'),
       getLead: this.db.prepare(`${LEAD_SELECT} WHERE b.place_key = ?`),
@@ -161,6 +167,25 @@ class LeadStore {
     this.migrateV15();
     this.migrateV16();
     this.migrateV17();
+    this.migrateV18();
+  }
+
+  // Version 18: the daily lead allowance. One row per unique new lead per day
+  // (the plan's day, see main/lead-quota.js): what a limited plan has used.
+  migrateV18() {
+    if (this.db.prepare('PRAGMA user_version').get().user_version >= 18) return;
+    this.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS lead_credits (
+          lead_id INTEGER NOT NULL,
+          day     TEXT NOT NULL,
+          at      INTEGER NOT NULL,
+          source  TEXT,
+          PRIMARY KEY (lead_id, day)
+        );
+        CREATE INDEX IF NOT EXISTS lead_credits_day ON lead_credits (day);
+        PRAGMA user_version = 18;`);
+    });
   }
 
   // Version 17: SMS campaigns. A campaign keeps its message, its sending
@@ -743,6 +768,43 @@ class LeadStore {
   }
 
   // Nested calls join the transaction already open.
+  // The daily lead allowance (main/lead-quota.js): gate() -> { day, limit }
+  // (limit null: unlimited); onLimit(gate) is told when a lead is refused.
+  setLeadGate(gate, onLimit = () => {}) {
+    this.leadGate = gate;
+    this.onLeadLimit = onLimit;
+  }
+
+  creditsOn(day) {
+    return this.db.prepare('SELECT COUNT(*) AS n FROM lead_credits WHERE day = ?').get(day).n;
+  }
+
+  // A save that would add a new lead beyond the allowance is undone (the
+  // whole transaction), and reported as { lead: null, limitReached: true }.
+  // Updates of existing leads and businesses that are not leads use nothing.
+  guardedSave(source, fn) {
+    if (!this.leadGate) return fn();
+    const refused = {};
+    try {
+      return this.transaction(() => {
+        const r = fn();
+        if (r?.isNewLead && r.lead?.id) {
+          const g = this.leadGate();
+          if (g.limit != null && this.creditsOn(g.day) >= g.limit) {
+            refused.gate = g;
+            throw refused;
+          }
+          this.db.prepare('INSERT OR IGNORE INTO lead_credits (lead_id, day, at, source) VALUES (?, ?, ?, ?)').run(r.lead.id, g.day, Date.now(), source);
+        }
+        return r;
+      });
+    } catch (err) {
+      if (err !== refused) throw err;
+      this.onLeadLimit(refused.gate);
+      return { lead: null, isNewLead: false, limitReached: true };
+    }
+  }
+
   transaction(fn) {
     if (this.db.isTransaction) return fn();
     this.db.exec('BEGIN IMMEDIATE');

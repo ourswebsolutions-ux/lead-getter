@@ -2,5 +2,13 @@
   "contact": {
     "whatsapp": "923245237429",
     "phone": "+923245237429"
+  },
+  "limits": {
+    "timeZone": "Asia/Karachi",
+    "dailyLeads": {
+      "monthly": 100,
+      "six_months": null,
+      "lifetime": null
+    }
   }
 }

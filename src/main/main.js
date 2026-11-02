@@ -176,6 +176,59 @@ function createActivation() {
   return new Activation({ store, config, mailer, mailError });
 }
 
+// --- the daily lead allowance (main/lead-quota.js) ---------------------------------
+
+let leadQuota = null;
+let limitNotified = null; // the day the user was told the allowance is used up
+
+function initLeadQuota() {
+  const { LeadQuota } = require('./lead-quota');
+  const testLimits = !app.isPackaged && process.env.LEAD_FINDER_TEST_DAILY_LEADS ? JSON.parse(process.env.LEAD_FINDER_TEST_DAILY_LEADS) : null;
+  leadQuota = new LeadQuota({
+    store,
+    plan: () => {
+      const st = activation.status();
+      return st.state === 'active' ? st.plan : null;
+    },
+    now: () => activation.now(),
+    config: { ...(activationConfig().limits || {}), ...(testLimits || {}) },
+  });
+  store.setLeadGate(() => leadQuota.gate(), onLeadLimit);
+  // End-to-end tests only (never packaged): a lead saved as a search saves it.
+  if (testLimits) {
+    globalThis.__leadFinderTest = {
+      saveLead(data) {
+        const res = store.save(data);
+        if (res.lead) send('leads:added', res.lead);
+        send('quota:state', leadQuota.status());
+        return { isNewLead: res.isNewLead, limitReached: Boolean(res.limitReached) };
+      },
+      quota: () => leadQuota.status(),
+    };
+  }
+}
+
+// A lead was refused: the allowance is used up. Every search stops (the
+// lead finding ones; nothing else) and the window offers the plans.
+function onLeadLimit() {
+  const st = leadQuota.status();
+  if (search && !search.controller.signal.aborted) {
+    sendStatus({ state: 'stopping', message: leadQuota.message(st.limit) });
+    search.controller.abort();
+  }
+  podcastRun?.controller.abort();
+  if (limitNotified !== st.day) {
+    limitNotified = st.day;
+    send('quota:reached', { ...st, error: leadQuota.message(st.limit) });
+  }
+  send('quota:state', st);
+}
+
+// Before a lead search starts.
+function requireLeadAllowance() {
+  return leadQuota ? leadQuota.check() : { ok: true };
+}
+
 function requirePlan() {
   const st = activation.status();
   if (st.state === 'active') return { ok: true };
@@ -187,7 +240,10 @@ let lastActivationState = null;
 function sendActivation() {
   const st = activation.status();
   // A plan that ended stops WhatsApp checks (the linked session is kept).
-  if (lastActivationState === 'active' && st.state !== 'active') wa?.disconnect().catch(() => {});
+  if (lastActivationState === 'active' && st.state !== 'active') {
+    wa?.disconnect().catch(() => {});
+    waAccounts?.disconnectAll().catch(() => {});
+  }
   lastActivationState = st.state;
   send('activation:status', st);
   return st;
@@ -372,6 +428,8 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn, raw
   if (search) return { ok: false, error: 'A search is already running.' };
   const plan = requirePlan();
   if (!plan.ok) return plan;
+  const allowance = requireLeadAllowance();
+  if (!allowance.ok) return allowance;
   // Saved (or matched to an existing spelling) before the search starts.
   let category;
   try {
@@ -452,6 +510,7 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn, raw
         send: (event, payload) => {
           if (event === 'status') return sendStatus(payload);
           send('leads:added', payload);
+          if (leadQuota) send('quota:state', leadQuota.status());
           verifier?.poke(); // check the new number on WhatsApp in the background
         },
         createMaps: (emit) => new SearchSession({ keyword, categoryId: category.id, websiteFilter, store, signal: controller.signal, pages, recovery: recoveryFor(MAPS_TABS), emit }),
@@ -751,6 +810,7 @@ async function exportCsv(scope, rawFilter) {
 
 const SEND_MIN_INTERVAL = 8000; // ms between sends: no rapid-fire messaging
 let wa = null;
+let waAccounts = null; // WhatsAppAccounts: the first account (wa) and the ones added for Outreach
 let verifier = null;
 let waInitError = null; // why WhatsApp support could not start, if it failed
 let lastSendAt = 0;
@@ -782,7 +842,12 @@ function initChatsAndOutreach(cipher) {
   outreach = new Outreach({
     store: new OutreachStore(store.db),
     state: { get: (k) => store.getState(k), set: (k, v) => store.setState(k, v) },
-    transport: { ready: () => wa.state === 'open', send: async (phone, text) => ({ id: await wa.send(phone, text) }) },
+    // Each campaign sends from its own WhatsApp account.
+    transport: {
+      ready: (accountId) => waAccounts.ready(accountId),
+      send: async (phone, text, accountId) => ({ id: await waAccounts.send(accountId, phone, text) }),
+      hasAccount: (accountId) => waAccounts.has(accountId),
+    },
     details: (c) => ({ business: c.leadId ? store.leadById(c.leadId)?.name || null : null }),
     hasReplied: (phone, since) => Boolean(since) && chatStore.hasIncomingSince(jidOfPhone(phone), since),
     // Category campaigns fill their queues from the saved leads.
@@ -793,6 +858,9 @@ function initChatsAndOutreach(cipher) {
   chats.on('incoming', (m) => outreach.onIncoming({ phone: m.phone, text: m.text }));
   chats.on('manual', ({ phone }) => phone && outreach.onManualMessage(phone));
   chats.on('status', (st) => outreach.onStatus(st.id, st.status));
+  // Replies and receipts on the added accounts (the first account's come through Chats).
+  waAccounts.on('incoming', (m) => m.accountId !== 'primary' && outreach.onIncoming({ phone: m.phone, text: m.text }));
+  waAccounts.on('status', (st) => st.accountId !== 'primary' && outreach.onStatus(st.id, st.status));
   outreach.on('change', (e) => send('outreach:state', { id: e?.id ?? null }));
   outreach.on('replied', (e) => send('outreach:event', { type: e.optOut ? 'opted_out' : 'replied', phone: e.phone }));
   outreach.on('sent', (e) => send('outreach:event', { type: 'sent', campaignId: e.campaignId, phone: e.phone, stage: e.stage, test: e.test }));
@@ -864,7 +932,7 @@ async function outreachSetCategory(raw, on, opts) {
       if (!plan.ok) return plan;
     }
   }
-  return outreach.setCategoryEnabled(cat.key, cat.name, Boolean(on), { acknowledge: Boolean(opts && opts.acknowledge === true) });
+  return outreach.setCategoryEnabled(cat.key, cat.name, Boolean(on), { acknowledge: Boolean(opts && opts.acknowledge === true), accountId: accountOf(opts) });
 }
 
 async function outreachStart(id, opts) {
@@ -875,7 +943,13 @@ async function outreachStart(id, opts) {
     const plan = requirePlan();
     if (!plan.ok) return plan;
   }
-  return outreach.start(id, { acknowledge: Boolean(opts && opts.acknowledge === true) });
+  return outreach.start(id, { acknowledge: Boolean(opts && opts.acknowledge === true), accountId: accountOf(opts) });
+}
+
+// The WhatsApp account chosen when starting (a known account id, or none: keep the campaign's).
+function accountOf(opts) {
+  const id = opts && typeof opts.accountId === 'string' ? opts.accountId : null;
+  return id && waAccounts?.has(id) ? id : undefined;
 }
 
 async function outreachResume(id) {
@@ -928,7 +1002,16 @@ function initWhatsApp() {
     return;
   }
   wa = new WhatsAppClient({ dir: path.join(app.getPath('userData'), 'whatsapp-session'), cipher, ...(fake ? { loadBaileys: fake.load } : {}) });
+  const { WhatsAppAccounts } = require('../whatsapp/accounts');
+  waAccounts = new WhatsAppAccounts({
+    primary: wa,
+    makeClient: (dir) => new WhatsAppClient({ dir, cipher, ...(fake ? { loadBaileys: fake.load } : {}) }),
+    state: { get: (k) => store.getState(k), set: (k, v) => store.setState(k, v) },
+    baseDir: path.join(app.getPath('userData'), 'whatsapp-accounts'),
+  });
+  waAccounts.on('change', (list) => send('whatsapp:accounts', list));
   initChatsAndOutreach(cipher);
+  if (activation.active) waAccounts.reconnectSaved().catch(() => {});
   verifier = new WhatsAppVerifier({
     client: wa,
     store,
@@ -1269,6 +1352,8 @@ function startPodcastSearch(rawQuery, rawCategory) {
   if (podcastRun) return { ok: false, error: 'A podcast search is already running.' };
   const plan = requirePlan();
   if (!plan.ok) return plan;
+  const allowance = requireLeadAllowance();
+  if (!allowance.ok) return allowance;
   const query = typeof rawQuery === 'string' ? rawQuery.replace(/\s+/g, ' ').trim() : '';
   if (query.length < 2) return { ok: false, error: 'Enter a podcast name, a topic or a podcast link.' };
   if (query.length > 300 || /[\u0000-\u001f\u007f]/.test(query)) return { ok: false, error: 'The search is too long or contains invalid characters.' };
@@ -1334,7 +1419,10 @@ function runPodcasts({ query, platforms = [], categoryId, seed = null, extraLink
     feedCache: podcastFeeds,
     limit: settings.limit,
     emit: (event, payload) => {
-      if (event === 'lead') return send('leads:added', payload);
+      if (event === 'lead') {
+        if (leadQuota) send('quota:state', leadQuota.status());
+        return send('leads:added', payload);
+      }
       if (event === 'item') {
         rememberLinks(Object.values(payload.links || {}), payload.website);
         const r = payload.result;
@@ -1483,6 +1571,7 @@ app.whenReady().then(() => {
     appLock = new AppLock({ store, cipher: keychainCipher() });
     dropUnusedPodcastKeys();
     activation = createActivation();
+    initLeadQuota();
     // The subscription system's request log, from earlier versions.
     require('node:fs').rmSync(path.join(app.getPath('userData'), 'licence.log'), { force: true });
     const last = store.getState('lastSearch');
@@ -1538,6 +1627,31 @@ app.whenReady().then(() => {
   handle('whatsapp:recheck', (phone) => waRecheck(phone));
   handle('whatsapp:send', (leadId, text) => waSend(leadId, text));
   handle('whatsapp:lastMessage', (leadId) => waLastMessage(leadId));
+  // WhatsApp accounts for Outreach (the first one is the account above)
+  handle('whatsapp:accounts', () => (waAccounts ? waAccounts.list() : []));
+  handle('whatsapp:addAccount', async () => {
+    if (!waAccounts) return unavailable();
+    const plan = requirePlan();
+    if (!plan.ok) return plan;
+    return waAccounts.add();
+  });
+  handle('whatsapp:accountConnect', async (id) => {
+    if (!waAccounts) return unavailable();
+    const plan = requirePlan();
+    if (!plan.ok) return plan;
+    return waAccounts.connect(String(id || ''));
+  });
+  handle('whatsapp:accountDisconnect', async (id) => (waAccounts ? waAccounts.disconnect(String(id || '')) : unavailable()));
+  handle('whatsapp:accountRename', (id, label) => (waAccounts ? waAccounts.rename(String(id || ''), String(label || '')) : unavailable()));
+  handle('whatsapp:accountRemove', async (id) => {
+    if (!waAccounts) return unavailable();
+    const busy = outreach?.store.campaigns().find((c) => ['running', 'paused'].includes(c.status) && outreach.load(c.id).config.accountId === id && !outreach.load(c.id).config.test);
+    if (busy) return { ok: false, error: `The campaign “${busy.name}” uses this account: stop it first.` };
+    const { response } = await dialog.showMessageBox(win, { type: 'warning', buttons: ['Remove', 'Cancel'], defaultId: 1, cancelId: 1, title: 'Remove WhatsApp account', message: 'Unlink this WhatsApp account from Lead Finder?', detail: 'Its session is deleted from this computer. Campaign history is kept.' });
+    if (response !== 0) return { ok: false, canceled: true };
+    return waAccounts.remove(String(id || ''));
+  });
+  handle('outreach:defaultInterval', (minutes) => (outreach ? (minutes == null ? { ok: true, interval: outreach.defaultInterval() } : outreach.setDefaultInterval(Number(minutes))) : unavailable()));
   // Chats (WhatsApp Web-style view)
   // Outreach campaign
   const withCampaign = (fn) => (id, ...args) => {
@@ -1732,6 +1846,7 @@ app.whenReady().then(() => {
   handle('podcast:setKeys', (platform, values) => setPodcastKeys(String(platform), values));
   handle('podcast:search', (q, category) => startPodcastSearch(q, category));
   handle('podcast:stop', () => stopPodcastSearch());
+  handle('quota:status', () => leadQuota?.status() || null);
   handle('podcast:retry', (ids) => retryPodcasts(ids));
   handle('podcast:leads', (raw) => {
     const f = raw && typeof raw === 'object' ? raw : {};
@@ -2019,6 +2134,7 @@ app.on('before-quit', (e) => {
     .then(() => phoneLink?.stop())
     .then(() => chrome.disconnect())
     .then(() => wa?.disconnect()) // closes the connection; the linked session is kept
+    .then(() => waAccounts?.disconnectAll())
     .finally(() => {
       try {
         store?.close();

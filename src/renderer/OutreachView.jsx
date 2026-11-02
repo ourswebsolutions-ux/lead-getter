@@ -144,7 +144,6 @@ function LeadPicker({ campaign, onClose, onAdded, notify }) {
         <header className="plans-head">
           <div>
             <h2>Add verified leads to {campaign.name}</h2>
-            <p className="muted">Only numbers confirmed on WhatsApp by the automatic check. People already messaged in any campaign are listed separately.</p>
           </div>
           <button type="button" className="icon-btn" aria-label="Close" onClick={onClose}>
             <Icon name="x" size={14} />
@@ -241,7 +240,6 @@ function LeadPicker({ campaign, onClose, onAdded, notify }) {
                 ))}
               </ul>
             )}
-            {!data.allowPrevious && <p className="muted small">To message someone again, turn on “Allow previously contacted contacts” in this campaign’s settings. Opt-outs are never messaged.</p>}
           </div>
         )}
         <footer className="composer-actions">
@@ -285,7 +283,7 @@ function Acknowledge({ onCancel, onConfirm }) {
 
 // One row per lead category with its ON/OFF switch; campaigns made before
 // category campaigns existed are listed below as "Other campaigns".
-function CategoryCampaigns({ overview, cats, selected, onSelect, onToggle, toggling, checked, setChecked, onBulk }) {
+function CategoryCampaigns({ overview, cats, selected, onSelect, onToggle, toggling, checked, setChecked, onBulk, accountName }) {
   const rows = [...(cats?.categories || []).map((c) => ({ key: String(c.id), name: c.name })), ...(cats?.uncategorized > 0 ? [{ key: 'none', name: 'Uncategorized' }] : [])];
   const byCategory = new Map(overview.campaigns.filter((c) => c.category).map((c) => [c.category, c]));
   const others = overview.campaigns.filter((c) => !c.category);
@@ -311,7 +309,6 @@ function CategoryCampaigns({ overview, cats, selected, onSelect, onToggle, toggl
       <div className="templates-head">
         <h3>Category campaigns</h3>
       </div>
-      <p className="muted small">Switch a category ON: its leads confirmed on WhatsApp that were never messaged are queued and messaged one by one. New leads join automatically.</p>
       {all.length > 0 && (
         <div className="bulk-bar">
           <label className="check">
@@ -342,7 +339,7 @@ function CategoryCampaigns({ overview, cats, selected, onSelect, onToggle, toggl
                   {st.unseenVerified} ready · {st.seen} seen{st.unseenNotVerified ? ` · ${st.unseenNotVerified} not on WhatsApp / not checked` : ''}
                 </span>
               </button>
-              {c && <span className={`chip ${c.test ? 'chip-soft' : 'chip-live'}`}>{c.test ? 'Test' : 'Live'}</span>}
+              {c && <span className={`chip ${c.test ? 'chip-soft' : 'chip-live'}`}>{c.test ? 'Test' : on ? accountName(c.accountId) : 'Live'}</span>}
               <span className={`chip st-campaign st-${display}`}>{DISPLAY[display]}</span>
               <button
                 type="button"
@@ -372,7 +369,7 @@ function CategoryCampaigns({ overview, cats, selected, onSelect, onToggle, toggl
                     {c.contacts} contact{c.contacts === 1 ? '' : 's'} · chosen by hand
                   </span>
                 </button>
-                <span className={`chip ${c.test ? 'chip-soft' : 'chip-live'}`}>{c.test ? 'Test' : 'Live'}</span>
+                <span className={`chip ${c.test ? 'chip-soft' : 'chip-live'}`}>{c.test ? 'Test' : c.status !== 'stopped' ? accountName(c.accountId) : 'Live'}</span>
                 <span className={`chip st-campaign st-${c.display}`}>{DISPLAY[c.display]}</span>
               </li>
             ))}
@@ -440,6 +437,140 @@ function History({ history }) {
   );
 }
 
+const ACCOUNT_STATE = {
+  open: ['Connected', 'ok'],
+  connecting: ['Connecting…', 'soft'],
+  reconnecting: ['Reconnecting…', 'soft'],
+  qr: ['Scan the QR code', 'warn'],
+  qr_expired: ['QR expired', 'warn'],
+  disconnected: ['Disconnected', 'soft'],
+  logged_out: ['Unlinked', 'bad'],
+  error: ['Error', 'bad'],
+};
+
+// The WhatsApp accounts campaigns send from, and the default interval for new campaigns.
+function WaAccounts({ accounts, usedBy, defaultInterval, notify }) {
+  const [busy, setBusy] = useState(null);
+  const [interval, setIntervalValue] = useState(defaultInterval);
+  useEffect(() => setIntervalValue(defaultInterval), [defaultInterval]);
+  const run = async (key, fn) => {
+    setBusy(key);
+    try {
+      const r = await fn();
+      if (r && !r.ok && !r.canceled && !planNeeded(r)) notify({ type: 'error', text: r.error });
+    } finally {
+      setBusy(null);
+    }
+  };
+  const saveInterval = async () => {
+    if (Number(interval) === defaultInterval) return;
+    const r = await api.outreachDefaultInterval(Number(interval));
+    if (!r.ok) {
+      notify({ type: 'error', text: r.error });
+      setIntervalValue(defaultInterval);
+    } else notify({ type: 'ok', text: `New campaigns: ${r.interval} minutes between contacts.` });
+  };
+  return (
+    <div className="panel wa-accounts" aria-label="WhatsApp accounts">
+      <div className="templates-head">
+        <h3>WhatsApp accounts</h3>
+        <label className="wa-default-interval">
+          <span className="muted small">Default interval</span>
+          <input type="number" min="1" max="1440" value={interval} onChange={(e) => setIntervalValue(e.target.value)} onBlur={saveInterval} onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()} aria-label="Default interval (minutes)" />
+          <span className="muted small">min</span>
+        </label>
+        <button type="button" className="btn btn-sm" disabled={busy === 'add'} onClick={() => run('add', () => api.waAddAccount())}>
+          + Add account
+        </button>
+      </div>
+      <ul className="wa-account-list">
+        {accounts.map((a) => {
+          const [label, tone] = ACCOUNT_STATE[a.state] || ACCOUNT_STATE.disconnected;
+          const user = usedBy(a.id);
+          return (
+            <li key={a.id} className="wa-account">
+              <span className={`wa-dot tone-${tone}`} aria-hidden="true" />
+              <span className="wa-account-main">
+                <strong>{a.label}</strong>
+                <span className="muted small">
+                  {a.number || label}
+                  {a.number && a.state !== 'open' ? ` · ${label}` : ''}
+                  {user ? ` · ${user}` : ''}
+                </span>
+                {a.error && <span className="wa-account-error">{a.error}</span>}
+              </span>
+              {a.state === 'qr' && a.qr && <img className="wa-qr" src={a.qr} alt={`QR code for ${a.label}`} />}
+              <span className="wa-account-actions">
+                {a.state === 'open' ? (
+                  <button type="button" className="btn btn-sm btn-ghost" disabled={busy === a.id} onClick={() => run(a.id, () => api.waAccountDisconnect(a.id))}>
+                    Disconnect
+                  </button>
+                ) : ['connecting', 'reconnecting', 'qr'].includes(a.state) ? null : (
+                  <button type="button" className="btn btn-sm" disabled={busy === a.id} onClick={() => run(a.id, () => api.waAccountConnect(a.id))}>
+                    {a.number ? 'Reconnect' : 'Connect'}
+                  </button>
+                )}
+                {!a.primary && (
+                  <button type="button" className="icon-btn danger" aria-label={`Remove ${a.label}`} title="Remove" disabled={busy === a.id} onClick={() => run(a.id, () => api.waAccountRemove(a.id))}>
+                    <Icon name="trash" />
+                  </button>
+                )}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+// Which WhatsApp account a campaign sends from: asked before it starts.
+function AccountPicker({ campaignName, accounts, usedBy, current, onCancel, onChoose, onAdd }) {
+  const connected = accounts.filter((a) => a.state === 'open');
+  const free = connected.filter((a) => !usedBy(a.id, true));
+  const [choice, setChoice] = useState(() => (free.find((a) => a.id === current) || free[0])?.id || null);
+  return (
+    <div className="modal-scrim" onMouseDown={(e) => e.target === e.currentTarget && onCancel()}>
+      <div className="composer account-picker" role="dialog" aria-modal="true" aria-label="Choose WhatsApp account">
+        <header className="composer-head">
+          <span className="composer-icon neutral"><Icon name="chat" /></span>
+          <div>
+            <strong>Send “{campaignName}” from</strong>
+          </div>
+          <button type="button" className="icon-btn" aria-label="Close" onClick={onCancel}><Icon name="x" /></button>
+        </header>
+        {!connected.length ? (
+          <div className="account-empty">
+            <p>Connect a WhatsApp account first.</p>
+            <button type="button" className="btn btn-primary" onClick={onAdd}>+ Connect an account</button>
+          </div>
+        ) : (
+          <div className="account-options" role="radiogroup" aria-label="WhatsApp account">
+            {connected.map((a) => {
+              const user = usedBy(a.id, true);
+              return (
+                <label key={a.id} className={`account-option ${choice === a.id ? 'on' : ''} ${user ? 'taken' : ''}`}>
+                  <input type="radio" name="wa-account" value={a.id} checked={choice === a.id} disabled={Boolean(user)} onChange={() => setChoice(a.id)} />
+                  <span>
+                    <strong>{a.label}</strong>
+                    <span className="muted small">{a.number}{user ? ` · ${user}` : ''}</span>
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+        )}
+        <div className="dl-pair-actions">
+          <button type="button" className="btn" onClick={onCancel}>Cancel</button>
+          <button type="button" className="btn btn-primary" disabled={!choice} onClick={() => onChoose(choice)}>
+            <Icon name="play" /> Start
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function OutreachView({ wa, notify, hidden }) {
   const [overview, setOverview] = useState(null);
   const [error, setError] = useState('');
@@ -457,6 +588,8 @@ export default function OutreachView({ wa, notify, hidden }) {
   const [toggling, setToggling] = useState(null);
   const [confirm, setConfirm] = useState(null); // { kind, ids }
   const [busy, setBusy] = useState(false);
+  const [accounts, setAccounts] = useState([]);
+  const [picker2, setPicker2] = useState(null); // { campaign, name, category?, current }: choosing the account
 
   const loadOverview = useCallback(async () => {
     const r = await api.outreachOverview();
@@ -477,6 +610,8 @@ export default function OutreachView({ wa, notify, hidden }) {
 
   useEffect(() => {
     loadOverview();
+    api.waAccounts().then((l) => setAccounts(l || []));
+    return api.onWaAccounts((l) => setAccounts(l || []));
   }, [loadOverview]);
 
   useEffect(() => {
@@ -542,11 +677,18 @@ export default function OutreachView({ wa, notify, hidden }) {
     return r.ok;
   }
 
-  async function act(fn) {
+  // The campaign using an account (live, running or paused), for labels and the picker.
+  const usedBy = (accountId, excludeSelected = false) => {
+    const c = (overview?.campaigns || []).find((x) => !x.test && ['running', 'paused'].includes(x.status) && (x.accountId || 'primary') === accountId && !(excludeSelected && picker2 && x.id === picker2.campaign));
+    return c ? `used by ${c.name}` : null;
+  };
+  const accountName = (id) => accounts.find((a) => a.id === (id || 'primary'))?.label || 'WhatsApp';
+
+  async function act(fn, accountId) {
     setBusy(true);
     try {
       const r = await fn();
-      if (!r.ok && r.needsAcknowledgement) setAck({ campaign: true });
+      if (!r.ok && r.needsAcknowledgement) setAck({ campaign: true, accountId });
       else if (!r.ok && !planNeeded(r)) notify({ type: 'error', text: r.error });
       await loadOverview();
       await loadSnap(selected);
@@ -556,9 +698,11 @@ export default function OutreachView({ wa, notify, hidden }) {
     }
   }
 
-  async function start(acknowledge = false) {
+  // Live campaigns ask which WhatsApp account to send from; test runs send nothing.
+  async function start(acknowledge = false, accountId = null) {
     if (dirty && !(await save())) return;
-    await act(() => api.outreachStart(snap.id, acknowledge));
+    if (live && !accountId) return setPicker2({ campaign: snap.id, name: snap.name, current: snap.config.accountId });
+    await act(() => api.outreachStart(snap.id, acknowledge, accountId || undefined), accountId);
   }
 
   async function selectCategory(key, campaign) {
@@ -571,12 +715,15 @@ export default function OutreachView({ wa, notify, hidden }) {
 
   // The category switch: ON fills the queue and starts sending; OFF stops
   // scheduling (a message already being sent finishes).
-  async function toggleCategory(key, on, acknowledge = false) {
+  async function toggleCategory(key, on, acknowledge = false, accountId = null) {
+    // The campaign as it is now (its mode may have just changed).
+    const existing = on && !accountId ? ((await api.outreachOverview())?.campaigns || overview.campaigns).find((c) => c.category === key) : null;
+    if (existing && !existing.test) return setPicker2({ campaign: existing.id, name: existing.name, category: key, current: existing.accountId });
     setToggling(key);
     try {
-      const r = await api.outreachSetCategory(key, on, acknowledge);
+      const r = await api.outreachSetCategory(key, on, acknowledge, accountId || undefined);
       if (!r.ok && r.needsAcknowledgement) {
-        setAck({ category: key });
+        setAck({ category: key, accountId });
         return;
       }
       if (!r.ok && !planNeeded(r)) notify({ type: 'error', text: r.error });
@@ -627,6 +774,7 @@ export default function OutreachView({ wa, notify, hidden }) {
   return (
     <section className="outreach" hidden={hidden} aria-label="Real-estate outreach">
       <div className="outreach-col">
+        <WaAccounts accounts={accounts} usedBy={(id) => usedBy(id)} defaultInterval={overview.defaultInterval} notify={notify} />
         <CategoryCampaigns
           overview={overview}
           cats={cats}
@@ -637,6 +785,7 @@ export default function OutreachView({ wa, notify, hidden }) {
           checked={checked}
           setChecked={setChecked}
           onBulk={(kind) => setConfirm({ kind, ids: [...checked] })}
+          accountName={accountName}
         />
 
         {snap && draft && (
@@ -654,10 +803,17 @@ export default function OutreachView({ wa, notify, hidden }) {
               <dl className="campaign-facts">
                 <div>
                   <dt>WhatsApp</dt>
-                  <dd>{connected ? `${wa.account?.name || 'Linked'} · +${wa.account?.id || ''}` : live ? 'Not connected' : 'Not needed in a test run'}</dd>
+                  <dd>
+                    {!live
+                      ? 'Not needed in a test run'
+                      : (() => {
+                          const a = accounts.find((x) => x.id === (snap.config.accountId || 'primary'));
+                          return a ? `${a.label}${a.number ? ` · ${a.number}` : ''}${a.state === 'open' ? '' : ' · not connected'}` : 'Chosen when it starts';
+                        })()}
+                  </dd>
                 </div>
                 <div>
-                  <dt>Today (all campaigns)</dt>
+                  <dt>Today (this account)</dt>
                   <dd>
                     {snap.today.recipients} / {snap.today.cap} contacts
                   </dd>
@@ -709,7 +865,6 @@ export default function OutreachView({ wa, notify, hidden }) {
                   </button>
                 )}
               </div>
-              {live && !snap.acknowledged && <p className="muted small">Live sending asks for your confirmation first.</p>}
             </div>
 
             <div className="panel campaign-settings">
@@ -727,19 +882,13 @@ export default function OutreachView({ wa, notify, hidden }) {
                     Live
                   </button>
                 </div>
-                <p className="muted small">{live ? 'Messages are sent from your WhatsApp.' : 'Runs the whole schedule without sending anything, so you can check the order and timing.'}</p>
                 <div className="settings-grid">
                   <label>
-                    <span className="field-label">Gap between contacts (minutes)</span>
-                    <span className="range-pair">
-                      <input type="number" min={snap.limits.intervalMin} max={snap.limits.intervalMax} value={draft.intervalMin} onChange={(e) => edit({ intervalMin: Number(e.target.value) })} aria-label="Shortest interval" />
-                      <span>to</span>
-                      <input type="number" min={snap.limits.intervalMin} max={snap.limits.intervalMax} value={draft.intervalMax} onChange={(e) => edit({ intervalMax: Number(e.target.value) })} aria-label="Longest interval" />
-                    </span>
-                    <span className="muted small">Each contact’s three messages go about a minute apart; the next contact starts a random 45–60 minutes after that.</span>
+                    <span className="field-label">Interval between contacts (minutes)</span>
+                    <input type="number" min={snap.limits.interval.min} max={snap.limits.interval.max} value={draft.interval} onChange={(e) => edit({ interval: Number(e.target.value) })} aria-label="Interval (minutes)" />
                   </label>
                   <label>
-                    <span className="field-label">Daily limit (contacts, all campaigns)</span>
+                    <span className="field-label">Daily limit (contacts)</span>
                     <input type="number" min={snap.limits.capMin} max={snap.limits.capMax} value={draft.dailyCap} onChange={(e) => edit({ dailyCap: Number(e.target.value) })} aria-label="Daily limit" />
                   </label>
                   <label>
@@ -773,7 +922,6 @@ export default function OutreachView({ wa, notify, hidden }) {
                   <label className="check">
                     <input type="checkbox" checked={Boolean(draft.allowPrevious)} onChange={(e) => edit({ allowPrevious: e.target.checked })} /> Allow previously contacted contacts
                   </label>
-                  {draft.allowPrevious && <p className="muted small">People messaged before in any campaign can be added to this one. Opt-outs are never messaged.</p>}
                 </div>
               </fieldset>
             </div>
@@ -794,7 +942,7 @@ export default function OutreachView({ wa, notify, hidden }) {
                 </label>
               </div>
               <p className="muted small">
-                Sent in this order, about a minute apart, to one contact at a time. Use <code>{'{name}'}</code> and <code>{'{business}'}</code> (the business name from Google Maps); the second box is used when that isn’t known.
+                <code>{'{name}'}</code> <code>{'{business}'}</code> · second box: used when unknown
               </p>
               <fieldset disabled={running}>
                 {draft.templates.map((t, i) => (
@@ -947,14 +1095,33 @@ export default function OutreachView({ wa, notify, hidden }) {
       </div>
 
       {picker && snap && <LeadPicker campaign={snap} onClose={() => setPicker(false)} onAdded={() => (loadOverview(), loadSnap(snap.id))} notify={notify} />}
+      {picker2 && (
+        <AccountPicker
+          campaignName={picker2.name}
+          accounts={accounts}
+          usedBy={usedBy}
+          current={picker2.current}
+          onCancel={() => setPicker2(null)}
+          onAdd={() => {
+            setPicker2(null);
+            api.waAddAccount().then((r) => !r.ok && !planNeeded(r) && notify({ type: 'error', text: r.error }));
+          }}
+          onChoose={(id) => {
+            const p = picker2;
+            setPicker2(null);
+            if (p.category) toggleCategory(p.category, true, false, id);
+            else start(false, id);
+          }}
+        />
+      )}
       {ack && (
         <Acknowledge
           onCancel={() => setAck(null)}
           onConfirm={() => {
             const pending = ack;
             setAck(null);
-            if (pending.category) toggleCategory(pending.category, true, true);
-            else start(true);
+            if (pending.category) toggleCategory(pending.category, true, true, pending.accountId);
+            else start(true, pending.accountId);
           }}
         />
       )}

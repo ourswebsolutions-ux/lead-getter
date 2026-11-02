@@ -130,6 +130,12 @@ A business keeps the leads it has already become. One skipped earlier only becau
 
 Searching (Google Maps, Facebook, LinkedIn and podcasts), CSV export, WhatsApp linking/checks/sending and live campaigns need an active plan. Without one, saved leads can still be viewed, filtered and deleted, and test campaigns still run.
 
+**Daily lead allowance:** Monthly finds up to **100 unique new leads a day**, counted together across Google Maps, Facebook, LinkedIn (jobs, companies and people with their contact details) and Podcasts. 6 Months and Lifetime have no daily limit. The allowances and the time zone are in `src/main/activation-config.json` (`limits`).
+- Only new leads count. Finding a business, person or podcast that is already saved, or updating it, uses nothing.
+- It is enforced in the database layer: the check and the save are one transaction, so parallel searches, switching tabs and restarts can't go past it. The used count is stored (`lead_credits`).
+- The day starts at midnight in **Asia/Karachi** time, by the plan clock, so changing the computer's clock does not reset it.
+- At the limit, every running search stops and no search can start. The app shows: *You have reached your daily limit of 100 leads. Upgrade your plan to find more leads.*, with **Upgrade Plan** opening the plan choice. After an upgrade, the new plan's allowance applies straight away.
+
 **Activating:**
 1. The customer clicks **Activate** at the top, chooses a plan and clicks **Activate**.
 2. The app creates a random 6-digit code and emails it, with the customer's **Activation ID**, plan and price, **only to the administrator** (`adminEmail`) over SMTP. The customer never receives an email.
@@ -476,12 +482,16 @@ The **Leads | Podcasts | Outreach** switch in the header changes the workspace; 
 
 **Outreach** sends a three-message introduction to leads whose numbers the automatic check confirmed on WhatsApp.
 
+- **WhatsApp accounts:** the panel at the top of Outreach lists every linked account with its own status (connected, QR code, disconnected, unlinked). **+ Add account** links another one by QR code (up to 10). Each can be disconnected, reconnected or removed on its own. The first account is the one linked at the top of the app; it also runs the automatic number checks. The same WhatsApp number can't be linked twice. Each added account's session is encrypted in its own folder (`whatsapp-accounts/<id>`).
+- **Choosing the account:** turning on a live campaign asks which connected account sends it. If none is connected, it asks you to connect one first. An account can be used by **one active campaign at a time**; accounts in use are shown with the campaign's name and can't be picked (the main process refuses it too).
+- **Parallel campaigns:** campaigns on different accounts run **independently and at the same time**, each with its own schedule, interval, daily limit and sending hours. One campaign pausing or waiting never holds up another.
+
 - **Category campaigns:** the Outreach tab lists your lead categories (Garments, Real Estate…), each with an **ON/OFF switch**.
   - Switching a category ON queues its eligible leads automatically: numbers confirmed on WhatsApp, never messaged by a campaign (**Unseen**), not opted out. They are messaged one by one, oldest first, with the usual three messages and timing.
   - While it's ON, new leads in that category join the queue by themselves once the WhatsApp check confirms their number. There's nothing to select by hand.
   - Switching OFF stops scheduling straight away. A message already being sent finishes and is recorded. Switching ON again continues where it left off, and nobody gets a message twice.
   - **Status per category:** **OFF**, **Running**, **Paused** (for example after WhatsApp refused messages) or **Completed** (everyone eligible has been messaged; it stays ON and picks up new leads).
-  - Several categories can be ON at once. They still message **one lead at a time**, with the 45–60 minute gap and the daily limit shared by all of them.
+  - Several categories can be ON at once, each on its own WhatsApp account, and they send in parallel.
 - **Seen / Unseen in the Leads tab:** a lead is **Seen** once a campaign message to its number was sent. Its delivery state (sent, delivered, read) is in the tooltip. Otherwise it's **Unseen**, including when a send failed.
   - The **Campaign** filter (All leads, Seen, Unseen) works with the existing category, website, WhatsApp and date filters. A **search** box finds leads by name, business name or phone number.
 - **Failed sends:** a send that definitely failed leaves the lead Unseen and is retried automatically: after 1 hour, then 6 hours, 3 attempts in all. After that, use **Retry**. A send that timed out or was interrupted is never retried automatically, because it may have arrived. The retry reuses the original send record, so it can't produce a duplicate.
@@ -492,7 +502,7 @@ The **Leads | Podcasts | Outreach** switch in the header changes the workspace; 
   - **Delete** removes the campaign, its queue and its settings.
   - **Reset** stops the campaign and clears its queue and progress but keeps its settings.
   - Neither touches your leads, your app settings, other campaigns or the contact history.
-  - **One message at a time:** several campaigns can be on, but they never send at once. The daily limit and the gap between contacts count across all campaigns.
+  - **Per account:** campaigns on different accounts send at the same time. The daily limit and the interval count per account (older campaigns that share one account still take turns on it).
 - **Choosing contacts** (*Add verified leads*):
   - **Filters:** one or several categories, the date the lead was collected (from/to, or a single day) and search. All filters work together.
   - **Verified only:** only numbers the automatic WhatsApp check confirmed (green dot). Unchecked, unavailable, failed or manually marked numbers can never be selected, and a number's format is never taken as proof.
@@ -513,11 +523,11 @@ The **Leads | Podcasts | Outreach** switch in the header changes the workspace; 
   - Message 3 names the business by default: *Kya aap {business} ke naam se real estate ka kaam karte hain…?* `{business}` is the name on Google Maps without extras such as *"- Best Agency in DHA"* or *"| Lahore"*. Without a usable name, the plain version is sent.
   - The name is the contact's own WhatsApp name, or one word from the business name, such as *Zahid Properties* → *Zahid*. It's used only when the word looks like a name (not *Real*, *Estate*, *Properties*, a city or a number). Otherwise the no-name version is used.
   - Names are never invented. You can edit or clear each contact's name before they're messaged. Previews show the exact text per contact.
-- **Schedule:** one contact at a time.
+- **Schedule:** one contact at a time per campaign.
   - A contact's three messages go **about a minute apart** (55–65 seconds).
-  - The **next contact** starts a random **45–60 minutes** (your range) after the previous contact's last message, whether they got all three, replied, opted out or a send failed.
-  - Example: contact A at 14:00, 14:01 and 14:02; contact B starts between 14:47 and 15:02.
-  - At most **10–15 unique contacts per day** (10 by default); all of a contact's messages count once.
+  - The **next contact** starts exactly the campaign's **interval** after the previous contact's last message, whether they got all three, replied, opted out or a send failed. The interval is **30 minutes by default**, any whole number of minutes from 1 to 1440, set per campaign. The **Default interval** next to the accounts sets it for new campaigns, and is saved.
+  - Example with 30 minutes: contact A at 14:00, 14:01 and 14:02; contact B at 14:32.
+  - At most **10–15 unique contacts per day per account** (10 by default); all of a contact's messages count once.
   - The contact in progress, the next send time and the daily count are kept in the database. After a restart or a pause, an interrupted contact is finished first, about a minute after their last message, and the gap before the next contact is never shortened.
 - **Sending hours and dates:** messages go out only within the campaign's sending hours, in the recipient's local time (from the country code; for example, Pakistan uses Pakistan time), and only between its start and end dates when they are set.
 - **Replies:** any reply stops the sequence for that contact and hands the conversation to you. Messages such as *stop*, *not interested*, *message na karein* or *میسج نہ کریں* opt the number out for good. You can also exclude or opt out any contact yourself.
@@ -754,7 +764,7 @@ If Chrome, or Lead Finder's tab, closes while a search is running, the search pa
 - Table `businesses` is keyed by the Google Maps place id, so a business is never stored twice. Every checked listing is recorded so it isn't revisited. Phone and address are kept **only for qualified leads**. A later search fills in missing fields but never blanks existing ones, and a failed re-check never demotes a verified lead. Each lead has `category_id` (pointing to `categories`) and `discovered_date`, the local calendar date. A lead keeps the category and date from when it was first found.
 - Phone columns: `phone` (E.164 when validated, else as found), `phone_raw` (original), `phone_status` (`valid` / `unverified` / `invalid`), `phone_country`. Table `whatsapp_checks` holds the per-number result you recorded, and `app_state` holds the last search, for resuming after a crash.
 - Table `categories` stores each category once, with a normalised key that ignores case and spacing.
-- Schema upgrades are versioned (`PRAGMA user_version`, currently 17) and each runs once in a transaction. Version 2 converts stored phone numbers with the address's country and keeps the originals. Upgrading from the first version keeps every existing lead, computes its date from its recorded discovery time, and leaves its category empty (*Uncategorized*), because no category was ever recorded for it.
+- Schema upgrades are versioned (`PRAGMA user_version`, currently 18) and each runs once in a transaction. Version 2 converts stored phone numbers with the address's country and keeps the originals. Upgrading from the first version keeps every existing lead, computes its date from its recorded discovery time, and leaves its category empty (*Uncategorized*), because no category was ever recorded for it.
 - Nothing is uploaded anywhere. Lead Finder doesn't read cookies or passwords.
 
 ## Google Maps terms: read this

@@ -109,7 +109,7 @@ test('opt-out detection in English, Roman Urdu and Urdu', () => {
   for (const t of ['Walaikum assalam', 'Ji haan, real estate', 'Which block in DHA?', 'Theek hoon, aap sunaein', '']) assert.ok(!isOptOut(t), t);
 });
 
-test('one contact at a time: three messages about a minute apart, then 45-60 minutes to the next contact', async () => {
+test('one contact at a time: three messages about a minute apart, then the interval (30 minutes by default) to the next contact', async () => {
   const h = setup({ contacts: 2 });
   h.clock.t = Date.parse('2026-10-21T09:00:00Z'); // 14:00 in Pakistan
   assert.equal(h.c.start().ok, false, 'live sending needs the acknowledgement');
@@ -126,17 +126,18 @@ test('one contact at a time: three messages about a minute apart, then 45-60 min
     'Kya aap Name0 Real Estate ke naam se real estate ka kaam karte hain, ya kisi aur business se related hain?',
   ]);
   assert.equal(h.c.contact(A).state, 'done');
-  // Contact B: 52.5 minutes (random within 45-60) after A's last message.
+  // Contact B: exactly the campaign's interval (30 minutes) after A's last message.
   const aDone = h.sent[2].at;
-  assert.equal(h.c.load().nextDueAt - aDone, 52.5 * MIN);
+  assert.equal(h.c.load().config.interval, 30);
+  assert.equal(h.c.load().nextDueAt - aDone, 30 * MIN);
   assert.equal(h.c.snapshot().waiting, 'interval');
-  await run(h, 51 * MIN); // until 52 minutes after A's last message
-  assert.equal(h.sent.length, 3, 'nothing to B before the gap');
+  await run(h, 29 * MIN); // until 29 minutes after A's last message
+  assert.equal(h.sent.length, 3, 'nothing to B before the interval');
   await run(h, 4 * MIN);
   assert.equal(h.sent.length, 6);
   assert.deepEqual(h.sent.slice(3).map((s) => s.phone), [B, B, B]);
   const bStart = (h.sent[3].at - aDone) / MIN;
-  assert.ok(bStart >= 52.5 && bStart < 53, `B started ${bStart} minutes after A finished`);
+  assert.ok(bStart >= 30 && bStart < 30.5, `B started ${bStart} minutes after A finished`);
   assert.deepEqual(h.sent.slice(3).map((s) => (s.at - h.sent[3].at) / 1000), [0, 60, 120]);
   await run(h, 2 * 60 * MIN);
   assert.equal(h.sent.length, 6, 'three messages each, nothing more');
@@ -144,17 +145,31 @@ test('one contact at a time: three messages about a minute apart, then 45-60 min
   assert.equal(h.c.load().pauseReason, 'finished');
 });
 
-test('gaps stay within their ranges: 55-65 s within a contact, 45-60 min between contacts', () => {
+test('gaps: 55-65 s within a contact; between contacts exactly the campaign’s interval (editable, any value)', () => {
   const h = setup();
-  const cfg = h.c.load().config;
-  for (const [r, stage, contact] of [[0, 55_000, 45 * MIN], [1, 65_000, 60 * MIN], [0.5, 60_000, 52.5 * MIN]]) {
+  for (const [r, stage] of [[0, 55_000], [1, 65_000], [0.5, 60_000]]) {
     h.o.random = () => r;
     assert.equal(h.o.stageGap(), stage);
-    assert.equal(h.o.contactGap(cfg), contact);
+    assert.equal(h.o.contactGap(h.c.load().config), 30 * MIN);
   }
-  h.c.configure({ intervalMin: 50, intervalMax: 55 });
-  h.o.random = () => 1;
-  assert.equal(h.o.contactGap(h.c.load().config), 55 * MIN);
+  for (const minutes of [1, 7, 45, 90, 1440]) {
+    assert.equal(h.c.configure({ interval: minutes }).ok, true);
+    assert.equal(h.o.contactGap(h.c.load().config), minutes * MIN);
+  }
+});
+
+test('the default interval for new campaigns is 30 minutes, can be changed and is saved', () => {
+  const h = setup();
+  assert.equal(h.o.defaultInterval(), 30);
+  assert.equal(h.o.setDefaultInterval(12).ok, true);
+  assert.equal(h.o.create('Next').ok, true);
+  const next = h.o.store.campaigns().find((c) => c.name === 'Next');
+  assert.equal(h.o.load(next.id).config.interval, 12);
+  assert.equal(h.outreach().defaultInterval(), 12, 'kept after a restart');
+  assert.match(h.o.setDefaultInterval(0).error, /between 1 and 1440/);
+  // A campaign saved by an earlier version (45-60 minutes) keeps its 45.
+  const old = h.o.store.createCampaign('Old', { intervalMin: 45, intervalMax: 60 }, START);
+  assert.equal(h.o.load(old).config.interval, 45);
 });
 
 test('missing names use the version without a name', async () => {
@@ -167,7 +182,7 @@ test('missing names use the version without a name', async () => {
   assert.deepEqual(h.c.preview(h.c.contact('+923001000001')).slice(0, 1), ['Assalam-o-Alaikum.']);
 });
 
-test('a day of sending: at most the daily cap, one contact at a time, 45+ minutes between contacts', async () => {
+test('a day of sending: at most the daily cap, one contact at a time, the interval between contacts', async () => {
   const h = setup({ contacts: 14 });
   h.c.configure({ dailyCap: 10, quietStart: 23, quietEnd: 6 });
   h.c.start({ acknowledge: true });
@@ -189,7 +204,7 @@ test('a day of sending: at most the daily cap, one contact at a time, 45+ minute
     assert.equal(r.list.length, 3);
     for (let i = 1; i < 3; i++) assert.ok(r.list[i].at - r.list[i - 1].at <= 90_000, 'about a minute apart');
   }
-  for (let i = 1; i < runs.length; i++) assert.ok(runs[i].list[0].at - runs[i - 1].list[2].at >= 45 * MIN, 'gap between contacts');
+  for (let i = 1; i < runs.length; i++) assert.ok(runs[i].list[0].at - runs[i - 1].list[2].at >= 30 * MIN, 'the interval between contacts');
   assert.equal(h.sent.length, new Set(h.sent.map((s) => `${s.phone}|${s.text}`)).size, 'no message sent twice');
   // A restarted app keeps the count.
   assert.ok(h.make().snapshot().today.recipients <= 10);
@@ -238,14 +253,14 @@ test('restarts and pauses continue the schedule without resetting it', async () 
   // full gap after A's last message.
   advance(h, 10 * MIN);
   app = h.make();
-  await run(h, 30 * MIN, app);
+  await run(h, 15 * MIN, app);
   assert.equal(h.sent.length, 3);
   app.stop();
   assert.equal(app.start().ok, true);
-  assert.ok(app.load().nextDueAt - aDone >= 45 * MIN, 'stop/start does not shorten the gap');
+  assert.ok(app.load().nextDueAt - aDone >= 30 * MIN, 'stop/start does not shorten the interval');
   await run(h, 30 * MIN, app);
   assert.deepEqual(h.sent.slice(3).map((s) => s.phone), [B, B, B]);
-  assert.ok(h.sent[3].at - aDone >= 45 * MIN);
+  assert.ok(h.sent[3].at - aDone >= 30 * MIN);
 });
 
 test('a crash during a send: never resent, and the next contact waits the full gap', async () => {
@@ -256,7 +271,7 @@ test('a crash during a send: never resent, and the next contact waits the full g
   await new Promise((r) => setImmediate(r));
   const st = h.c.load();
   assert.equal(st.current, null);
-  assert.equal(st.nextDueAt - h.clock.t, 52.5 * MIN, 'a full gap is reserved before the send');
+  assert.equal(st.nextDueAt - h.clock.t, 30 * MIN, 'a full interval is reserved before the send');
   advance(h, 5 * MIN);
   h.transport.send = async (phone, text) => (h.sent.push({ phone, text, at: h.clock.t }), { id: 'X' });
   const app = h.make();
@@ -290,11 +305,11 @@ test('a reply pauses that contact; the next contact waits the full gap; an opt-o
   const aLast = h.sent[0].at;
   h.o.onIncoming({ phone: A, text: 'Walaikum assalam, kaun?' });
   assert.equal(h.c.contact(A).state, 'replied');
-  await run(h, 50 * MIN);
+  await run(h, 25 * MIN);
   assert.equal(h.sent.length, 1, 'no more messages to A, and B waits');
   while (h.sent.length < 2) await run(h, 30_000);
   assert.equal(h.sent[1].phone, B);
-  assert.ok(h.sent[1].at - aLast >= 45 * MIN, 'B starts 45-60 minutes after A’s last message');
+  assert.ok(h.sent[1].at - aLast >= 30 * MIN, 'B starts the interval after A’s last message');
   // B opts out right after message 1: no more to B; C after the gap.
   h.o.onIncoming({ phone: B, text: 'Please do not message me again' });
   await run(h, 60 * MIN);
@@ -443,15 +458,16 @@ test('test mode sends nothing; switching to live forgets the simulation', async 
   assert.deepEqual(h.c.contacts().map((c) => c.state), ['queued', 'excluded'], 'the exclusion is kept');
 });
 
-test('settings are validated (45-60 minutes, 10-15 per day, quiet hours)', () => {
+test('settings are validated (interval 1-1440 minutes, 10-15 per day, quiet hours)', () => {
   const h = setup();
-  assert.match(h.c.configure({ intervalMin: 30 }).error, /between 45 and 60 minutes/);
-  assert.match(h.c.configure({ intervalMax: 90 }).error, /between 45 and 60 minutes/);
+  assert.match(h.c.configure({ interval: 0 }).error, /between 1 and 1440 minutes/);
+  assert.match(h.c.configure({ interval: 2000 }).error, /between 1 and 1440 minutes/);
+  assert.match(h.c.configure({ interval: 2.5 }).error, /between 1 and 1440 minutes/);
   assert.match(h.c.configure({ dailyCap: 20 }).error, /between 10 and 15/);
   assert.match(h.c.configure({ quietStart: 10, quietEnd: 8 }).error, /at least 4 sending hours/);
   assert.match(h.c.configure({ startDate: '2026-11-02', endDate: '2026-11-01' }).error, /end date is before the start date/);
   assert.match(h.c.configure({ startDate: '02/11/2026' }).error, /YYYY-MM-DD/);
-  assert.equal(h.c.configure({ intervalMin: 50, intervalMax: 55, dailyCap: 15 }).ok, true);
+  assert.equal(h.c.configure({ interval: 5, dailyCap: 15 }).ok, true);
   h.c.start({ acknowledge: true });
   assert.match(h.c.configure({ dailyCap: 12 }).error, /Pause the campaign/);
 });

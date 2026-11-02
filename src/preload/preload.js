@@ -38,6 +38,10 @@ contextBridge.exposeInMainWorld('leadFinder', {
   contactAdmin: (kind, text) => ipcRenderer.invoke('activation:contact', kind === 'call' ? 'call' : 'whatsapp', String(text ?? '')),
   onActivation: (callback) => subscribe('activation:status', callback),
   stopSearch: () => ipcRenderer.invoke('search:stop'),
+  // Today's lead allowance (Monthly: 100 unique new leads a day, all sources together).
+  quotaStatus: () => ipcRenderer.invoke('quota:status'),
+  onQuotaState: (callback) => subscribe('quota:state', callback),
+  onQuotaReached: (callback) => subscribe('quota:reached', callback),
   // Podcast Lead Finder: a search across the selected platforms; emails are found automatically.
   podcastSettings: () => ipcRenderer.invoke('podcast:settings'),
   setPodcastSettings: (settings) => ipcRenderer.invoke('podcast:setSettings', settings && typeof settings === 'object' ? settings : {}),
@@ -93,7 +97,8 @@ contextBridge.exposeInMainWorld('leadFinder', {
   // Real-estate outreach campaigns
   outreachOverview: () => ipcRenderer.invoke('outreach:overview'),
   outreachCategoryCampaign: (category) => ipcRenderer.invoke('outreach:categoryCampaign', String(category ?? '')),
-  outreachSetCategory: (category, on, acknowledge) => ipcRenderer.invoke('outreach:setCategory', String(category ?? ''), on === true, { acknowledge: acknowledge === true }),
+  // accountId: the WhatsApp account to send from (asked before a campaign starts).
+  outreachSetCategory: (category, on, acknowledge, accountId) => ipcRenderer.invoke('outreach:setCategory', String(category ?? ''), on === true, { acknowledge: acknowledge === true, accountId: typeof accountId === 'string' ? accountId : undefined }),
   outreachCreate: (name) => ipcRenderer.invoke('outreach:create', String(name ?? '')),
   outreachDelete: (ids) => ipcRenderer.invoke('outreach:delete', Array.isArray(ids) ? ids.map(Number) : []),
   outreachReset: (ids) => ipcRenderer.invoke('outreach:reset', Array.isArray(ids) ? ids.map(Number) : []),
@@ -102,7 +107,16 @@ contextBridge.exposeInMainWorld('leadFinder', {
   outreachHistory: () => ipcRenderer.invoke('outreach:history'),
   outreachConfigure: (id, cfg) => ipcRenderer.invoke('outreach:configure', Number(id), cfg && typeof cfg === 'object' ? JSON.parse(JSON.stringify(cfg)) : null),
   outreachAddLeads: (id, ids) => ipcRenderer.invoke('outreach:addLeads', Number(id), Array.isArray(ids) ? ids.map(Number) : []),
-  outreachStart: (id, acknowledge) => ipcRenderer.invoke('outreach:start', Number(id), { acknowledge: acknowledge === true }),
+  outreachStart: (id, acknowledge, accountId) => ipcRenderer.invoke('outreach:start', Number(id), { acknowledge: acknowledge === true, accountId: typeof accountId === 'string' ? accountId : undefined }),
+  outreachDefaultInterval: (minutes) => ipcRenderer.invoke('outreach:defaultInterval', minutes == null ? null : Number(minutes)),
+  // Several WhatsApp accounts for Outreach (the first is the one linked at the top).
+  waAccounts: () => ipcRenderer.invoke('whatsapp:accounts'),
+  onWaAccounts: (cb) => subscribe('whatsapp:accounts', cb),
+  waAddAccount: () => ipcRenderer.invoke('whatsapp:addAccount'),
+  waAccountConnect: (id) => ipcRenderer.invoke('whatsapp:accountConnect', String(id ?? '')),
+  waAccountDisconnect: (id) => ipcRenderer.invoke('whatsapp:accountDisconnect', String(id ?? '')),
+  waAccountRename: (id, label) => ipcRenderer.invoke('whatsapp:accountRename', String(id ?? ''), String(label ?? '')),
+  waAccountRemove: (id) => ipcRenderer.invoke('whatsapp:accountRemove', String(id ?? '')),
   outreachPause: (id) => ipcRenderer.invoke('outreach:pause', Number(id)),
   outreachResume: (id) => ipcRenderer.invoke('outreach:resume', Number(id)),
   outreachStop: (id) => ipcRenderer.invoke('outreach:stop', Number(id)),

@@ -24,13 +24,13 @@ function world({ file } = {}) {
     failNext: 0,
     hang: false,
     ready: () => true,
-    send: async (phone, text) => {
-      if (transport.hang) return new Promise((resolve) => (transport.release = () => resolve({ id: `WA${sent.push({ phone, text, at: clock.t })}` })));
+    send: async (phone, text, account) => {
+      if (transport.hang) return new Promise((resolve) => (transport.release = () => resolve({ id: `WA${sent.push({ phone, text, at: clock.t, account })}` })));
       if (transport.failNext > 0) {
         transport.failNext--;
         throw new Error('bad request');
       }
-      sent.push({ phone, text, at: clock.t });
+      sent.push({ phone, text, at: clock.t, account });
       return { id: `WA${sent.length}` };
     },
   };
@@ -100,7 +100,7 @@ test('switch ON: the category’s verified, Unseen leads are queued automaticall
   // Next lead after the gap; then Completed (still ON).
   await w.run(60 * MIN);
   assert.deepEqual(w.sent.slice(3).map((s) => s.phone), [B, B, B]);
-  assert.ok(w.sent[3].at - w.sent[2].at >= 45 * MIN);
+  assert.ok(w.sent[3].at - w.sent[2].at >= 30 * MIN, 'the campaign’s interval (30 minutes by default)');
   await w.run(2 * 60 * MIN);
   const summary = w.o.overview().campaigns.find((c) => c.id === id);
   assert.equal(summary.status, 'running');
@@ -234,24 +234,36 @@ test('failed sends keep the lead Unseen and are retried safely: after 1 h, then 
   assert.ok(!w.seenPhones().includes(B));
 });
 
-test('two categories ON: one lead at a time, 45+ minutes between leads across both', async () => {
+test('two categories on two WhatsApp accounts run in parallel, each with its own interval; one account cannot serve two', async () => {
   const w = world();
   const g = [w.lead('Ali Garments', '03001110001', w.cats.garments), w.lead('Bilal Garments', '03001110002', w.cats.garments)];
   const r = [w.lead('Rehman Restaurant', '03001110005', w.cats.restaurants), w.lead('Saad Restaurant', '03001110006', w.cats.restaurants)];
-  for (const [cat, name] of [[w.cats.garments, 'Garments'], [w.cats.restaurants, 'Restaurants']]) {
+  const ids = {};
+  for (const [cat, name, interval] of [[w.cats.garments, 'Garments', 30], [w.cats.restaurants, 'Restaurants', 45]]) {
     const id = w.o.categoryCampaign(String(cat.id), name);
     w.live(id);
-    assert.equal(w.on(cat, name).ok, true);
+    assert.equal(w.o.campaign(id).configure({ interval }).ok, true);
+    ids[name] = id;
   }
+  // Both on the same WhatsApp account: the second is refused.
+  assert.equal(w.o.setCategoryEnabled(String(w.cats.garments.id), 'Garments', true, { acknowledge: true, accountId: 'wa-1' }).ok, true);
+  const clash = w.o.setCategoryEnabled(String(w.cats.restaurants.id), 'Restaurants', true, { accountId: 'wa-1' });
+  assert.equal(clash.ok, false);
+  assert.match(clash.error, /already used by the campaign “Garments”/);
+  // On another account: both run, in parallel.
+  assert.equal(w.o.setCategoryEnabled(String(w.cats.restaurants.id), 'Restaurants', true, { accountId: 'wa-2' }).ok, true);
+  await w.run(3 * MIN);
+  assert.deepEqual(new Set(w.sent.map((s) => s.account)), new Set(['wa-1', 'wa-2']), 'both accounts sent at the same time');
+  assert.equal(w.sent.filter((s) => s.account === 'wa-1').length, 3);
+  assert.equal(w.sent.filter((s) => s.account === 'wa-2').length, 3);
   await w.run(5 * 60 * MIN);
-  const runs = [];
-  for (const s of w.sent) {
-    if (runs.length && runs.at(-1).phone === s.phone) runs.at(-1).list.push(s);
-    else runs.push({ phone: s.phone, list: [s] });
+  for (const [account, phones, interval] of [['wa-1', g, 30], ['wa-2', r, 45]]) {
+    const mine = w.sent.filter((s) => s.account === account);
+    assert.deepEqual(new Set(mine.map((s) => s.phone)), new Set(phones));
+    assert.equal(mine.length, 6);
+    const gap = (mine[3].at - mine[2].at) / MIN;
+    assert.ok(gap >= interval && gap < interval + 1, `${account}: ${gap} minutes between leads (interval ${interval})`);
   }
-  assert.deepEqual(runs.map((x) => x.list.length), [3, 3, 3, 3], 'each lead’s three messages together');
-  assert.deepEqual(new Set(runs.map((x) => x.phone)), new Set([...g, ...r]));
-  for (let i = 1; i < runs.length; i++) assert.ok(runs[i].list[0].at - runs[i - 1].list[2].at >= 45 * MIN, 'shared gap between leads');
 });
 
 test('uncategorized leads have their own switch; statuses OFF / Running / Paused / Completed', async () => {

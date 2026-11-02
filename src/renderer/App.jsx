@@ -564,6 +564,7 @@ export default function App({ onLock }) {
   const [searchQuery, setSearchQuery] = useState(''); // debounced
   const [plan, setPlan] = useState(null); // this computer's subscription (activation.js)
   const [plansOpen, setPlansOpen] = useState(null); // null | { notice }
+  const [quota, setQuota] = useState(null); // { limit, used, remaining, reached } of today
   const [changePin, setChangePin] = useState(false);
   // Leads | Chats | Outreach. Views stay mounted once opened, so switching
   // keeps each one's place (scroll, open chat, unsaved templates).
@@ -753,6 +754,13 @@ export default function App({ onLock }) {
     api.activationStatus().then(setPlan).catch(() => {});
     const offPlan = api.onActivation(setPlan);
     const onPlanNeeded = (e) => setPlansOpen({ notice: e.detail });
+    // Today's lead allowance (a limited plan): shown by the search, and the plans when it is used up.
+    api.quotaStatus().then((q) => q && setQuota(q)).catch(() => {});
+    const offQuota = api.onQuotaState(setQuota);
+    const offQuotaReached = api.onQuotaReached((q) => {
+      setQuota(q);
+      setPlansOpen({ notice: q.error, upgrade: true });
+    });
     window.addEventListener('lead-finder:plan-needed', onPlanNeeded);
     const offWa = api.onWhatsAppState(setWa);
     // Background WhatsApp checks: the leads with that number are applied
@@ -776,6 +784,8 @@ export default function App({ onLock }) {
       offWa();
       offPlan();
       window.removeEventListener('lead-finder:plan-needed', onPlanNeeded);
+      offQuota();
+      offQuotaReached();
       offWaLeads();
       offCallLeads();
       offLead();
@@ -1066,6 +1076,11 @@ export default function App({ onLock }) {
               </div>
             )}
             <div className="buttons">
+              {quota?.limit != null && (
+                <span className={`quota-chip ${quota.reached ? 'full' : quota.remaining <= 10 ? 'low' : ''}`} title="Leads found today with your plan (all sources together)" aria-label="Leads today">
+                  {quota.used} / {quota.limit} today
+                </span>
+              )}
               <button type="submit" className="btn btn-primary" disabled={!canStart}>
                 <Icon name="play" /> Start Search
               </button>
@@ -1074,6 +1089,14 @@ export default function App({ onLock }) {
               </button>
             </div>
           </form>
+          {quota?.reached && (
+            <div className="quota-banner" role="alert">
+              <span>You have reached your daily limit of {quota.limit} leads. Upgrade your plan to find more leads.</span>
+              <button type="button" className="btn btn-sm btn-primary" onClick={() => setPlansOpen({ notice: null, upgrade: true })}>
+                <Icon name="crown" size={14} /> Upgrade Plan
+              </button>
+            </div>
+          )}
           {linkedinOn && (
             <div className="li-options" role="group" aria-label="LinkedIn modes">
               <span className="muted">LinkedIn finds</span>
@@ -1538,7 +1561,7 @@ export default function App({ onLock }) {
 
       {active && <AgentCard status={status} />}
       {summary && !active && <Celebration summary={summary} onClose={() => setSummary(null)} />}
-      {plansOpen && <Activation status={plan} notice={plansOpen.notice} notify={notify} onClose={() => setPlansOpen(null)} />}
+      {plansOpen && <Activation status={plan} notice={plansOpen.notice} upgrade={plansOpen.upgrade} notify={notify} onClose={() => setPlansOpen(null)} />}
       {changePin && <ChangePin notify={notify} onClose={() => setChangePin(false)} />}
       {composeLead && <Composer lead={composeLead} connected={wa?.state === 'open'} notify={notify} onClose={() => setComposeLead(null)} />}
 

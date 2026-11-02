@@ -89,8 +89,8 @@ async function copy(text, label, notify) {
   } catch {}
 }
 
-export default function Activation({ status: st, notice, onClose, notify }) {
-  const [choosing, setChoosing] = useState(false); // renewing, or changing plan after a request
+export default function Activation({ status: st, notice, upgrade = false, onClose, notify }) {
+  const [choosing, setChoosing] = useState(upgrade); // renewing (or upgrading from the daily limit), or changing plan after a request
   const [plan, setPlan] = useState(st?.pending?.plan || st?.plan || 'monthly');
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(''); // '' | 'request' | 'verify'

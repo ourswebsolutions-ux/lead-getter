@@ -389,8 +389,10 @@ class OutreachStore {
 
   // Unique real (or, for test runs, simulated) recipients on `day`, across
   // all campaigns: the daily limit can't be multiplied by campaigns.
-  recipientsOn(day, test) {
-    return this.db.prepare("SELECT COUNT(DISTINCT phone) n FROM outreach_sends WHERE day = ? AND test = ? AND status <> 'failed'").get(day, test ? 1 : 0).n;
+  // campaignIds: only these campaigns (one WhatsApp account's), or all.
+  recipientsOn(day, test, campaignIds = null) {
+    const only = campaignIds ? ` AND campaign_id IN (${campaignIds.map(() => '?').join(',') || 'NULL'})` : '';
+    return this.db.prepare(`SELECT COUNT(DISTINCT phone) n FROM outreach_sends WHERE day = ? AND test = ? AND status <> 'failed'${only}`).get(day, test ? 1 : 0, ...(campaignIds || [])).n;
   }
 
   messagedOn(phone, day, test) {
@@ -399,8 +401,9 @@ class OutreachStore {
 
   // The latest campaign message (all campaigns): the gap to the next
   // contact is measured from it.
-  lastSendAt(test) {
-    return this.db.prepare("SELECT MAX(COALESCE(sent_at, created_at)) t FROM outreach_sends WHERE test = ? AND status <> 'failed'").get(test ? 1 : 0).t || null;
+  lastSendAt(test, campaignIds = null) {
+    const only = campaignIds ? ` AND campaign_id IN (${campaignIds.map(() => '?').join(',') || 'NULL'})` : '';
+    return this.db.prepare(`SELECT MAX(COALESCE(sent_at, created_at)) t FROM outreach_sends WHERE test = ? AND status <> 'failed'${only}`).get(test ? 1 : 0, ...(campaignIds || [])).t || null;
   }
 
   // Reservations left 'pending' by a crash or a forced quit: whether they
