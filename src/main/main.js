@@ -49,6 +49,7 @@ let win = null;
 let updater = null;
 let chats = null; // ChatService
 let outreach = null; // Outreach scheduler
+let audioLibrary = null; // voice files for outreach (whatsapp/audio-library.js)
 let store = null;
 let search = null; // { controller, promise }
 const chrome = new ChromeConnection({
@@ -837,8 +838,10 @@ function initChatsAndOutreach(cipher) {
   const { ChatService } = require('../whatsapp/chats');
   const { Outreach } = require('../whatsapp/outreach');
   const { jidOfPhone } = require('../whatsapp/messages');
+  const { AudioLibrary } = require('../whatsapp/audio-library');
   const chatStore = new ChatStore(store.db, cipher);
   chats = new ChatService({ client: wa, store: chatStore });
+  audioLibrary = new AudioLibrary({ dir: path.join(app.getPath('userData'), 'outreach-audio'), state: { get: (k) => store.getState(k), set: (k, v) => store.setState(k, v) } });
   outreach = new Outreach({
     store: new OutreachStore(store.db),
     state: { get: (k) => store.getState(k), set: (k, v) => store.setState(k, v) },
@@ -846,8 +849,11 @@ function initChatsAndOutreach(cipher) {
     transport: {
       ready: (accountId) => waAccounts.ready(accountId),
       send: async (phone, text, accountId) => ({ id: await waAccounts.send(accountId, phone, text) }),
+      // A voice file in its original format, read from the app's copy.
+      sendAudio: async (phone, voice, accountId) => ({ id: await waAccounts.sendAudio(accountId, phone, audioLibrary.read(voice.id)) }),
       hasAccount: (accountId) => waAccounts.has(accountId),
     },
+    audio: { info: (id) => audioLibrary.info(id) },
     details: (c) => ({ business: c.leadId ? store.leadById(c.leadId)?.name || null : null }),
     hasReplied: (phone, since) => Boolean(since) && chatStore.hasIncomingSince(jidOfPhone(phone), since),
     // Category campaigns fill their queues from the saved leads.
@@ -866,6 +872,23 @@ function initChatsAndOutreach(cipher) {
   outreach.on('sent', (e) => send('outreach:event', { type: 'sent', campaignId: e.campaignId, phone: e.phone, stage: e.stage, test: e.test }));
   outreach.on('failed', (e) => send('outreach:event', { type: 'failed', campaignId: e.campaignId, phone: e.phone, stage: e.stage, error: e.error, paused: e.paused }));
   outreach.init();
+  // Voice files that no campaign uses any more.
+  try {
+    audioLibrary.prune(outreach.store.campaigns().flatMap((c) => (outreach.load(c.id).config.voices || []).map((v) => v.id)));
+  } catch {}
+}
+
+// Adds chosen voice files: the ones accepted, and why the others weren't.
+function audioAdd(paths) {
+  const voices = [];
+  const errors = [];
+  for (const p of paths.slice(0, 10)) {
+    const r = audioLibrary.add(p);
+    if (r.ok) voices.push(r.voice);
+    else errors.push(r.error);
+  }
+  if (paths.length > 10) errors.push('Up to 10 files at a time.');
+  return { ok: voices.length > 0, voices, errors, error: errors.join(' ') };
 }
 
 const isPhone = (v) => typeof v === 'string' && /^\+\d{6,15}$/.test(v);
@@ -1684,13 +1707,50 @@ app.whenReady().then(() => {
   }
   handle('outreach:optOut', (phone) => (!outreach ? unavailable() : isPhone(phone) ? outreach.optOut(phone) : { ok: false, error: 'Invalid number.' }));
   handle('outreach:setName', withCampaign((id, phone, name) => (isPhone(phone) ? outreach.setName(id, phone, typeof name === 'string' ? name : null) : { ok: false, error: 'Invalid number.' })));
-  // Preview of (possibly unsaved) templates for one contact of the campaign.
-  handle('outreach:render', withCampaign((id, templates, phone) => {
+  // Preview of (possibly unsaved) templates, links included, for one contact of the campaign.
+  handle('outreach:render', withCampaign((id, templates, phone, extra) => {
     if (!Array.isArray(templates) || templates.length !== 3) return { ok: false };
-    const c = isPhone(phone) ? outreach.store.contact(id, phone) : null;
-    const clean = templates.map((t) => ({ text: String(t?.text ?? '').slice(0, 1000), fallback: String(t?.fallback ?? '').slice(0, 1000) }));
-    return { ok: true, values: c ? outreach.values(c) : { name: null, business: null }, messages: outreach.preview(c || { name: null }, clean) };
+    const { variationsOf } = require('../whatsapp/templates');
+    let c = isPhone(phone) ? outreach.store.contact(id, phone) : null;
+    // A category campaign before its queue fills: one of its leads as a sample.
+    let sample = null;
+    const cat = outreach.load(id).category;
+    if (!c && cat) {
+      const { isVerified } = require('../whatsapp/eligibility');
+      // The one the queue would message first (oldest).
+      const lead = store
+        .listLeads({ category: cat })
+        .filter((l) => l.phone && isVerified(l))
+        .sort((a, b) => String(a.discoveredAt || '').localeCompare(String(b.discoveredAt || '')) || a.id - b.id)[0];
+      if (lead) {
+        c = { phone: lead.phone, leadId: lead.id, name: outreach.nameFor(lead) };
+        sample = { name: lead.name, phone: lead.phone };
+      }
+    }
+    const clean = templates.map((t) => ({ variations: variationsOf(t).slice(0, 20).map((v) => ({ text: v.text.slice(0, 1000), fallback: v.fallback.slice(0, 1000) })) }));
+    const links = Array.isArray(extra?.links) ? extra.links.slice(0, 10).map((l) => ({ title: String(l?.title ?? ''), url: String(l?.url ?? '') })) : null;
+    const attachStep = [1, 2, 3].includes(Number(extra?.attachStep)) ? Number(extra.attachStep) : null;
+    return { ok: true, sample, values: c ? outreach.values(c) : { name: null, business: null }, messages: outreach.preview(c || { name: null }, clean, { links, attachStep }) };
   }));
+  // Voice files: chosen on this computer, checked and copied into the app.
+  handle('outreach:audioPick', async () => {
+    if (!outreach) return unavailable();
+    const { EXTENSIONS } = require('../whatsapp/audio-library');
+    // End-to-end tests only (never packaged): the files the dialog would return.
+    const testPick = !app.isPackaged && process.env.LEAD_FINDER_TEST_AUDIO_PICK;
+    if (testPick) return audioAdd(testPick.split(path.delimiter).filter(Boolean));
+    const r = await dialog.showOpenDialog(win, { title: 'Attach voice files', properties: ['openFile', 'multiSelections'], filters: [{ name: 'Audio (MP3, M4A, AAC, Ogg/Opus, AMR)', extensions: EXTENSIONS }, { name: 'All files', extensions: ['*'] }] });
+    if (r.canceled || !r.filePaths.length) return { ok: false, canceled: true };
+    return audioAdd(r.filePaths);
+  });
+  handle('outreach:audioData', (id) => {
+    if (!audioLibrary) return unavailable();
+    try {
+      return { ok: true, url: audioLibrary.dataUrl(String(id || '')) };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
   handle('search:interrupted', () => interrupted);
   handle('search:dismissInterrupted', () => {
     interrupted = null;

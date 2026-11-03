@@ -168,6 +168,45 @@ class LeadStore {
     this.migrateV16();
     this.migrateV17();
     this.migrateV18();
+    this.migrateV19();
+  }
+
+  // Version 19: an outreach message can have parts (its text, then voice
+  // files). Each part is reserved on its own, so none is ever sent twice;
+  // the variation used and what was sent are kept for the sent list.
+  migrateV19() {
+    if (this.db.prepare('PRAGMA user_version').get().user_version >= 19) return;
+    this.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE outreach_sends_v19 (
+          id            INTEGER PRIMARY KEY,
+          campaign_id   INTEGER,
+          campaign_name TEXT,
+          phone         TEXT NOT NULL,
+          stage         INTEGER NOT NULL,
+          part          INTEGER NOT NULL DEFAULT 0,
+          kind          TEXT NOT NULL DEFAULT 'text',
+          variant       INTEGER,
+          body          TEXT,
+          test          INTEGER NOT NULL DEFAULT 0,
+          day           TEXT NOT NULL,
+          status        TEXT NOT NULL CHECK (status IN ('pending', 'sent', 'delivered', 'read', 'failed', 'unknown')),
+          wa_id         TEXT,
+          error         TEXT,
+          created_at    INTEGER NOT NULL,
+          sent_at       INTEGER,
+          UNIQUE (campaign_id, phone, stage, part, test)
+        );
+        INSERT INTO outreach_sends_v19 (id, campaign_id, campaign_name, phone, stage, test, day, status, wa_id, error, created_at, sent_at)
+          SELECT id, campaign_id, campaign_name, phone, stage, test, day, status, wa_id, error, created_at, sent_at FROM outreach_sends;
+        DROP TABLE outreach_sends;
+        ALTER TABLE outreach_sends_v19 RENAME TO outreach_sends;
+        CREATE INDEX IF NOT EXISTS outreach_sends_day ON outreach_sends (day, test);
+        CREATE INDEX IF NOT EXISTS outreach_sends_wa ON outreach_sends (wa_id);
+        CREATE INDEX IF NOT EXISTS outreach_sends_phone ON outreach_sends (phone, test);
+        CREATE INDEX IF NOT EXISTS outreach_sends_campaign ON outreach_sends (campaign_id, stage, test);
+        PRAGMA user_version = 19;`);
+    });
   }
 
   // Version 18: the daily lead allowance. One row per unique new lead per day

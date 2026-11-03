@@ -261,6 +261,16 @@ class WhatsAppClient extends EventEmitter {
     if (!id) throw new Error('WhatsApp did not confirm the message');
     return id;
   }
+
+  // An audio file in its original format (ptt: as a voice note). Resolves with the message id.
+  async sendAudio(e164, { data, mime, ptt = false }) {
+    this.requireOpen();
+    const jid = `${String(e164).replace(/^\+/, '')}@s.whatsapp.net`;
+    const msg = await withTimeout(this.sock.sendMessage(jid, { audio: data, mimetype: mime, ptt: Boolean(ptt) }), 120_000, 'Sending timed out');
+    const id = msg?.key?.id;
+    if (!id) throw new Error('WhatsApp did not confirm the voice message');
+    return id;
+  }
 }
 
 // --- chat view -----------------------------------------------------------------

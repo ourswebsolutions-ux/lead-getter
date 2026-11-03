@@ -1,7 +1,8 @@
 'use strict';
 
-// Outreach message templates: three stages, placeholders, and a fallback text
-// for each stage when the name isn't known. Names are never invented: either
+// Outreach message templates: three stages, each with one or more
+// variations (rotated between contacts), placeholders, and a fallback text
+// for each variation when the name isn't known. Names are never invented: either
 // the contact's own WhatsApp name, or one word taken from the business name
 // on Google Maps, and only when that word looks like a name.
 
@@ -74,42 +75,117 @@ function pickName({ contactName, pushName, businessName } = {}) {
   return { name: null, source: null };
 }
 
-// {business_name} is another spelling of {business}.
+const MAX_VARIATIONS = 20;
+const PLACEHOLDER = /\{\s*([A-Za-z_][\w ]*?)\s*\}/g;
+
+// {business_name} and {business name} are other spellings of {business}.
+const canonical = (p) => (/^business[ _]name$/i.test(p) ? 'business' : p.toLowerCase());
 function usedPlaceholders(text) {
-  return [...String(text).matchAll(/\{(\w+)\}/g)].map((m) => (m[1] === 'business_name' ? 'business' : m[1]));
+  return [...String(text).matchAll(PLACEHOLDER)].map((m) => canonical(m[1]));
+}
+
+// A stage's variations: [{ text, fallback }] (a stage saved by an earlier
+// version is one { text, fallback }).
+function variationsOf(stage) {
+  const list = Array.isArray(stage?.variations) ? stage.variations : stage ? [stage] : [];
+  return list.map((v) => ({ text: String(v?.text ?? ''), fallback: String(v?.fallback ?? '') }));
+}
+
+// Templates in the current shape: three stages of { variations }.
+function normalizeTemplates(list) {
+  return (Array.isArray(list) ? list : []).map((t) => ({ variations: variationsOf(t).map((v) => ({ text: v.text.trim(), fallback: v.fallback.trim() })) }));
 }
 
 // Problems with a set of three templates (empty list = fine).
 function validateTemplates(list) {
   const errors = [];
   if (!Array.isArray(list) || list.length !== 3) return ['Three messages are needed.'];
-  list.forEach((t, i) => {
-    const n = `Message ${i + 1}`;
-    const text = String(t?.text ?? '').trim();
-    const fallback = String(t?.fallback ?? '').trim();
-    if (!text) errors.push(`${n} is empty.`);
-    if (text.length > 1000 || fallback.length > 1000) errors.push(`${n} is too long (1000 characters maximum).`);
-    for (const p of [...usedPlaceholders(text), ...usedPlaceholders(fallback)]) {
-      if (!PLACEHOLDERS.includes(p)) errors.push(`${n} uses an unknown placeholder {${p}}. Use {name} or {business} ({business_name}).`);
-    }
-    for (const p of PLACEHOLDERS) {
-      const what = p === 'name' ? 'a known name' : 'a business name';
-      if (usedPlaceholders(text).includes(p) && !fallback) errors.push(`${n} uses {${p}}, so it needs a version for contacts without ${what}.`);
-      if (usedPlaceholders(fallback).includes(p)) errors.push(`${n}: the second version is used when {${p}} is missing, so it can't use {${p}}.`);
-    }
+  list.forEach((stage, i) => {
+    const vars = variationsOf(stage);
+    if (!vars.length) return errors.push(`Message ${i + 1} needs at least one version.`);
+    if (vars.length > MAX_VARIATIONS) errors.push(`Message ${i + 1} has more than ${MAX_VARIATIONS} variations.`);
+    vars.forEach((t, j) => validateOne(t, vars.length > 1 ? `Message ${i + 1}, variation ${j + 1}` : `Message ${i + 1}`, errors));
   });
   return errors;
+}
+
+function validateOne(t, n, errors) {
+  const text = String(t?.text ?? '').trim();
+  const fallback = String(t?.fallback ?? '').trim();
+  if (!text) errors.push(`${n} is empty.`);
+  if (text.length > 1000 || fallback.length > 1000) errors.push(`${n} is too long (1000 characters maximum).`);
+  for (const p of [...usedPlaceholders(text), ...usedPlaceholders(fallback)]) {
+    if (!PLACEHOLDERS.includes(p)) errors.push(`${n} uses an unknown placeholder {${p}}. Use {name} or {business name}.`);
+  }
+  for (const p of PLACEHOLDERS) {
+    const what = p === 'name' ? 'a known name' : 'a business name';
+    if (usedPlaceholders(text).includes(p) && !fallback) errors.push(`${n} uses {${p}}, so it needs a version for contacts without ${what}.`);
+    if (usedPlaceholders(fallback).includes(p)) errors.push(`${n}: the second version is used when {${p}} is missing, so it can't use {${p}}.`);
+  }
 }
 
 // The text to send for one stage. When a placeholder has no value, the
 // fallback is used (or the text with that part left out if it has none).
 function render(template, { name = null, business = null } = {}) {
-  const values = { name, business, business_name: business };
+  const values = { name, business };
   const text = String(template.text || '');
   const missing = usedPlaceholders(text).some((p) => !values[p]);
   const chosen = missing ? String(template.fallback || '').trim() || null : text;
-  if (chosen === null) return text.replace(/\s*\{(\w+)\}/g, (_, p) => (values[p] ? ` ${values[p]}` : '')).replace(/\s+([.,!?])/g, '$1').trim();
-  return chosen.replace(/\{(\w+)\}/g, (_, p) => values[p] || '').replace(/\s+/g, ' ').trim();
+  const value = (p) => values[canonical(p)] || '';
+  // Line breaks and spacing are kept as written (only spaces around a
+  // missing value are tidied).
+  if (chosen === null) return tidy(text.replace(/[ \t]*\{\s*([A-Za-z_][\w ]*?)\s*\}/g, (_, p) => (value(p) ? ` ${value(p)}` : '')).replace(/[ \t]+([.,!?])/g, '$1'));
+  return tidy(chosen.replace(PLACEHOLDER, (_, p) => value(p)));
+}
+
+function tidy(s) {
+  return s
+    .split('\n')
+    .map((l) => l.replace(/[ \t]{2,}/g, ' ').trimEnd())
+    .join('\n')
+    .trim();
+}
+
+// --- links ---------------------------------------------------------------------
+
+const MAX_LINKS = 10;
+
+// A web address as typed ("example.com/demo" or "https://..."), or null.
+function cleanUrl(raw) {
+  let s = String(raw || '').trim();
+  if (!s || /\s/.test(s)) return null;
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(s)) s = `https://${s}`;
+  let u;
+  try {
+    u = new URL(s);
+  } catch {
+    return null;
+  }
+  if (!['http:', 'https:'].includes(u.protocol) || !/^[^.]+(\.[^.]+)+$/.test(u.hostname) || /\.$/.test(u.hostname) || u.username || u.password) return null;
+  return u.href.length > 500 ? null : u.href;
+}
+
+// Links: [{ title, url }] -> { links, errors }.
+function validateLinks(list) {
+  const errors = [];
+  const links = [];
+  if (list != null && !Array.isArray(list)) return { links, errors: ['Invalid links.'] };
+  (list || []).forEach((l, i) => {
+    const title = String(l?.title ?? '').replace(/\s+/g, ' ').trim();
+    const url = cleanUrl(l?.url);
+    if (!url) errors.push(`Link ${i + 1} is not a valid web address (for example https://example.com).`);
+    else if (title.length > 60) errors.push(`Link ${i + 1}: the title is too long (60 characters maximum).`);
+    else links.push({ title, url });
+  });
+  if ((list || []).length > MAX_LINKS) errors.push(`Up to ${MAX_LINKS} links.`);
+  return { links, errors };
+}
+
+// The message with its links below it, one per line, under their titles.
+function withLinks(text, links = []) {
+  if (!links.length) return text;
+  const block = links.map((l) => (l.title ? `*${l.title}*\n${l.url}` : l.url)).join('\n\n');
+  return text ? `${text}\n\n${block}` : block;
 }
 
 // Words in an incoming message that mean "don't contact me" (English,
@@ -120,4 +196,4 @@ function isOptOut(text) {
   return OPT_OUT.test(String(text || ''));
 }
 
-module.exports = { DEFAULT_TEMPLATES, extractName, cleanBusiness, pickName, render, validateTemplates, usedPlaceholders, isOptOut };
+module.exports = { DEFAULT_TEMPLATES, MAX_VARIATIONS, MAX_LINKS, extractName, cleanBusiness, pickName, render, validateTemplates, normalizeTemplates, variationsOf, usedPlaceholders, isOptOut, cleanUrl, validateLinks, withLinks };

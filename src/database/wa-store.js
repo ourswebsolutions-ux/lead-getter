@@ -345,17 +345,18 @@ class OutreachStore {
   // sent. Returns the send id, or null when that stage was already sent or
   // might have been (pending / unknown / sent...), so it can never be sent
   // twice. Only a definite failure is reused for a retry.
-  reserve({ campaignId, campaignName = null, phone, stage, test, day, now = Date.now() }) {
+  // part: 0 = the stage's text, 1.. = its voice files (each reserved on its own).
+  reserve({ campaignId, campaignName = null, phone, stage, part = 0, kind = 'text', variant = null, body = null, test, day, now = Date.now() }) {
     return this.tx(() => {
-      const failed = this.db.prepare("SELECT id FROM outreach_sends WHERE campaign_id = ? AND phone = ? AND stage = ? AND test = ? AND status = 'failed'").get(campaignId, phone, stage, test ? 1 : 0);
+      const failed = this.db.prepare("SELECT id FROM outreach_sends WHERE campaign_id = ? AND phone = ? AND stage = ? AND part = ? AND test = ? AND status = 'failed'").get(campaignId, phone, stage, part, test ? 1 : 0);
       if (failed) {
-        this.db.prepare("UPDATE outreach_sends SET status = 'pending', error = NULL, wa_id = NULL, day = ?, created_at = ?, sent_at = NULL WHERE id = ?").run(day, now, failed.id);
+        this.db.prepare("UPDATE outreach_sends SET status = 'pending', error = NULL, wa_id = NULL, day = ?, created_at = ?, sent_at = NULL, variant = ?, body = ? WHERE id = ?").run(day, now, variant, body, failed.id);
         return failed.id;
       }
       try {
         const r = this.db
-          .prepare("INSERT INTO outreach_sends (campaign_id, campaign_name, phone, stage, test, day, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)")
-          .run(campaignId, campaignName, phone, stage, test ? 1 : 0, day, now);
+          .prepare("INSERT INTO outreach_sends (campaign_id, campaign_name, phone, stage, part, kind, variant, body, test, day, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)")
+          .run(campaignId, campaignName, phone, stage, part, kind, variant, body, test ? 1 : 0, day, now);
         return Number(r.lastInsertRowid);
       } catch (err) {
         if (/UNIQUE/.test(err.message)) return null;
@@ -395,8 +396,22 @@ class OutreachStore {
     return this.db.prepare(`SELECT COUNT(DISTINCT phone) n FROM outreach_sends WHERE day = ? AND test = ? AND status <> 'failed'${only}`).get(day, test ? 1 : 0, ...(campaignIds || [])).n;
   }
 
-  messagedOn(phone, day, test) {
-    return Boolean(this.db.prepare("SELECT 1 FROM outreach_sends WHERE phone = ? AND day = ? AND test = ? AND status <> 'failed'").get(phone, day, test ? 1 : 0));
+  messagedOn(phone, day, test, campaignIds = null) {
+    const only = campaignIds ? ` AND campaign_id IN (${campaignIds.map(() => '?').join(',') || 'NULL'})` : '';
+    return Boolean(this.db.prepare(`SELECT 1 FROM outreach_sends WHERE phone = ? AND day = ? AND test = ? AND status <> 'failed'${only}`).get(phone, day, test ? 1 : 0, ...(campaignIds || [])));
+  }
+
+  // How often each variation of a stage was used by a campaign, and the
+  // last one used: the next contact gets the least used one.
+  variantUse(campaignId, stage, test) {
+    const counts = new Map(
+      this.db
+        .prepare("SELECT variant, COUNT(*) n FROM outreach_sends WHERE campaign_id = ? AND stage = ? AND part = 0 AND test = ? AND variant IS NOT NULL AND status <> 'failed' GROUP BY variant")
+        .all(campaignId, stage, test ? 1 : 0)
+        .map((r) => [r.variant, r.n]),
+    );
+    const last = this.db.prepare("SELECT variant FROM outreach_sends WHERE campaign_id = ? AND stage = ? AND part = 0 AND test = ? AND variant IS NOT NULL ORDER BY created_at DESC, id DESC LIMIT 1").get(campaignId, stage, test ? 1 : 0);
+    return { counts, last: last ? last.variant : null };
   }
 
   // The latest campaign message (all campaigns): the gap to the next
@@ -426,7 +441,7 @@ class OutreachStore {
          WHERE s.campaign_id = ? AND s.test = ? ORDER BY s.created_at DESC, s.id DESC LIMIT ?`,
       )
       .all(campaignId, test ? 1 : 0, limit)
-      .map((r) => ({ id: r.id, phone: r.phone, stage: r.stage, day: r.day, status: r.status, waId: r.wa_id, error: r.error, createdAt: r.created_at, sentAt: r.sent_at, name: r.name, leadId: r.lead_id }));
+      .map((r) => ({ id: r.id, phone: r.phone, stage: r.stage, part: r.part, kind: r.kind, variant: r.variant, body: r.body, day: r.day, status: r.status, waId: r.wa_id, error: r.error, createdAt: r.created_at, sentAt: r.sent_at, name: r.name, leadId: r.lead_id }));
   }
 
   // Leaving test mode: forget this campaign's simulated progress (real sends

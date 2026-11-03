@@ -246,8 +246,8 @@ test('one live campaign per WhatsApp account; campaigns on different accounts ea
   assert.equal(clash.ok, false);
   assert.equal(clash.accountInUse, true);
   assert.equal(w.o.campaign(c2).start({ accountId: 'wa-2' }).ok, true);
-  // Ten recipients already messaged today from wa-2 (its daily limit): wa-1 is not affected.
-  for (let i = 0; i < 10; i++) {
+  // Fifteen recipients already messaged today by Garments (its daily limit, the default): Real Estate is not affected.
+  for (let i = 0; i < 15; i++) {
     const sid = w.o.store.reserve({ campaignId: c2, phone: `+9230099900${String(i).padStart(2, '0')}`, stage: 1, test: false, day: '2026-10-21', now: START - 5 * 60 * MIN });
     w.o.store.markSent(sid, `X${i}`, START - 5 * 60 * MIN);
   }
@@ -321,7 +321,7 @@ test('upgrade from version 4 keeps the existing campaign, its contacts, history 
   db.setState('outreach', { status: 'paused', pauseReason: 'user', nextDueAt: 5000, acknowledgedAt: 123, config: { dailyCap: 14, test: false } });
   db.close();
   const up = new LeadStore(file);
-  assert.equal(up.db.prepare('PRAGMA user_version').get().user_version, 18);
+  assert.equal(up.db.prepare('PRAGMA user_version').get().user_version, 19);
   const store = new OutreachStore(up.db);
   const [c] = store.campaigns();
   assert.equal(c.name, 'Campaign 1');

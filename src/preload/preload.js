@@ -125,7 +125,16 @@ contextBridge.exposeInMainWorld('leadFinder', {
   outreachRemoveContact: (id, phone) => ipcRenderer.invoke('outreach:removeContact', Number(id), String(phone ?? '')),
   outreachOptOut: (phone) => ipcRenderer.invoke('outreach:optOut', String(phone ?? '')),
   outreachSetName: (id, phone, name) => ipcRenderer.invoke('outreach:setName', Number(id), String(phone ?? ''), name == null ? null : String(name)),
-  outreachRender: (id, templates, phone) => ipcRenderer.invoke('outreach:render', Number(id), Array.isArray(templates) ? templates.map((t) => ({ text: String(t?.text ?? ''), fallback: String(t?.fallback ?? '') })) : [], String(phone ?? '')),
+  outreachRender: (id, templates, phone, extra) =>
+    ipcRenderer.invoke(
+      'outreach:render',
+      Number(id),
+      Array.isArray(templates) ? templates.map((t) => ({ variations: (Array.isArray(t?.variations) ? t.variations : [t]).map((v) => ({ text: String(v?.text ?? ''), fallback: String(v?.fallback ?? '') })) })) : [],
+      String(phone ?? ''),
+      extra && typeof extra === 'object' ? JSON.parse(JSON.stringify({ links: extra.links, attachStep: extra.attachStep })) : null,
+    ),
+  outreachAudioPick: () => ipcRenderer.invoke('outreach:audioPick'),
+  outreachAudioData: (id) => ipcRenderer.invoke('outreach:audioData', String(id ?? '')),
   onOutreach: (cb) => subscribe('outreach:state', cb),
   onOutreachEvent: (cb) => subscribe('outreach:event', cb),
   // Automatic updates

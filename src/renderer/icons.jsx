@@ -33,6 +33,11 @@ const paths = {
   grid: <><circle cx="4" cy="4" r="1" /><circle cx="8" cy="4" r="1" /><circle cx="12" cy="4" r="1" /><circle cx="4" cy="8" r="1" /><circle cx="8" cy="8" r="1" /><circle cx="12" cy="8" r="1" /><circle cx="4" cy="12" r="1" /><circle cx="8" cy="12" r="1" /><circle cx="12" cy="12" r="1" /></>,
   laptop: <><rect x="3" y="3.5" width="10" height="7" rx="1" /><path d="M1.5 12.5h13" /></>,
   'call-in': <><path d="M12 4 4 12M9.5 12H4V6.5" /></>,
+  link: <><path d="M6.8 9.2a2.6 2.6 0 0 0 3.7 0l2.2-2.2a2.6 2.6 0 0 0-3.7-3.7l-.9.9" /><path d="M9.2 6.8a2.6 2.6 0 0 0-3.7 0L3.3 9a2.6 2.6 0 0 0 3.7 3.7l.9-.9" /></>,
+  audio: <><path d="M6 11.5V3.5l7-1.5v8" /><circle cx="4.3" cy="11.6" r="1.7" /><circle cx="11.3" cy="10" r="1.7" /></>,
+  plus: <path d="M8 3v10M3 8h10" />,
+  eye: <><path d="M1.8 8S4 3.8 8 3.8 14.2 8 14.2 8 12 12.2 8 12.2 1.8 8 1.8 8Z" /><circle cx="8" cy="8" r="1.9" /></>,
+  message: <><path d="M2.5 4c0-.6.4-1 1-1h9c.6 0 1 .4 1 1v6c0 .6-.4 1-1 1H6.5l-3 2.5V11h0c-.6 0-1-.4-1-1Z" /></>,
   users: <><circle cx="6" cy="5.5" r="2.2" /><path d="M2 13c.4-2.2 2-3.5 4-3.5s3.6 1.3 4 3.5" /><path d="M10.5 3.6a2.2 2.2 0 0 1 0 4M12 9.8c1 .5 1.8 1.6 2 3.2" /></>,
 };
 

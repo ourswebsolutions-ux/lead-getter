@@ -179,7 +179,7 @@ test('missing names use the version without a name', async () => {
   await h.o.tick();
   assert.equal(h.sent[0].phone, '+923001000001');
   assert.equal(h.sent[0].text, 'Assalam-o-Alaikum.');
-  assert.deepEqual(h.c.preview(h.c.contact('+923001000001')).slice(0, 1), ['Assalam-o-Alaikum.']);
+  assert.deepEqual(h.c.preview(h.c.contact('+923001000001'))[0], ['Assalam-o-Alaikum.']);
 });
 
 test('a day of sending: at most the daily cap, one contact at a time, the interval between contacts', async () => {
@@ -458,12 +458,15 @@ test('test mode sends nothing; switching to live forgets the simulation', async 
   assert.deepEqual(h.c.contacts().map((c) => c.state), ['queued', 'excluded'], 'the exclusion is kept');
 });
 
-test('settings are validated (interval 1-1440 minutes, 10-15 per day, quiet hours)', () => {
+test('settings are validated (interval 1-1440 minutes, any daily limit from 1, quiet hours)', () => {
   const h = setup();
   assert.match(h.c.configure({ interval: 0 }).error, /between 1 and 1440 minutes/);
   assert.match(h.c.configure({ interval: 2000 }).error, /between 1 and 1440 minutes/);
   assert.match(h.c.configure({ interval: 2.5 }).error, /between 1 and 1440 minutes/);
-  assert.match(h.c.configure({ dailyCap: 20 }).error, /between 10 and 15/);
+  assert.match(h.c.configure({ dailyCap: 0 }).error, /at least 1/);
+  assert.match(h.c.configure({ dailyCap: 2.5 }).error, /whole number/);
+  assert.equal(h.c.configure({ dailyCap: 500 }).ok, true, 'no fixed maximum');
+  assert.equal(h.c.snapshot().config.dailyCap, 500);
   assert.match(h.c.configure({ quietStart: 10, quietEnd: 8 }).error, /at least 4 sending hours/);
   assert.match(h.c.configure({ startDate: '2026-11-02', endDate: '2026-11-01' }).error, /end date is before the start date/);
   assert.match(h.c.configure({ startDate: '02/11/2026' }).error, /YYYY-MM-DD/);

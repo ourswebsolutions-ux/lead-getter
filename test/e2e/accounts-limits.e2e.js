@@ -71,18 +71,28 @@ test('two WhatsApp accounts: Real Estate and Garments campaigns in parallel, own
   // --- The first account, then a second one: each with its own state.
   await win.evaluate(() => window.leadFinder.whatsappConnect());
   await row(0).filter({ hasText: '+923000000001' }).waitFor({ timeout: 20_000 });
-  assert.match(await row(0).innerText(), /Disconnect/);
-  await accounts.getByRole('button', { name: '+ Add account' }).click();
-  await row(1).filter({ hasText: '+923000000002' }).waitFor({ timeout: 20_000 });
+  await accounts.getByRole('button', { name: 'Add account' }).click();
+  // The new account's details open at once (its QR code, then its number).
+  const details = win.getByRole('dialog', { name: /WhatsApp account/ });
+  await details.getByText('+923000000002').waitFor({ timeout: 20_000 });
+  await details.getByRole('button', { name: 'Close' }).click();
+  await row(1).filter({ hasText: '+923000000002' }).waitFor();
   assert.equal(await accounts.locator('.wa-dot.tone-ok').count(), 2);
 
-  // Disconnect / reconnect one: the other stays connected.
-  await row(1).getByRole('button', { name: 'Disconnect' }).click();
-  await row(1).getByRole('button', { name: 'Reconnect' }).waitFor();
-  assert.match(await row(0).innerText(), /Disconnect/, 'the first account is still connected');
-  await row(1).getByRole('button', { name: 'Reconnect' }).click();
-  await row(1).getByRole('button', { name: 'Disconnect' }).waitFor({ timeout: 20_000 });
-  assert.match(await row(1).innerText(), /\+923000000002/, 'the same number after reconnecting');
+  // Disconnect / reconnect one (from its details): the other stays connected.
+  const open = async (n) => {
+    await row(n).getByRole('button', { name: /details$/ }).click();
+    await details.waitFor();
+  };
+  await open(1);
+  await details.getByRole('button', { name: 'Disconnect' }).click();
+  await details.getByRole('button', { name: 'Reconnect' }).waitFor();
+  assert.match(await details.innerText(), /Disconnected/);
+  assert.equal(await accounts.locator('.wa-dot.tone-ok').count(), 1, 'the first account is still connected');
+  await details.getByRole('button', { name: 'Reconnect' }).click();
+  await details.getByRole('button', { name: 'Disconnect' }).waitFor({ timeout: 20_000 });
+  assert.match(await details.innerText(), /\+923000000002[\s\S]*Test Account 2/, 'the same number after reconnecting');
+  await details.getByRole('button', { name: 'Close' }).click();
 
   // --- Default interval for new campaigns: 30 minutes, editable.
   const defInterval = accounts.getByLabel('Default interval (minutes)');

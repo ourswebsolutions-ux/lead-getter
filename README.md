@@ -482,7 +482,8 @@ The **Leads | Podcasts | Outreach** switch in the header changes the workspace; 
 
 **Outreach** sends a three-message introduction to leads whose numbers the automatic check confirmed on WhatsApp.
 
-- **WhatsApp accounts:** the panel at the top of Outreach lists every linked account with its own status (connected, QR code, disconnected, unlinked). **+ Add account** links another one by QR code (up to 10). Each can be disconnected, reconnected or removed on its own. The first account is the one linked at the top of the app; it also runs the automatic number checks. The same WhatsApp number can't be linked twice. Each added account's session is encrypted in its own folder (`whatsapp-accounts/<id>`).
+- **Screen:** accounts and campaigns on the left; the selected campaign on the right with its status, numbers (today / limit, pending, in progress, completed, replied, failed) and progress bar, and five sections: **Overview** (live progress, sent messages, previews), **Messages**, **Attachments**, **Settings** and **Contacts**. Unsaved changes show a bar with **Save settings** / **Discard**.
+- **WhatsApp accounts:** a compact list with each account's status; clicking one opens its details (number, WhatsApp name, the campaign using it, QR code, label, connect / reconnect / disconnect / remove). **Add account** links another one by QR code (up to 10). Each can be disconnected, reconnected or removed on its own. The first account is the one linked at the top of the app; it also runs the automatic number checks. The same WhatsApp number can't be linked twice. Each added account's session is encrypted in its own folder (`whatsapp-accounts/<id>`).
 - **Choosing the account:** turning on a live campaign asks which connected account sends it. If none is connected, it asks you to connect one first. An account can be used by **one active campaign at a time**; accounts in use are shown with the campaign's name and can't be picked (the main process refuses it too).
 - **Parallel campaigns:** campaigns on different accounts run **independently and at the same time**, each with its own schedule, interval, daily limit and sending hours. One campaign pausing or waiting never holds up another.
 
@@ -495,14 +496,15 @@ The **Leads | Podcasts | Outreach** switch in the header changes the workspace; 
 - **Seen / Unseen in the Leads tab:** a lead is **Seen** once a campaign message to its number was sent. Its delivery state (sent, delivered, read) is in the tooltip. Otherwise it's **Unseen**, including when a send failed.
   - The **Campaign** filter (All leads, Seen, Unseen) works with the existing category, website, WhatsApp and date filters. A **search** box finds leads by name, business name or phone number.
 - **Failed sends:** a send that definitely failed leaves the lead Unseen and is retried automatically: after 1 hour, then 6 hours, 3 attempts in all. After that, use **Retry**. A send that timed out or was interrupted is never retried automatically, because it may have arrived. The retry reuses the original send record, so it can't produce a duplicate.
-- **Placeholders:** `{business_name}` works the same as `{business}`.
+- **Placeholders:** `{business name}` and `{business_name}` work the same as `{business}`.
+- **Live progress (Overview):** the contact being messaged now (with how many of the three messages they got), the next two, and **See more** for the rest of the queue with the remaining count. **Sent** shows the latest two sends (text and voice files, with Sent / Delivered / Read / Failed) and **See more** for the rest; clicking one shows the exact message that was sent. **Preview** shows two message variations as the selected contact would get them, **See more** for the others; clicking one opens the whole conversation (all three messages, the links and the voice files with a player). Everything updates as messages go out.
 - **Earlier campaigns:** campaigns where you chose leads by hand appear under *Other campaigns*.
 - **Campaign settings:** each campaign has its own name, messages, timing, daily limit, sending hours, optional start and end dates, and contact queue.
   - **Bulk actions:** select campaigns with the checkboxes (or **Select all**), then **Delete selected** or **Reset selected**. Both ask for confirmation.
   - **Delete** removes the campaign, its queue and its settings.
   - **Reset** stops the campaign and clears its queue and progress but keeps its settings.
   - Neither touches your leads, your app settings, other campaigns or the contact history.
-  - **Per account:** campaigns on different accounts send at the same time. The daily limit and the interval count per account (older campaigns that share one account still take turns on it).
+  - **Per campaign:** campaigns on different accounts send at the same time, each with its own daily limit and interval (older campaigns that share one account still take turns on it).
 - **Choosing contacts** (*Add verified leads*):
   - **Filters:** one or several categories, the date the lead was collected (from/to, or a single day) and search. All filters work together.
   - **Verified only:** only numbers the automatic WhatsApp check confirmed (green dot). Unchecked, unavailable, failed or manually marked numbers can never be selected, and a number's format is never taken as proof.
@@ -519,15 +521,19 @@ The **Leads | Podcasts | Outreach** switch in the header changes the workspace; 
 > WhatsApp's terms don't allow automated messaging from unofficial apps, and numbers that send unexpected messages are often restricted or banned. Live sending asks you to accept this risk once. A **Test run** goes through the whole schedule without sending anything.
 
 - **Messages:** three editable messages, in Urdu or Roman Urdu. The defaults are a greeting, *Kaise hain aap?* and a question about their business that names it.
-  - Placeholders: `{name}` and `{business}`. Each message that uses one has a second version for when it isn't known.
+  - **Variations:** each of the three messages can have any number of variations (up to 20): **Add message** adds one, each can be edited or deleted, and at least one always stays. Contacts get them in rotation: the variation the campaign has used least, never the same one twice in a row when there is a choice. The variation used and the exact text sent are recorded.
+  - Line breaks and spacing are kept as written.
+  - Placeholders: `{name}` and `{business name}` (insert them with the chips above each message). Each message that uses one has a second version for when it isn't known.
   - Message 3 names the business by default: *Kya aap {business} ke naam se real estate ka kaam karte hain…?* `{business}` is the name on Google Maps without extras such as *"- Best Agency in DHA"* or *"| Lahore"*. Without a usable name, the plain version is sent.
   - The name is the contact's own WhatsApp name, or one word from the business name, such as *Zahid Properties* → *Zahid*. It's used only when the word looks like a name (not *Real*, *Estate*, *Properties*, a city or a number). Otherwise the no-name version is used.
   - Names are never invented. You can edit or clear each contact's name before they're messaged. Previews show the exact text per contact.
+- **Links:** any number of links (up to 10) per campaign, each with an optional title, for example a website demo, portfolio, design or redesign, or a product page. They are checked before saving (http/https web addresses only) and can be edited or removed. They are added below the message you choose (message 1, 2 or 3; message 3 by default), each as its title in bold and the address under it, and appear in the previews.
+- **Voice files:** attach audio files from your computer (not recordings): MP3, M4A, AAC, Ogg/Opus or AMR, up to 16 MB each, up to 10 per campaign. Each file is checked by its content (a WAV, an MP3 renamed `.ogg`, an empty or damaged file is refused with the reason), then copied byte for byte into the app's data folder (`outreach-audio`), so it is sent in its original format even if the original is moved. Ogg/Opus files are sent as WhatsApp voice notes, the others as audio files. They can be played, reordered and removed. They are sent right after the message the links go with, one by one. Each is reserved before it is sent, like the messages, so none is ever sent twice; a voice file that fails is shown as failed and the next one still goes. Files no campaign uses any more are deleted when the app starts.
 - **Schedule:** one contact at a time per campaign.
   - A contact's three messages go **about a minute apart** (55–65 seconds).
   - The **next contact** starts exactly the campaign's **interval** after the previous contact's last message, whether they got all three, replied, opted out or a send failed. The interval is **30 minutes by default**, any whole number of minutes from 1 to 1440, set per campaign. The **Default interval** next to the accounts sets it for new campaigns, and is saved.
   - Example with 30 minutes: contact A at 14:00, 14:01 and 14:02; contact B at 14:32.
-  - At most **10–15 unique contacts per day per account** (10 by default); all of a contact's messages count once.
+  - **Daily limit:** **15 unique contacts a day** by default, editable per campaign to any number from 1 (there is no fixed maximum). Each campaign counts its own contacts; all of a contact's messages and voice files count once. This is separate from the plan's daily lead-finding allowance.
   - The contact in progress, the next send time and the daily count are kept in the database. After a restart or a pause, an interrupted contact is finished first, about a minute after their last message, and the gap before the next contact is never shortened.
 - **Sending hours and dates:** messages go out only within the campaign's sending hours, in the recipient's local time (from the country code; for example, Pakistan uses Pakistan time), and only between its start and end dates when they are set.
 - **Replies:** any reply stops the sequence for that contact and hands the conversation to you. Messages such as *stop*, *not interested*, *message na karein* or *میسج نہ کریں* opt the number out for good. You can also exclude or opt out any contact yourself.
@@ -537,7 +543,7 @@ The **Leads | Podcasts | Outreach** switch in the header changes the workspace; 
 - **WhatsApp refusals:** rate limits, restrictions or a logged-out session pause the whole campaign (*possible restriction*) until you resume it. Three failures in a row also pause it.
 - **Delivery:** sent, delivered and read states come from WhatsApp's receipts.
 - **Conditions:** sending needs a connected WhatsApp, and the app has to be unlocked with your PIN. The campaign waits otherwise.
-- **Storage:** campaign data is in `outreach_campaigns`, `outreach_contacts`, `outreach_sends` (the permanent send history) and `outreach_optouts`. Updating from an earlier version moves the existing campaign into *Campaign 1*, with its progress and history.
+- **Storage:** campaign data is in `outreach_campaigns`, `outreach_contacts`, `outreach_sends` (the permanent send history: each message and each voice file, the variation used and the text sent) and `outreach_optouts`. Updating from an earlier version moves the existing campaign into *Campaign 1*, with its progress and history.
 
 ### Security
 

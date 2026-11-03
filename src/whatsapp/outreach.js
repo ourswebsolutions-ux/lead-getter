@@ -3,6 +3,11 @@
 // Real-estate outreach campaigns: a three-message introduction to verified
 // WhatsApp leads, sent automatically by a persistent, rate-limited scheduler.
 //
+// Each message can have several variations, rotated between contacts (the
+// least used one next, never the same one twice in a row when there are
+// more). Links are added to one message, and voice files are sent right
+// after it, each as its own WhatsApp audio message.
+//
 // Timing: a contact's three messages go about one minute apart; the next
 // contact starts the campaign's interval (default 30 minutes, editable)
 // after the previous contact's last message.
@@ -12,11 +17,11 @@
 // used by one active campaign at a time.
 //
 // Safety rules (all enforced here, whatever the UI sends):
-//   - one contact at a time per WhatsApp account; the daily limit (10-15
-//     unique contacts) and the interval count per account, so several
-//     campaigns on one account can't multiply its volume;
-//   - each stage is reserved in the database before it is sent, so a stage
-//     is never sent twice (retries, restarts, duplicate events, resets);
+//   - one contact at a time per WhatsApp account; each campaign has its own
+//     daily limit (unique contacts, 15 by default) and interval;
+//   - each stage, and each voice file of it, is reserved in the database
+//     before it is sent, so nothing is sent twice (retries, restarts,
+//     duplicate events, resets);
 //   - someone messaged in any campaign is never messaged by another one
 //     unless that campaign explicitly allows previously contacted people;
 //     opt-outs are never messaged, whatever the settings;
@@ -28,16 +33,22 @@
 //     rules on automated messages. Test runs send nothing.
 
 const { EventEmitter } = require('node:events');
-const { DEFAULT_TEMPLATES, render, validateTemplates, isOptOut, cleanBusiness, extractName } = require('./templates');
+const { DEFAULT_TEMPLATES, render, validateTemplates, normalizeTemplates, variationsOf, validateLinks, withLinks, isOptOut, cleanBusiness, extractName } = require('./templates');
 const { eligibleContacts, isVerified } = require('./eligibility');
 
-const LIMITS = { interval: { min: 1, max: 1440 }, capMin: 10, capMax: 15 };
+// The daily limit has no fixed maximum (15 is only the default).
+const LIMITS = { interval: { min: 1, max: 1440 }, capMin: 1, capMax: null, voices: 10, links: 10 };
+const CAP_SANITY = 100_000;
+const DEFAULT_CAP = 15;
 const DEFAULT_INTERVAL = 30; // minutes between contacts, for new campaigns (editable)
 const DEFAULT_CONFIG = {
   templates: DEFAULT_TEMPLATES,
   interval: DEFAULT_INTERVAL,
   accountId: 'primary', // the WhatsApp account it sends from
-  dailyCap: 10,
+  dailyCap: DEFAULT_CAP,
+  links: [], // [{ title, url }], added below the message of attachStep
+  voices: [], // [{ id, name, mime, size, ptt }], sent right after that message
+  attachStep: 3,
   quietStart: 21,
   quietEnd: 9,
   test: true,
@@ -104,15 +115,16 @@ function isTimeout(err) {
 class Outreach extends EventEmitter {
   // store: OutreachStore; state: { get(key), set(key, value) } (app_state);
   // transport: { ready(accountId) -> bool, send(phone, text, accountId) -> Promise<{ id }>,
-  //   hasAccount(accountId) -> bool };
+  //   sendAudio(phone, voice, accountId) -> Promise<{ id }>, hasAccount(accountId) -> bool };
+  // audio: { info(id) -> { id, name, mime, size, ptt } | null } (the saved voice files);
   // details(contact) -> { business } (the lead's business name);
   // hasReplied(phone, sinceMs) -> bool (safety net for missed reply events);
   // canSend() -> Promise<bool> (an active plan; test campaigns don't need one).
   // leads(filter) -> LeadStore.listLeads(filter) rows (for category campaigns);
   // nameFor(lead) -> the name to use for a lead added automatically.
-  constructor({ store, state, transport, details = () => ({}), hasReplied = () => false, canSend = async () => true, clock = () => Date.now(), random = Math.random, zoneOf = timeZoneOf, tickMs = 30_000, leads = () => [], nameFor = (lead) => extractName(lead.name) }) {
+  constructor({ store, state, transport, audio = { info: () => null }, details = () => ({}), hasReplied = () => false, canSend = async () => true, clock = () => Date.now(), random = Math.random, zoneOf = timeZoneOf, tickMs = 30_000, leads = () => [], nameFor = (lead) => extractName(lead.name) }) {
     super();
-    Object.assign(this, { store, state, transport, details, hasReplied, canSend, clock, random, zoneOf, tickMs, leads, nameFor });
+    Object.assign(this, { store, state, transport, audio, details, hasReplied, canSend, clock, random, zoneOf, tickMs, leads, nameFor });
     this.syncedAt = new Map(); // campaign id -> last queue sync
     this.busyKeys = new Set(); // WhatsApp accounts (lanes) sending right now
     this.ticking = false;
@@ -130,6 +142,9 @@ class Outreach extends EventEmitter {
     if (c.config.interval == null) config.interval = Number.isInteger(c.config.intervalMin) ? c.config.intervalMin : DEFAULT_INTERVAL;
     delete config.intervalMin;
     delete config.intervalMax;
+    config.templates = normalizeTemplates(config.templates);
+    config.links = Array.isArray(config.links) ? config.links : [];
+    config.voices = Array.isArray(config.voices) ? config.voices : [];
     return { ...c, config };
   }
 
@@ -293,7 +308,11 @@ class Outreach extends EventEmitter {
     const errors = validateTemplates(c.templates);
     const int = (v) => Number.isInteger(v);
     if (!int(c.interval) || c.interval < LIMITS.interval.min || c.interval > LIMITS.interval.max) errors.push(`The interval must be between ${LIMITS.interval.min} and ${LIMITS.interval.max} minutes.`);
-    if (!int(c.dailyCap) || c.dailyCap < LIMITS.capMin || c.dailyCap > LIMITS.capMax) errors.push(`The daily limit must be between ${LIMITS.capMin} and ${LIMITS.capMax} contacts.`);
+    if (!int(c.dailyCap) || c.dailyCap < LIMITS.capMin || c.dailyCap > CAP_SANITY) errors.push('The daily limit must be a whole number of contacts, at least 1.');
+    if (![1, 2, 3].includes(c.attachStep)) errors.push('Choose the message the links and voice files go with.');
+    if (!Array.isArray(c.links) || c.links.length > LIMITS.links) errors.push(`Up to ${LIMITS.links} links.`);
+    else errors.push(...validateLinks(c.links).errors);
+    if (!Array.isArray(c.voices) || c.voices.length > LIMITS.voices) errors.push(`Up to ${LIMITS.voices} voice files.`);
     if (!int(c.quietStart) || !int(c.quietEnd) || c.quietStart < 0 || c.quietStart > 23 || c.quietEnd < 0 || c.quietEnd > 23) errors.push('Sending hours must be whole hours (0-23).');
     else {
       const open = Array.from({ length: 24 }, (_, h) => h).filter((h) => !inQuietHours(h, c.quietStart, c.quietEnd)).length;
@@ -308,8 +327,20 @@ class Outreach extends EventEmitter {
     const st = this.load(id);
     if (st.status === 'running') return { ok: false, error: 'Pause the campaign before changing its settings.' };
     const config = { ...st.config, ...patch };
-    config.templates = (config.templates || []).map((t) => ({ text: String(t?.text ?? '').trim(), fallback: String(t?.fallback ?? '').trim() }));
-    for (const k of ['interval', 'dailyCap', 'quietStart', 'quietEnd']) config[k] = Number(config[k]);
+    config.templates = normalizeTemplates(config.templates);
+    for (const k of ['interval', 'dailyCap', 'quietStart', 'quietEnd', 'attachStep']) config[k] = Number(config[k]);
+    // Links as entered (checked below); voice files only those saved in the app, with their saved details.
+    if (Array.isArray(config.links)) config.links = config.links.map((l) => ({ title: String(l?.title ?? ''), url: String(l?.url ?? '') }));
+    const linkCheck = validateLinks(config.links);
+    if (!linkCheck.errors.length) config.links = linkCheck.links;
+    if (!Array.isArray(config.voices)) config.voices = [];
+    const voices = [];
+    for (const v of config.voices) {
+      const info = this.audio.info(typeof v === 'string' ? v : v?.id);
+      if (!info) return { ok: false, error: `The voice file “${v?.name || v}” is no longer available. Remove it and attach it again.` };
+      if (!voices.some((x) => x.id === info.id)) voices.push({ id: info.id, name: info.name, mime: info.mime, size: info.size, ptt: Boolean(info.ptt) });
+    }
+    config.voices = voices;
     delete config.intervalMin;
     delete config.intervalMax;
     config.accountId = typeof config.accountId === 'string' && config.accountId ? config.accountId.slice(0, 40) : 'primary';
@@ -526,8 +557,10 @@ class Outreach extends EventEmitter {
   next(now, st) {
     const cfg = st.config;
     const day = dayOf(now);
-    const used = this.store.recipientsOn(day, cfg.test, this.laneIds(st));
-    const allowed = (c) => this.store.messagedOn(c.phone, day, cfg.test) || used < cfg.dailyCap;
+    // Each campaign's own daily limit (unique contacts; a contact already
+    // messaged today by this campaign doesn't count again).
+    const used = this.store.recipientsOn(day, cfg.test, [st.id]);
+    const allowed = (c) => this.store.messagedOn(c.phone, day, cfg.test, [st.id]) || used < cfg.dailyCap;
     const quiet = (c) => inQuietHours(hourIn(now, this.zoneOf(c.phone)), cfg.quietStart, cfg.quietEnd);
     const cur = this.current(st);
     if (cur) {
@@ -668,7 +701,7 @@ class Outreach extends EventEmitter {
   }
 
   // After a contact's message: their next one in about a minute, or (after
-  // the third) the next contact in 45-60 minutes.
+  // the third) the next contact in campaign’s interval.
   scheduleAfter(st, phone, stage, at) {
     if (stage < 3) {
       st.current = phone;
@@ -710,7 +743,8 @@ class Outreach extends EventEmitter {
       this.emit('change', { id });
       return;
     }
-    const sendId = this.store.reserve({ campaignId: id, campaignName: st.name, phone: contact.phone, stage, test: cfg.test, day, now });
+    const { variant, text } = this.compose(st, contact, stage);
+    const sendId = this.store.reserve({ campaignId: id, campaignName: st.name, phone: contact.phone, stage, variant, body: text, test: cfg.test, day, now });
     if (sendId === null) {
       // Already sent (or possibly sent) in an earlier run: bring the contact
       // up to date, never send it again.
@@ -725,7 +759,6 @@ class Outreach extends EventEmitter {
     st.nextDueAt = now + this.contactGap(cfg);
     this.save(st);
     this.spaceOthers(st);
-    const text = render(cfg.templates[stage - 1], this.values(contact));
     try {
       const res = cfg.test ? { id: `TEST-${sendId}` } : await this.transport.send(contact.phone, text, cfg.accountId || 'primary');
       const at = this.clock();
@@ -736,6 +769,7 @@ class Outreach extends EventEmitter {
       this.scheduleAfter(st, contact.phone, stage, at);
       if (exists) this.save(st);
       this.emit('sent', { campaignId: id, phone: contact.phone, stage, text, waId: res.id, test: cfg.test, at });
+      if (stage === cfg.attachStep && cfg.voices.length) await this.sendVoices(st, contact, stage, day);
     } catch (err) {
       const msg = errorText(err);
       if (err?.code === 'not_connected') {
@@ -771,6 +805,59 @@ class Outreach extends EventEmitter {
     }
   }
 
+  // The variation for this contact (the campaign's least used one, not the
+  // one used last when there is a choice) and the text to send, with the
+  // links when this is the message they go with.
+  compose(st, contact, stage) {
+    const cfg = st.config;
+    const vars = variationsOf(cfg.templates[stage - 1]);
+    const values = this.values(contact);
+    let variant = 0;
+    if (vars.length > 1) {
+      const { counts, last } = this.store.variantUse(st.id, stage, cfg.test);
+      const order = vars.map((_, i) => i).sort((a, b) => (counts.get(a) || 0) - (counts.get(b) || 0) || (a === last) - (b === last) || a - b);
+      variant = order.find((i) => i !== last) ?? order[0];
+    }
+    const text = render(vars[variant], values);
+    return { variant, text: stage === cfg.attachStep ? withLinks(text, cfg.links) : text };
+  }
+
+  // The voice files, right after their message: each reserved on its own
+  // and never sent twice. A failed one is recorded and the next goes on.
+  async sendVoices(st, contact, stage, day) {
+    const cfg = st.config;
+    let stopReason = null;
+    for (const [i, voice] of cfg.voices.entries()) {
+      const partId = this.store.reserve({ campaignId: st.id, campaignName: st.name, phone: contact.phone, stage, part: i + 1, kind: 'audio', body: voice.name, test: cfg.test, day, now: this.clock() });
+      if (partId === null) continue; // already sent (or possibly sent) before
+      if (stopReason) {
+        this.store.markFailed(partId, stopReason);
+        continue;
+      }
+      try {
+        const res = cfg.test ? { id: `TEST-${partId}` } : await this.transport.sendAudio(contact.phone, voice, cfg.accountId || 'primary');
+        this.store.markSent(partId, res.id, this.clock());
+      } catch (err) {
+        const msg = errorText(err);
+        this.store.markFailed(partId, isTimeout(err) ? `${msg} (it may still have been delivered)` : msg, isTimeout(err) ? 'unknown' : 'failed');
+        if (err?.code === 'not_connected' || isRestriction(err)) stopReason = `Not sent: ${msg}`;
+        this.emit('failed', { campaignId: st.id, phone: contact.phone, stage, error: `Voice file “${voice.name}”: ${msg}`, paused: null });
+      }
+    }
+    this.emit('change', { id: st.id });
+  }
+
+  // Who is messaged next, in order: contacts whose sequence is under way,
+  // retries that are due, then the queue.
+  upcoming(st) {
+    const now = this.clock();
+    const contacts = this.store.contacts(st.id).filter((c) => !this.store.isOptedOut(c.phone));
+    const resumed = contacts.filter((c) => c.state === 'active' && c.stage >= 1 && c.stage < 3 && c.phone !== st.current).sort((a, b) => a.lastSentAt - b.lastSentAt);
+    const retries = contacts.filter((c) => c.state === 'failed' && c.attempts < MAX_ATTEMPTS && c.retryAt && c.stage < 3).sort((a, b) => a.retryAt - b.retryAt);
+    const fresh = contacts.filter((c) => c.state === 'queued' && c.stage === 0);
+    return [...resumed, ...retries.filter((c) => c.retryAt <= now), ...fresh, ...retries.filter((c) => c.retryAt > now)].map((c) => c.phone);
+  }
+
   // --- for the UI -------------------------------------------------------------------
 
   // Template values: the name chosen when the lead was added (and editable
@@ -780,9 +867,14 @@ class Outreach extends EventEmitter {
     return { name: contact.name ?? null, business: cleanBusiness(this.details(contact).business) };
   }
 
-  preview(contact, templates = null) {
-    const list = templates || (contact.campaignId ? this.load(contact.campaignId).config.templates : DEFAULT_TEMPLATES);
-    return list.map((t) => render(t, this.values(contact)));
+  // Every variation of every message as this contact would get it (links
+  // included in the message they go with).
+  preview(contact, templates = null, { links = null, attachStep = null } = {}) {
+    const cfg = contact.campaignId ? this.load(contact.campaignId)?.config : null;
+    const list = normalizeTemplates(templates || cfg?.templates || DEFAULT_TEMPLATES);
+    const att = attachStep ?? cfg?.attachStep ?? DEFAULT_CONFIG.attachStep;
+    const ls = validateLinks(links ?? cfg?.links ?? []).links;
+    return list.map((t, i) => t.variations.map((v) => (i + 1 === att ? withLinks(render(v, this.values(contact)), ls) : render(v, this.values(contact)))));
   }
 
   summary(c) {
@@ -829,11 +921,12 @@ class Outreach extends EventEmitter {
       acknowledged: this.acknowledged(),
       config: st.config,
       limits: LIMITS,
-      today: { day: dayOf(now), recipients: this.store.recipientsOn(dayOf(now), test, this.laneIds(st)), cap: st.config.dailyCap },
+      today: { day: dayOf(now), recipients: this.store.recipientsOn(dayOf(now), test, [st.id]), cap: st.config.dailyCap },
+      upcoming: this.upcoming(st),
       contacts: this.store.contacts(id).map((c) => ({ ...c, optedOut: this.store.isOptedOut(c.phone), zone: this.zoneOf(c.phone) })),
       sends: this.store.sends({ campaignId: id, test, limit: 100 }),
     };
   }
 }
 
-module.exports = { Outreach, DEFAULT_CONFIG, DEFAULT_INTERVAL, LIMITS, STAGE_GAP, MAX_ATTEMPTS, RETRY_AFTER, timeZoneOf, inQuietHours, hourIn, dayOf, isRestriction };
+module.exports = { Outreach, DEFAULT_CONFIG, DEFAULT_INTERVAL, DEFAULT_CAP, LIMITS, STAGE_GAP, MAX_ATTEMPTS, RETRY_AFTER, timeZoneOf, inQuietHours, hourIn, dayOf, isRestriction };

@@ -34,7 +34,8 @@ function makeSocket(opts) {
   sock.onWhatsApp = async (n) => (ON_WHATSAPP.has(n) ? [{ jid: `${n}@s.whatsapp.net`, exists: true }] : []);
   sock.sendMessage = async (jid, content) => {
     const id = `OUT${Date.now()}${++seq}`;
-    logSend({ jid, text: content.text, id, at: Date.now(), from: own });
+    if (content.audio) logSend({ jid, audio: { mimetype: content.mimetype, ptt: Boolean(content.ptt), bytes: content.audio.length, head: Buffer.from(content.audio).subarray(0, 4).toString('latin1') }, id, at: Date.now(), from: own });
+    else logSend({ jid, text: content.text, id, at: Date.now(), from: own });
     const msg = { key: { remoteJid: jid, id, fromMe: true }, messageTimestamp: secs(Date.now()), status: 2, message: { conversation: content.text } };
     setTimeout(() => ev.emit('messages.upsert', { type: 'append', messages: [msg] }), 10);
     return msg;

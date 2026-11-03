@@ -95,6 +95,16 @@ class WhatsAppAccounts extends EventEmitter {
     return c.send(phone, text);
   }
 
+  async sendAudio(id, phone, audio) {
+    const c = this.client(id);
+    if (!c || c.state !== 'open') {
+      const err = new Error('This WhatsApp account is not connected.');
+      err.code = 'not_connected';
+      throw err;
+    }
+    return c.sendAudio(phone, audio);
+  }
+
   list() {
     const labels = this.labels();
     return [...this.clients].map(([id, c], i) => {
