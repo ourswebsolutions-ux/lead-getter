@@ -12,6 +12,14 @@ const { OutreachStore } = require('../src/database/wa-store');
 const { Outreach } = require('../src/whatsapp/outreach');
 const { eligibleContacts } = require('../src/whatsapp/eligibility');
 
+// New campaigns start with message 1 only; these tests use the classic
+// three-message introduction.
+function threeMessages(store) {
+  const create = store.createCampaign.bind(store);
+  store.createCampaign = (name, config, ...rest) => create(name, { ...config, templates: require('../src/whatsapp/templates').DEFAULT_TEMPLATES }, ...rest);
+  return store;
+}
+
 const MIN = 60_000;
 const START = Date.parse('2026-10-21T05:00:00Z'); // 10:00 in Pakistan
 
@@ -34,7 +42,7 @@ function world() {
     },
   };
   const o = new Outreach({
-    store: new OutreachStore(db.db),
+    store: threeMessages(new OutreachStore(db.db)),
     state: { get: (k) => db.getState(k), set: (k, v) => db.setState(k, v) },
     transport,
     details: () => ({ business: null }),
@@ -321,7 +329,7 @@ test('upgrade from version 4 keeps the existing campaign, its contacts, history 
   db.setState('outreach', { status: 'paused', pauseReason: 'user', nextDueAt: 5000, acknowledgedAt: 123, config: { dailyCap: 14, test: false } });
   db.close();
   const up = new LeadStore(file);
-  assert.equal(up.db.prepare('PRAGMA user_version').get().user_version, 19);
+  assert.equal(up.db.prepare('PRAGMA user_version').get().user_version, 20);
   const store = new OutreachStore(up.db);
   const [c] = store.campaigns();
   assert.equal(c.name, 'Campaign 1');

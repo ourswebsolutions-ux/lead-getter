@@ -14,6 +14,14 @@ const { Outreach, DEFAULT_CAP } = require('../src/whatsapp/outreach');
 const { render, validateTemplates, validateLinks, withLinks, normalizeTemplates, cleanUrl } = require('../src/whatsapp/templates');
 const { AudioLibrary } = require('../src/whatsapp/audio-library');
 
+// New campaigns start with message 1 only; these tests use the classic
+// three-message introduction.
+function threeMessages(store) {
+  const create = store.createCampaign.bind(store);
+  store.createCampaign = (name, config, ...rest) => create(name, { ...config, templates: require('../src/whatsapp/templates').DEFAULT_TEMPLATES }, ...rest);
+  return store;
+}
+
 const MIN = 60_000;
 const START = Date.parse('2026-10-21T05:00:00Z'); // 10:00 in Pakistan
 const fixture = (f) => path.join(__dirname, 'fixtures', 'audio', f);
@@ -47,7 +55,7 @@ function setup({ contacts = 4, campaigns = 1 } = {}) {
   };
   const make = () =>
     new Outreach({
-      store: new OutreachStore(db.db),
+      store: threeMessages(new OutreachStore(db.db)),
       state: { get: (k) => db.getState(k), set: (k, v) => db.setState(k, v) },
       transport,
       audio: { info: (id) => Object.values(VOICES).find((v) => v.id === id) || null },
@@ -264,7 +272,7 @@ test('database version 19 keeps earlier sends and adds parts', () => {
     INSERT INTO outreach_sends SELECT * FROM old_sends; DROP TABLE old_sends;`);
   s.close();
   const up = new LeadStore(file);
-  assert.equal(up.db.prepare('PRAGMA user_version').get().user_version, 19);
+  assert.equal(up.db.prepare('PRAGMA user_version').get().user_version, 20);
   const rows = new OutreachStore(up.db).sends({ campaignId: id, test: false });
   assert.deepEqual(rows.map((r) => [r.phone, r.stage, r.part, r.kind]), [['+923001234567', 1, 0, 'text']]);
   // The same stage can't be reserved twice; its parts can, once each.
@@ -274,4 +282,37 @@ test('database version 19 keeps earlier sends and adds parts', () => {
   assert.equal(st.reserve({ campaignId: id, phone: '+923001234567', stage: 1, part: 1, kind: 'audio', test: false, day: '2026-10-21' }), null);
   up.close();
   assert.ok(new DatabaseSync(file));
+});
+
+test('message 1 only by default; only the messages the user added are sent; fewer messages complete a sequence', async () => {
+  const { DEFAULT_CONFIG } = require('../src/whatsapp/outreach');
+  assert.equal(DEFAULT_CONFIG.templates.length, 1, 'a new campaign has message 1 only');
+  assert.match(validateTemplates([]).join(' '), /Message 1 is needed/);
+  assert.match(validateTemplates(Array(11).fill({ variations: [{ text: 'x', fallback: '' }] })).join(' '), /Up to 10 messages/);
+  const h = setup({ contacts: 2 });
+  const c = h.o.campaign(h.ids[0]);
+  const one = [{ variations: [{ text: 'Salam {name}', fallback: 'Salam' }] }];
+  const r = c.configure({ test: false, interval: 1, templates: one, links: [{ title: '', url: 'example.com' }], voices: [VOICES.v1.id] });
+  assert.ok(r.ok, r.error);
+  assert.equal(r.snapshot.config.attachStep, 1, 'links and voice files go with the only message');
+  c.start({ acknowledge: true });
+  await run(h, 4 * MIN);
+  // One message (with its link) and the voice file per contact; the next contact after the interval only.
+  assert.deepEqual(h.sent.map((s) => [s.phone, s.kind]), [['+923001000000', 'text'], ['+923001000000', 'audio'], ['+923001000001', 'text'], ['+923001000001', 'audio']]);
+  assert.equal(h.sent[0].text, 'Salam Name0\n\nhttps://example.com/');
+  assert.ok(h.sent[2].at - h.sent[0].at >= MIN, 'the interval between contacts, not 30-60 s');
+  assert.equal(c.contact('+923001000000').state, 'done');
+
+  // Messages removed while a contact is half-way: their sequence is complete.
+  const h2 = setup({ contacts: 1 });
+  const c2 = h2.o.campaign(h2.ids[0]);
+  c2.configure({ test: false, attachStep: 3, links: [{ title: '', url: 'example.com' }] });
+  c2.start({ acknowledge: true });
+  await h2.o.tick();
+  c2.pause();
+  const fewer = c2.configure({ templates: c2.snapshot().config.templates.slice(0, 1) });
+  assert.ok(fewer.ok, fewer.error);
+  assert.equal(fewer.snapshot.config.attachStep, 1, 'the links move to the last message left');
+  assert.equal(c2.contact('+923001000000').state, 'done');
+  assert.match(c2.configure({ attachStep: 2 }).error, /links and voice files go with/);
 });

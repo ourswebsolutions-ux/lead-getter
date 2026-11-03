@@ -37,7 +37,7 @@ async function launch(env) {
   return { app, win };
 }
 
-test('WhatsApp outreach: no Chats tab, campaign, replies, restart', async (t) => {
+test('WhatsApp outreach: no Chats tab, campaign, replies, restart', { timeout: 900_000 }, async (t) => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lf-outreach-e2e-'));
   const userData = path.join(tmp, 'app');
   fs.mkdirSync(userData);
@@ -94,6 +94,10 @@ test('WhatsApp outreach: no Chats tab, campaign, replies, restart', async (t) =>
   await out.getByRole('heading', { name: 'Real Estate', exact: true }).waitFor();
   const cid = (await win.evaluate(() => window.leadFinder.outreachOverview())).campaigns.find((c) => c.category).id;
   const stateOf = (id) => win.evaluate((i) => window.leadFinder.outreachState(i), id);
+  // This test uses the classic three-message introduction (new campaigns start with message 1 only).
+  const { DEFAULT_TEMPLATES } = require('../../src/whatsapp/templates');
+  assert.equal((await stateOf(cid)).config.templates.length, 1);
+  assert.ok((await win.evaluate(([i, t]) => window.leadFinder.outreachConfigure(i, { templates: t }), [cid, DEFAULT_TEMPLATES])).ok);
   await tab('Contacts');
   assert.equal(await out.getByRole('button', { name: 'Add verified leads' }).count(), 0, 'no manual selection');
   await tab('Settings');
@@ -110,7 +114,7 @@ test('WhatsApp outreach: no Chats tab, campaign, replies, restart', async (t) =>
   await win.locator('.toast').filter({ hasText: 'Campaign settings saved.' }).waitFor();
 
   // --- Switch ON (test run): the queue fills by itself; messages go out one
-  // by one (simulated); a lead's messages about a minute apart.
+  // by one (simulated); a lead's messages 30-60 seconds apart.
   await sw().click();
   await tab('Contacts');
   await win.waitForFunction(() => document.querySelectorAll('.campaign-contacts tbody tr').length === 2, null, { timeout: 15_000 });
@@ -122,12 +126,12 @@ test('WhatsApp outreach: no Chats tab, campaign, replies, restart', async (t) =>
   await tab('Overview');
   await win.waitForFunction(() => document.querySelectorAll('.campaign-sent tbody tr').length === 1, null, { timeout: 15_000 });
   assert.match(await out.locator('.campaign-sent').innerText(), /test run[\s\S]*1 of 3[\s\S]*Sent/i);
-  assert.match(await out.locator('.campaign-status').innerText(), /Next message to the same contact in about a minute/);
+  assert.match(await out.locator('.campaign-status').innerText(), /Next message to the same contact in 30–60 seconds/);
   assert.match(await catRow('Real Estate').innerText(), /Running/);
   await win.waitForFunction(() => document.querySelectorAll('.campaign-sent tbody tr').length === 2, null, { timeout: 120_000 });
   const sim = (await stateOf(cid)).sends;
   const simGap = (sim[0].sentAt - sim[1].sentAt) / 1000;
-  assert.ok(simGap >= 55 && simGap <= 100, `test run: message 2 ${simGap}s after message 1`);
+  assert.ok(simGap >= 30 && simGap <= 95, `test run: message 2 ${simGap}s after message 1`);
   assert.equal(sim[0].phone, sim[1].phone, 'the same lead');
   assert.equal(sends(log).length, 0, 'nothing reached WhatsApp');
   // OFF: scheduling stops.
@@ -177,7 +181,7 @@ test('WhatsApp outreach: no Chats tab, campaign, replies, restart', async (t) =>
   assert.match(await out.locator('.or-head').innerText(), /Test Account/);
   const firstState = await stateOf(cid);
   const soon = (firstState.nextDueAt - live[0].at) / 1000;
-  assert.ok(soon >= 55 && soon <= 66, `message 2 to the same lead due ${soon}s later`);
+  assert.ok(soon >= 30 && soon <= 61, `message 2 to the same lead due ${soon}s later`);
   assert.equal(firstState.current, '+923001234567');
   if (shots) await win.screenshot({ path: path.join(shots, 'outreach.png') });
 
@@ -200,24 +204,31 @@ test('WhatsApp outreach: no Chats tab, campaign, replies, restart', async (t) =>
   if (shots) await win.screenshot({ path: path.join(shots, 'leads-seen.png') });
   await ws.getByRole('button', { name: 'Outreach' }).click();
 
-  // --- A reply stops the sequence for that contact.
+  // --- A reply is recorded; Zahid's remaining messages still go, 30-60 s
+  // apart; then the next contact waits the campaign interval (30 minutes).
   await app.evaluate(() => globalThis.__fakeWA.incoming('923001234567', 'Walaikum assalam, kaun?', 'Zahid'));
-  await win.locator('.toast').filter({ hasText: /replied/ }).waitFor();
+  await win.locator('.toast').filter({ hasText: /replied\. Their remaining messages still go/ }).waitFor();
   await tab('Contacts');
   await rows.filter({ hasText: '+923001234567' }).locator('.st-chip').filter({ hasText: 'Replied' }).waitFor();
-  // The reply ends Zahid's sequence; the next contact is the campaign interval (30 minutes) after
-  // his last message.
+  assert.equal((await stateOf(cid)).status, 'running', 'a reply does not stop the campaign');
+  for (let i = 0; i < 240 && sends(log).length < 3; i++) await new Promise((r) => setTimeout(r, 1000));
+  const zahid = sends(log);
+  assert.deepEqual(zahid.map((x) => x.jid), Array(3).fill('923001234567@s.whatsapp.net'), 'messages 2 and 3 still sent after the reply');
+  for (const k of [1, 2]) {
+    const d = (zahid[k].at - zahid[k - 1].at) / 1000;
+    assert.ok(d >= 30 && d <= 95, `message ${k + 1} ${d}s after message ${k}`);
+  }
   let replyState;
-  for (let i = 0; i < 90; i++) {
+  for (let i = 0; i < 60; i++) {
     replyState = await stateOf(cid);
-    if (replyState.current === null) break; // the scheduler's next tick (every 30 s) moves on
+    if (replyState.current === null) break;
     await new Promise((r) => setTimeout(r, 1000));
   }
   assert.equal(replyState.current, null);
   const nextDue = replyState.nextDueAt;
-  const gap = (nextDue - live[0].at) / 60_000;
-  assert.ok(Math.abs(gap - 30) < 0.1, `next contact in ${gap.toFixed(1)} minutes: ${JSON.stringify({ status: replyState.status, waiting: replyState.waiting, current: replyState.current, nextDueAt: nextDue, live0: live[0].at, contacts: replyState.contacts.map((c) => [c.phone, c.state, c.stage, c.lastSentAt]), sends: replyState.sends.map((x) => [x.phone, x.stage, x.status, x.sentAt]) })}`);
-  assert.equal(sends(log).length, 1, 'no further message to Zahid');
+  const gap = (nextDue - zahid[2].at) / 60_000;
+  assert.ok(Math.abs(gap - 30) < 0.1, `next contact in ${gap.toFixed(1)} minutes`);
+  assert.equal(sends(log).length, 3, 'Zahid’s three messages, nothing else');
 
   // --- Restart: still running, same count and next time; nothing re-sent.
   await app.close();
@@ -230,7 +241,7 @@ test('WhatsApp outreach: no Chats tab, campaign, replies, restart', async (t) =>
   assert.equal(after.nextDueAt, nextDue, 'the next send time survived the restart');
   assert.equal(after.today.recipients, 1);
   await new Promise((r) => setTimeout(r, 5000)); // a few scheduler ticks
-  assert.equal(sends(log).length, 1, 'nothing sent again after the restart');
+  assert.equal(sends(log).length, 3, 'nothing sent again after the restart');
   assert.ok(!sends(log).some((x) => x.jid === '923007654321@s.whatsapp.net'), 'the excluded contact was never messaged');
 
   // --- Delete the campaign: Zahid stays Seen and never re-enters a queue,
@@ -253,6 +264,6 @@ test('WhatsApp outreach: no Chats tab, campaign, replies, restart', async (t) =>
   assert.match(await out2.getByRole('table', { name: 'Previously contacted' }).innerText(), /Zahid Properties[\s\S]*\+923001234567/);
   await row2().getByRole('switch').click();
   if (shots) await win.screenshot({ path: path.join(shots, 'campaigns.png') });
-  assert.equal(sends(log).length, 1, 'still nothing more sent');
+  assert.equal(sends(log).length, 3, 'still nothing more sent');
   assert.deepEqual(errors, []);
 });

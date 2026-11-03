@@ -169,6 +169,19 @@ class LeadStore {
     this.migrateV17();
     this.migrateV18();
     this.migrateV19();
+    this.migrateV20();
+  }
+
+  // Version 20: when a campaign contact last replied. A reply no longer ends
+  // the contact's sequence, so it is kept here instead of in their state.
+  migrateV20() {
+    if (this.db.prepare('PRAGMA user_version').get().user_version >= 20) return;
+    this.transaction(() => {
+      if (!this.db.prepare('PRAGMA table_info(outreach_contacts)').all().some((c) => c.name === 'replied_at')) this.db.exec('ALTER TABLE outreach_contacts ADD COLUMN replied_at INTEGER;');
+      this.db.exec(`
+        UPDATE outreach_contacts SET replied_at = updated_at WHERE state = 'replied' AND replied_at IS NULL;
+        PRAGMA user_version = 20;`);
+    });
   }
 
   // Version 19: an outreach message can have parts (its text, then voice

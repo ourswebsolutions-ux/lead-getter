@@ -27,7 +27,7 @@ const RE = [
 ];
 const GA = [['Noor Textiles', '03211112223']];
 
-test('outreach: message variations, links, voice files, previews, live progress, two campaigns, restart', async (t) => {
+test('outreach: message variations, links, voice files, previews, live progress, two campaigns, restart', { timeout: 900_000 }, async (t) => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lf-outreach-media-'));
   const userData = path.join(tmp, 'app');
   fs.mkdirSync(userData);
@@ -87,39 +87,56 @@ test('outreach: message variations, links, voice files, previews, live progress,
   assert.match(await accDialog.innerText(), /\+923000000001[\s\S]*Test Account/);
   await accDialog.getByRole('button', { name: 'Close' }).click();
 
-  // --- Messages: variations for message 1, {business name}, line breaks kept.
+  // --- Messages: only message 1 at first (required); nothing else until added.
   await tab('Messages');
   const step1 = out.getByRole('region', { name: 'Message 1' });
-  await step1.getByRole('button', { name: 'Add message to step 1' }).click();
-  await step1.getByRole('button', { name: 'Add message to step 1' }).click();
+  await step1.waitFor();
+  assert.equal(await out.locator('.or-step').count(), 1, 'message 1 only');
+  assert.equal(await out.getByRole('region', { name: 'Links' }).count(), 0, 'no empty links section');
+  assert.equal(await out.getByRole('region', { name: 'Voice files' }).count(), 0, 'no empty voice section');
+  assert.equal(await step1.getByRole('button', { name: 'Remove message 1' }).count(), 0, 'message 1 cannot be removed');
+  // Variations of message 1, {business name}, line breaks kept.
+  await step1.getByRole('button', { name: 'Add variation to message 1' }).click();
+  await step1.getByRole('button', { name: 'Add variation to message 1' }).click();
   await step1.getByLabel('Message 1B', { exact: true }).fill('Salam {name}!\nKya {business name} abhi bhi active hai?');
   await step1.getByLabel('Message 1B without a name').fill('Salam!\nKya aapka business abhi bhi active hai?');
   await step1.getByLabel('Message 1C', { exact: true }).fill('Hello {name}, hope you are well.');
   await step1.getByLabel('Message 1C without a name').fill('Hello, hope you are well.');
-  // A message can be deleted, but never the last one.
-  await step1.getByRole('button', { name: 'Add message to step 1' }).click();
+  await step1.getByRole('button', { name: 'Add variation to message 1' }).click();
   await step1.getByRole('button', { name: 'Delete message 1D' }).click();
   assert.equal(await step1.locator('.or-var').count(), 3);
-  const step2 = out.getByRole('region', { name: 'Message 2' });
-  assert.ok(await step2.getByRole('button', { name: 'Delete message 2' }).isDisabled(), 'one message is always required');
   await step1.locator('.or-var-preview').nth(1).filter({ hasText: 'Kya Zahid Properties abhi bhi active hai?' }).waitFor();
   assert.match(await step1.locator('.or-var-preview').nth(1).innerText(), /^Salam Zahid!\nKya Zahid Properties/);
+  // Messages 2 and 3, added by hand; an added message can be removed again.
+  const adds = out.getByRole('group', { name: 'Add to the campaign' });
+  await adds.getByRole('button', { name: 'Add Message' }).click();
+  await out.getByRole('region', { name: 'Message 2' }).getByLabel('Message 2', { exact: true }).fill('Kaise hain aap? Umeed hai aap khairiyat se honge.');
+  await adds.getByRole('button', { name: 'Add Message' }).click();
+  await out.getByRole('region', { name: 'Message 3' }).getByRole('button', { name: 'Remove message 3' }).click();
+  assert.equal(await out.locator('.or-step').count(), 2, 'removed: hidden again');
+  await adds.getByRole('button', { name: 'Add Message' }).click();
+  const step3 = out.getByRole('region', { name: 'Message 3' });
+  await step3.getByLabel('Message 3', { exact: true }).fill('Kya aap {business name} ke naam se real estate ka kaam karte hain, ya kisi aur business se related hain?');
+  await step3.getByLabel('Message 3 without a name').fill('Kya aap real estate ka kaam karte hain, ya kisi aur business se related hain?');
   await shot('outreach-messages');
 
-  // --- Attachments: links (validated) and voice files (checked by content).
-  await tab('Attachments');
+  // --- Links: the section appears with the first one and goes when the last is removed.
+  await adds.getByRole('button', { name: 'Add Link' }).click();
   const links = out.getByRole('region', { name: 'Links' });
-  await links.getByRole('button', { name: 'Add link' }).click();
+  await links.getByRole('button', { name: 'Remove link 1' }).click();
+  assert.equal(await links.count(), 0, 'no empty links section');
+  await adds.getByRole('button', { name: 'Add Link' }).click();
   await links.getByLabel('Link 1 title').fill('Website demo');
   await links.getByLabel('Link 1 address').fill('not a link');
   await links.locator('.or-link-err').filter({ hasText: 'No spaces' }).waitFor();
   await links.getByLabel('Link 1 address').fill('demo.example.com/real-estate');
-  await links.getByRole('button', { name: 'Add link' }).click();
+  await adds.getByRole('button', { name: 'Add Link' }).click();
   await links.getByLabel('Link 2 title').fill('Portfolio');
   await links.getByLabel('Link 2 address').fill('https://example.com/portfolio');
   assert.equal(await links.locator('.or-link-err').count(), 0);
+  // --- Voice files: checked by content; the section appears with them.
+  await adds.getByRole('button', { name: 'Add Voice' }).click();
   const voices = out.getByRole('region', { name: 'Voice files' });
-  await voices.getByRole('button', { name: /Attach files/ }).click();
   await voices.locator('.or-voice-list li').nth(1).waitFor();
   assert.equal(await voices.locator('.or-voice-list li').count(), 2, 'Ogg/Opus and MP3 accepted');
   const why = await voices.getByRole('alert').allInnerTexts();
@@ -131,7 +148,7 @@ test('outreach: message variations, links, voice files, previews, live progress,
   await voices.locator('audio[aria-label="Play portfolio-pitch.mp3"]').waitFor();
   assert.match(await voices.locator('audio').first().getAttribute('src'), /^data:audio\/mpeg;base64,/);
   // They go with message 1 here, so the test sees them at once.
-  await out.getByRole('group', { name: 'Attachments go with' }).getByRole('button', { name: 'Message 1' }).click();
+  await links.getByLabel('Attachments go with').selectOption('1');
   await shot('outreach-attachments');
 
   // --- Settings: daily limit above 15 (no fixed maximum), interval 1 minute, live, sending now.
@@ -235,13 +252,16 @@ test('outreach: message variations, links, voice files, previews, live progress,
     await win.emulateMedia({ colorScheme: 'light' });
   }
 
-  // --- Zahid replies: his sequence ends; the next contact gets another variation.
+  // --- Zahid replies: recorded, his messages 2 and 3 still go (30-60 s
+  // apart); then the next contact, with another variation.
   await app.evaluate(() => globalThis.__fakeWAs['923000000001'].incoming('923001234567', 'Ji, bataein'));
-  for (let k = 0; k < 200 && log(wa).filter((e) => e.from === '923000000001').length < 6; k++) await wait(1000);
+  for (let k = 0; k < 400 && log(wa).filter((e) => e.from === '923000000001').length < 8; k++) await wait(1000);
   const re2 = log(wa).filter((e) => e.from === '923000000001');
-  assert.equal(re2.length, 6, JSON.stringify(re2));
-  assert.equal(re2[3].jid, '923001112223@s.whatsapp.net');
-  assert.match(re2[3].text, /^Salam Saad!\nKya Saad Estate Agency abhi bhi active hai\?\n\n\*Website demo\*/, 'variation B for the second contact');
+  assert.equal(re2.length, 8, JSON.stringify(re2));
+  assert.deepEqual(re2.slice(3, 5).map((e) => e.jid), ['923001234567@s.whatsapp.net', '923001234567@s.whatsapp.net'], 'Zahid still gets messages 2 and 3');
+  for (const k of [3, 4]) assert.ok((re2[k].at - re2[k - (k === 3 ? 3 : 1)].at) / 1000 >= 30, 'at least 30 s after the previous message');
+  assert.equal(re2[5].jid, '923001112223@s.whatsapp.net');
+  assert.match(re2[5].text, /^Salam Saad!\nKya Saad Estate Agency abhi bhi active hai\?\n\n\*Website demo\*/, 'variation B for the second contact');
   await liveBox.getByRole('list', { name: 'Currently sending' }).filter({ hasText: '+923001112223' }).waitFor();
 
   // --- Restart: progress is kept, nothing is sent twice.

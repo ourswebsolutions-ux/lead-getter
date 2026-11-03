@@ -39,7 +39,7 @@ async function launch(env, plan) {
   return { app, win };
 }
 
-test('two WhatsApp accounts: Real Estate and Garments campaigns in parallel, own intervals', async (t) => {
+test('two WhatsApp accounts: Real Estate and Garments campaigns in parallel, own intervals', { timeout: 900_000 }, async (t) => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lf-accounts-e2e-'));
   fs.mkdirSync(path.join(tmp, 'app'));
   const s = new LeadStore(path.join(tmp, 'app', 'leads.db'));
@@ -112,7 +112,7 @@ test('two WhatsApp accounts: Real Estate and Garments campaigns in parallel, own
   const st0 = await win.evaluate((id) => window.leadFinder.outreachState(id), ids.Garments);
   assert.equal(st0.config.interval, 20, 'a new campaign starts with the default interval');
   for (const [cat, interval] of [['Real Estate', 30], ['Garments', 5]]) {
-    const r = await win.evaluate(([id, cfg]) => window.leadFinder.outreachConfigure(id, cfg), [ids[cat], { interval, test: false, quietStart: (pkHour + 6) % 24, quietEnd: (pkHour + 10) % 24 }]);
+    const r = await win.evaluate(([id, cfg]) => window.leadFinder.outreachConfigure(id, cfg), [ids[cat], { interval, test: false, quietStart: (pkHour + 6) % 24, quietEnd: (pkHour + 10) % 24, templates: require('../../src/whatsapp/templates').DEFAULT_TEMPLATES }]);
     assert.ok(r.ok, JSON.stringify(r));
   }
 
@@ -167,23 +167,25 @@ test('two WhatsApp accounts: Real Estate and Garments campaigns in parallel, own
   assert.match(await catRow('Real Estate').innerText(), /Test Account\b/);
   assert.match(await catRow('Garments').innerText(), /Test Account 2/);
 
-  // --- Replies end each sequence; the next contact follows each campaign's own interval.
+  // --- Replies are recorded; each contact still gets messages 2 and 3; then
+  // the next contact follows each campaign's own interval.
   await app.evaluate((_e, a) => globalThis.__fakeWAs['923000000001'].incoming(a.re, 'Walaikum assalam'), { re: re[0].jid.split('@')[0] });
   await app.evaluate((_e, a) => globalThis.__fakeWAs['923000000002'].incoming(a.ga, 'Ji bolain'), { ga: ga[0].jid.split('@')[0] });
   const settle = async (id) => {
-    for (let k = 0; k < 90; k++) {
+    for (let k = 0; k < 300; k++) {
       const st = await win.evaluate((x) => window.leadFinder.outreachState(x), id);
-      if (st.current === null && st.contacts.some((c) => c.state === 'replied')) return st;
+      if (st.current === null && st.contacts.some((c) => c.repliedAt && c.state === 'done')) return st;
       await new Promise((r) => setTimeout(r, 1000));
     }
     return win.evaluate((x) => window.leadFinder.outreachState(x), id);
   };
   const [reSt, gaSt] = await Promise.all([settle(ids['Real Estate']), settle(ids.Garments)]);
-  const reGap = (reSt.nextDueAt - re[0].at) / 60_000;
-  const gaGap = (gaSt.nextDueAt - ga[0].at) / 60_000;
+  const lastTo = (jid) => sends(log).filter((e) => e.jid === jid).at(-1).at;
+  const reGap = (reSt.nextDueAt - lastTo(re[0].jid)) / 60_000;
+  const gaGap = (gaSt.nextDueAt - lastTo(ga[0].jid)) / 60_000;
   assert.ok(Math.abs(reGap - 30) < 0.1, `Real Estate next contact in ${reGap} minutes`);
   assert.ok(Math.abs(gaGap - 5) < 0.1, `Garments next contact in ${gaGap} minutes`);
-  assert.equal(sends(log).length, 2, 'nothing else sent');
+  assert.equal(sends(log).length, 6, 'three messages to each first contact, nothing else');
   if (shots) await win.screenshot({ path: path.join(shots, 'outreach-accounts.png') });
 
   // --- Restart: both still running on their accounts; nothing re-sent.
@@ -196,7 +198,7 @@ test('two WhatsApp accounts: Real Estate and Garments campaigns in parallel, own
     else assert.match(st.config.accountId, /^[a-f0-9]{8}$/);
   }
   await new Promise((r) => setTimeout(r, 3000));
-  assert.equal(sends(log).length, 2, 'nothing re-sent after the restart');
+  assert.equal(sends(log).length, 6, 'nothing re-sent after the restart');
   assert.deepEqual(errors, []);
 });
 

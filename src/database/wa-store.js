@@ -330,7 +330,7 @@ class OutreachStore {
   setContact(campaignId, phone, fields, now = Date.now()) {
     const cols = Object.keys(fields);
     if (!cols.length) return;
-    const map = { state: 'state', name: 'name', stage: 'stage', lastSentAt: 'last_sent_at', note: 'note', attempts: 'attempts', retryAt: 'retry_at' };
+    const map = { state: 'state', name: 'name', stage: 'stage', lastSentAt: 'last_sent_at', note: 'note', attempts: 'attempts', retryAt: 'retry_at', repliedAt: 'replied_at' };
     const set = cols.map((k) => `${map[k]} = ?`).join(', ');
     this.db.prepare(`UPDATE outreach_contacts SET ${set}, updated_at = ? WHERE campaign_id = ? AND phone = ?`).run(...cols.map((k) => fields[k]), now, campaignId, phone);
   }
@@ -446,7 +446,7 @@ class OutreachStore {
 
   // Leaving test mode: forget this campaign's simulated progress (real sends
   // and opt-outs stay).
-  clearTest(campaignId) {
+  clearTest(campaignId, steps = 3) {
     this.tx(() => {
       this.db.prepare('DELETE FROM outreach_sends WHERE campaign_id = ? AND test = 1').run(campaignId);
       const real = this.db
@@ -459,7 +459,7 @@ class OutreachStore {
         // Progress always comes from real sends; a status the user (or the
         // contact) chose is kept.
         const keep = ['opted_out', 'excluded', 'replied', 'skipped'].includes(c.state);
-        this.setContact(campaignId, c.phone, { stage, lastSentAt: r ? r.t : null, ...(keep ? {} : { state: stage === 0 ? 'queued' : stage >= 3 ? 'done' : 'active' }) });
+        this.setContact(campaignId, c.phone, { stage, lastSentAt: r ? r.t : null, ...(keep ? {} : { state: stage === 0 ? 'queued' : stage >= steps ? 'done' : 'active' }) });
       }
     });
   }
@@ -474,7 +474,7 @@ function toCampaign(r) {
 }
 
 function toContact(r) {
-  return { campaignId: r.campaign_id, phone: r.phone, leadId: r.lead_id, name: r.name, stage: r.stage, state: r.state, lastSentAt: r.last_sent_at, addedAt: r.added_at, updatedAt: r.updated_at, note: r.note, attempts: r.attempts ?? 0, retryAt: r.retry_at ?? null };
+  return { campaignId: r.campaign_id, phone: r.phone, leadId: r.lead_id, name: r.name, stage: r.stage, state: r.state, lastSentAt: r.last_sent_at, addedAt: r.added_at, updatedAt: r.updated_at, note: r.note, attempts: r.attempts ?? 0, retryAt: r.retry_at ?? null, repliedAt: r.replied_at ?? null };
 }
 
 module.exports = { ChatStore, OutreachStore };

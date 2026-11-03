@@ -12,6 +12,14 @@ const { LeadStore } = require('../src/database/db');
 const { OutreachStore } = require('../src/database/wa-store');
 const { Outreach, MAX_ATTEMPTS } = require('../src/whatsapp/outreach');
 
+// New campaigns start with message 1 only; these tests use the classic
+// three-message introduction.
+function threeMessages(store) {
+  const create = store.createCampaign.bind(store);
+  store.createCampaign = (name, config, ...rest) => create(name, { ...config, templates: require('../src/whatsapp/templates').DEFAULT_TEMPLATES }, ...rest);
+  return store;
+}
+
 const MIN = 60_000;
 const START = Date.parse('2026-10-21T05:00:00Z'); // 10:00 in Pakistan
 
@@ -36,7 +44,7 @@ function world({ file } = {}) {
   };
   const make = () =>
     new Outreach({
-      store: new OutreachStore(db.db),
+      store: threeMessages(new OutreachStore(db.db)),
       state: { get: (k) => db.getState(k), set: (k, v) => db.setState(k, v) },
       transport,
       details: (c) => ({ business: c.leadId ? db.leadById(c.leadId)?.name : null }),

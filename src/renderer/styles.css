@@ -2090,3 +2090,33 @@ button.or-badge { cursor: pointer; }
   .or-side { position: static; }
   .or-set-grid { grid-template-columns: 1fr; }
 }
+
+/* Outreach: a fixed frame with independently scrolling areas (the page never scrolls) */
+.outreach.or-grid { height: 100%; min-height: 0; overflow: hidden; padding-bottom: 14px; grid-template-rows: minmax(0, 1fr); }
+.or-side { position: static; height: 100%; min-height: 0; }
+.or-accounts { flex: none; display: flex; flex-direction: column; max-height: 42%; min-height: 0; }
+.or-accounts .or-acc-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.or-campaigns { flex: 1 1 auto; min-height: 120px; display: flex; flex-direction: column; overflow: hidden; }
+.or-campaigns .or-card-head, .or-campaigns .or-bulk { flex: none; }
+.or-campaigns-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; margin: 0 -6px; padding: 0 6px 2px; scrollbar-gutter: stable; }
+.or-main { height: 100%; min-height: 0; padding-bottom: 0; }
+.or-head, .or-tabs { flex: none; }
+.or-pane { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 12px; padding: 0 2px 12px; scrollbar-gutter: stable; }
+.or-blank { flex: 1; }
+.or-savebar { position: static; flex: none; }
+/* Long lists inside a section scroll inside their own card. */
+.or-live .or-q, .or-sent .or-table-scroll, .or-prev-list { max-height: 360px; overflow-y: auto; overscroll-behavior: contain; }
+.or-contacts .table-scroll { max-height: calc(100vh - 420px); min-height: 160px; overflow: auto; overscroll-behavior: contain; }
+.or-contacts .mini-table thead th { position: sticky; top: 0; background: var(--surface); z-index: 1; }
+.or-vars { max-height: 520px; overflow-y: auto; overscroll-behavior: contain; }
+.or-link-list, .or-voice-list { max-height: 320px; overflow-y: auto; overscroll-behavior: contain; }
+@media (max-width: 900px) {
+  .outreach.or-grid { grid-template-rows: auto minmax(0, 1fr); }
+  .or-side { height: auto; max-height: 40vh; }
+}
+.campaign-history .table-scroll { max-height: 320px; overflow: auto; overscroll-behavior: contain; }
+.or-add-row { display: flex; flex-wrap: wrap; gap: 8px; padding: 2px 0; }
+.or-add-row .btn { gap: 6px; border-style: dashed; background: transparent; }
+.or-add-row .btn:hover:not(:disabled) { border-color: var(--accent-line); color: var(--accent); background: var(--accent-soft); }
+.or-with { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); }
+.or-with select { height: 28px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: var(--r-sm); background: var(--surface); color: var(--text); font: 12.5px var(--font); }

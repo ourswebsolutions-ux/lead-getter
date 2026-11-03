@@ -855,7 +855,6 @@ function initChatsAndOutreach(cipher) {
     },
     audio: { info: (id) => audioLibrary.info(id) },
     details: (c) => ({ business: c.leadId ? store.leadById(c.leadId)?.name || null : null }),
-    hasReplied: (phone, since) => Boolean(since) && chatStore.hasIncomingSince(jidOfPhone(phone), since),
     // Category campaigns fill their queues from the saved leads.
     leads: (filter = {}) => store.listLeads(filter),
     canSend: async () => activation.active,
@@ -1709,7 +1708,7 @@ app.whenReady().then(() => {
   handle('outreach:setName', withCampaign((id, phone, name) => (isPhone(phone) ? outreach.setName(id, phone, typeof name === 'string' ? name : null) : { ok: false, error: 'Invalid number.' })));
   // Preview of (possibly unsaved) templates, links included, for one contact of the campaign.
   handle('outreach:render', withCampaign((id, templates, phone, extra) => {
-    if (!Array.isArray(templates) || templates.length !== 3) return { ok: false };
+    if (!Array.isArray(templates) || !templates.length || templates.length > 10) return { ok: false };
     const { variationsOf } = require('../whatsapp/templates');
     let c = isPhone(phone) ? outreach.store.contact(id, phone) : null;
     // A category campaign before its queue fills: one of its leads as a sample.
@@ -1729,7 +1728,7 @@ app.whenReady().then(() => {
     }
     const clean = templates.map((t) => ({ variations: variationsOf(t).slice(0, 20).map((v) => ({ text: v.text.slice(0, 1000), fallback: v.fallback.slice(0, 1000) })) }));
     const links = Array.isArray(extra?.links) ? extra.links.slice(0, 10).map((l) => ({ title: String(l?.title ?? ''), url: String(l?.url ?? '') })) : null;
-    const attachStep = [1, 2, 3].includes(Number(extra?.attachStep)) ? Number(extra.attachStep) : null;
+    const attachStep = Number.isInteger(Number(extra?.attachStep)) && Number(extra.attachStep) >= 1 && Number(extra.attachStep) <= templates.length ? Number(extra.attachStep) : null;
     return { ok: true, sample, values: c ? outreach.values(c) : { name: null, business: null }, messages: outreach.preview(c || { name: null }, clean, { links, attachStep }) };
   }));
   // Voice files: chosen on this computer, checked and copied into the app.

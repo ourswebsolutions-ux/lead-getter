@@ -12,6 +12,14 @@ const { OutreachStore } = require('../src/database/wa-store');
 const { Outreach, timeZoneOf, inQuietHours, isRestriction } = require('../src/whatsapp/outreach');
 const { extractName, cleanBusiness, pickName, render, validateTemplates, isOptOut, DEFAULT_TEMPLATES } = require('../src/whatsapp/templates');
 
+// New campaigns start with message 1 only; these tests use the classic
+// three-message introduction.
+function threeMessages(store) {
+  const create = store.createCampaign.bind(store);
+  store.createCampaign = (name, config, ...rest) => create(name, { ...config, templates: require('../src/whatsapp/templates').DEFAULT_TEMPLATES }, ...rest);
+  return store;
+}
+
 const MIN = 60_000;
 // 10:00 in Pakistan (UTC+5), a Wednesday.
 const START = Date.parse('2026-10-21T05:00:00Z');
@@ -33,7 +41,7 @@ function setup({ test: testMode = false, contacts = 3, ready = true, file, plan 
   };
   const outreach = () =>
     new Outreach({
-      store: new OutreachStore(db.db),
+      store: threeMessages(new OutreachStore(db.db)),
       state: { get: (k) => db.getState(k), set: (k, v) => db.setState(k, v) },
       transport,
       details: (c) => ({ business: `${c.name || 'Some'} Real Estate` }),
@@ -145,9 +153,9 @@ test('one contact at a time: three messages about a minute apart, then the inter
   assert.equal(h.c.load().pauseReason, 'finished');
 });
 
-test('gaps: 55-65 s within a contact; between contacts exactly the campaign’s interval (editable, any value)', () => {
+test('gaps: a random 30-60 s between one contact’s messages; between contacts exactly the campaign’s interval (editable, any value)', () => {
   const h = setup();
-  for (const [r, stage] of [[0, 55_000], [1, 65_000], [0.5, 60_000]]) {
+  for (const [r, stage] of [[0, 30_000], [1, 60_000], [0.5, 45_000]]) {
     h.o.random = () => r;
     assert.equal(h.o.stageGap(), stage);
     assert.equal(h.o.contactGap(h.c.load().config), 30 * MIN);
@@ -297,45 +305,40 @@ test('each stage is sent at most once, even with two schedulers or a lost update
   assert.equal(h.c.contact('+923001000000').stage, 3);
 });
 
-test('a reply pauses that contact; the next contact waits the full gap; an opt-out stops it for good', async () => {
+test('a reply is recorded and the contact’s remaining messages still go; an opt-out stops it for good', async () => {
   const h = setup({ contacts: 3 });
   const [A, B, C] = ['+923001000000', '+923001000001', '+923001000002'];
   h.c.start({ acknowledge: true });
   await h.o.tick(); // A, message 1
-  const aLast = h.sent[0].at;
   h.o.onIncoming({ phone: A, text: 'Walaikum assalam, kaun?' });
-  assert.equal(h.c.contact(A).state, 'replied');
-  await run(h, 25 * MIN);
-  assert.equal(h.sent.length, 1, 'no more messages to A, and B waits');
-  while (h.sent.length < 2) await run(h, 30_000);
-  assert.equal(h.sent[1].phone, B);
-  assert.ok(h.sent[1].at - aLast >= 30 * MIN, 'B starts the interval after A’s last message');
+  assert.equal(h.c.contact(A).state, 'active', 'the sequence goes on');
+  assert.equal(h.c.contact(A).repliedAt, h.clock.t);
+  assert.equal(h.c.snapshot().status, 'running', 'the campaign goes on');
+  await run(h, 3 * MIN);
+  assert.deepEqual(h.sent.map((s) => s.phone), [A, A, A], 'A gets messages 2 and 3');
+  assert.ok(h.sent[1].at - h.sent[0].at >= 30_000 && h.sent[1].at - h.sent[0].at <= 60_000);
+  assert.equal(h.c.contact(A).state, 'done');
+  const aLast = h.sent[2].at;
+  while (h.sent.length < 4) await run(h, 30_000);
+  assert.equal(h.sent[3].phone, B);
+  assert.ok(h.sent[3].at - aLast >= 30 * MIN, 'B starts the interval after A’s last message');
   // B opts out right after message 1: no more to B; C after the gap.
   h.o.onIncoming({ phone: B, text: 'Please do not message me again' });
   await run(h, 60 * MIN);
-  assert.deepEqual(h.sent.map((s) => s.phone), [A, B, C, C, C].slice(0, h.sent.length));
   assert.equal(h.sent.filter((s) => s.phone === B).length, 1);
+  assert.equal(h.sent[4].phone, C);
   assert.equal(h.c.contact(B).state, 'opted_out');
   assert.equal(h.c.include(B).ok, false, 'an opt-out cannot be resumed');
   const again = h.c.addLeads([{ phone: B, name: null }]);
   assert.equal(again.added, 0);
   assert.equal(again.skippedDetail.optedOut, 1, 'opted out: never added back');
-  // The replied contact can be handed back to the campaign by the user.
-  assert.equal(h.c.include(A).ok, true);
+  // The user can still stop a contact by hand.
+  assert.equal(h.c.exclude(C).ok, true);
+  const n = h.sent.length;
+  await run(h, 10 * MIN);
+  assert.equal(h.sent.length, n);
 });
 
-test('a reply that was not matched still stops the next message (safety net)', async () => {
-  const h = setup({ contacts: 1 });
-  let replied = false;
-  const o = new Outreach({ ...h.o, store: h.o.store, state: h.o.state, transport: h.transport, details: h.o.details, clock: h.o.clock, random: h.o.random, tickMs: 1e9, hasReplied: () => replied });
-  const oc = o.campaign(h.c.id);
-  oc.start({ acknowledge: true });
-  await o.tick();
-  replied = true;
-  await run(h, 2 * 60 * MIN, o);
-  assert.equal(h.sent.length, 1);
-  assert.equal(oc.contact('+923001000000').state, 'replied');
-});
 
 test('quiet hours in the recipient’s time zone', async () => {
   assert.equal(timeZoneOf('+923001234567'), 'Asia/Karachi');

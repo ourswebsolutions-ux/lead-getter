@@ -76,6 +76,7 @@ function pickName({ contactName, pushName, businessName } = {}) {
 }
 
 const MAX_VARIATIONS = 20;
+const MAX_MESSAGES = 10;
 const PLACEHOLDER = /\{\s*([A-Za-z_][\w ]*?)\s*\}/g;
 
 // {business_name} and {business name} are other spellings of {business}.
@@ -96,10 +97,12 @@ function normalizeTemplates(list) {
   return (Array.isArray(list) ? list : []).map((t) => ({ variations: variationsOf(t).map((v) => ({ text: v.text.trim(), fallback: v.fallback.trim() })) }));
 }
 
-// Problems with a set of three templates (empty list = fine).
+// Problems with a campaign's messages (empty list = fine): message 1 is
+// required; more (up to 10) only when the user adds them.
 function validateTemplates(list) {
   const errors = [];
-  if (!Array.isArray(list) || list.length !== 3) return ['Three messages are needed.'];
+  if (!Array.isArray(list) || !list.length) return ['Message 1 is needed.'];
+  if (list.length > MAX_MESSAGES) return [`Up to ${MAX_MESSAGES} messages.`];
   list.forEach((stage, i) => {
     const vars = variationsOf(stage);
     if (!vars.length) return errors.push(`Message ${i + 1} needs at least one version.`);
@@ -196,4 +199,4 @@ function isOptOut(text) {
   return OPT_OUT.test(String(text || ''));
 }
 
-module.exports = { DEFAULT_TEMPLATES, MAX_VARIATIONS, MAX_LINKS, extractName, cleanBusiness, pickName, render, validateTemplates, normalizeTemplates, variationsOf, usedPlaceholders, isOptOut, cleanUrl, validateLinks, withLinks };
+module.exports = { DEFAULT_TEMPLATES, MAX_VARIATIONS, MAX_MESSAGES, MAX_LINKS, extractName, cleanBusiness, pickName, render, validateTemplates, normalizeTemplates, variationsOf, usedPlaceholders, isOptOut, cleanUrl, validateLinks, withLinks };

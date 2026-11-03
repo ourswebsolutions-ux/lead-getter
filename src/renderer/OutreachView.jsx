@@ -20,7 +20,7 @@ const STATE_LABEL = {
 const SEND_LABEL = { pending: 'Sending', sent: 'Sent', delivered: 'Delivered', read: 'Read', failed: 'Failed', unknown: 'Unknown: check chat' };
 const WAITING = {
   interval: 'Waiting for the interval before the next contact',
-  next_message: 'Next message to the same contact in about a minute',
+  next_message: 'Next message to the same contact in 30–60 seconds',
   whatsapp: 'Waiting for WhatsApp to connect',
   subscription: 'Waiting for an active plan (Activate at the top)',
   daily_cap: 'Daily limit reached: continues tomorrow',
@@ -44,10 +44,10 @@ const hours = Array.from({ length: 24 }, (_, h) => h);
 const hh = (h) => `${String(h).padStart(2, '0')}:00`;
 const when = (ms) => (ms ? new Date(ms).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '–');
 
-function Stage({ n }) {
+function Stage({ n, of = 3 }) {
   return (
-    <span className="stage-dots" aria-label={`${n} of 3 messages sent`} title={`${n} of 3 messages sent`}>
-      {[1, 2, 3].map((i) => (
+    <span className="stage-dots" aria-label={`${n} of ${of} messages sent`} title={`${n} of ${of} messages sent`}>
+      {Array.from({ length: of }, (_, k) => k + 1).map((i) => (
         <span key={i} className={i <= n ? 'on' : ''} />
       ))}
     </span>
@@ -262,7 +262,7 @@ function Acknowledge({ onCancel, onConfirm }) {
       <div className="ack" role="dialog" aria-modal="true" aria-label="Start live outreach">
         <h2>Send automatically from your WhatsApp?</h2>
         <p>
-          WhatsApp’s terms don’t allow automated messaging from unofficial apps, and numbers that send unexpected messages can be restricted or banned. Lead Finder sends one contact at a time, at the interval and daily limit you set, stops when someone replies or opts out, and pauses if WhatsApp refuses messages. The risk to your
+          WhatsApp’s terms don’t allow automated messaging from unofficial apps, and numbers that send unexpected messages can be restricted or banned. Lead Finder sends one contact at a time, at the interval and daily limit you set, stops messaging anyone who opts out, and pauses if WhatsApp refuses messages. The risk to your
           number remains yours.
         </p>
         <label className="ack-check">
@@ -327,6 +327,7 @@ function CategoryCampaigns({ overview, cats, selected, onSelect, onToggle, toggl
           </button>
         </div>
       )}
+      <div className="or-campaigns-scroll">
       {!rows.length && <p className="or-empty">No lead categories yet.</p>}
       <ul className="or-list" aria-label="Category campaigns">
         {rows.map((r) => {
@@ -384,6 +385,7 @@ function CategoryCampaigns({ overview, cats, selected, onSelect, onToggle, toggl
           </ul>
         </>
       )}
+      </div>
     </div>
   );
 }
@@ -661,7 +663,6 @@ function AccountPicker({ campaignName, accounts, usedBy, current, onCancel, onCh
 const TABS = [
   ['overview', 'Overview', 'grid'],
   ['messages', 'Messages', 'message'],
-  ['attachments', 'Attachments', 'link'],
   ['settings', 'Settings', 'sliders'],
   ['contacts', 'Contacts', 'users'],
 ];
@@ -716,7 +717,7 @@ function LiveQueue({ snap, contacts, now, statusText }) {
         <span className="mono">{c.phone}</span>
       </span>
       <span className="or-q-cat">{snap.name}</span>
-      {tag === 'now' ? <span className="or-chip sending">Sending · {c.stage}/3</span> : c.state === 'failed' ? <span className="or-chip failed">Retry</span> : c.stage > 0 ? <span className="or-chip pending">{c.stage}/3 sent</span> : <span className="or-chip pending">Pending</span>}
+      {tag === 'now' ? <span className="or-chip sending">Sending · {c.stage}/{snap.config.templates.length}</span> : c.state === 'failed' ? <span className="or-chip failed">Retry</span> : c.stage > 0 ? <span className="or-chip pending">{c.stage}/{snap.config.templates.length} sent</span> : <span className="or-chip pending">Pending</span>}
     </li>
   );
   return (
@@ -759,6 +760,7 @@ function SentList({ snap, onOpen }) {
       {!sends.length ? (
         <p className="or-empty">Nothing sent yet.</p>
       ) : (
+        <div className="or-table-scroll">
         <table className="or-table">
           <tbody>
             {(open ? sends : sends.slice(0, 2)).map((s) => (
@@ -770,7 +772,7 @@ function SentList({ snap, onOpen }) {
                   <strong>{s.name || 'No name'}</strong> <span className="mono muted">{s.phone}</span>
                   <span className="or-snippet">{s.kind === 'audio' ? s.body : s.body ? s.body.split('\n')[0] : `Message ${s.stage}`}</span>
                 </td>
-                <td className="or-step">{s.stage} of 3</td>
+                <td className="or-step">{s.stage} of {snap.config.templates.length}</td>
                 <td>
                   <span className={`or-chip ${s.status}`} title={s.error || ''}>
                     {SEND_LABEL[s.status] || s.status}
@@ -781,6 +783,7 @@ function SentList({ snap, onOpen }) {
             ))}
           </tbody>
         </table>
+        </div>
       )}
       <Disclosure total={sends.length} shown={2} open={open} onToggle={() => setOpen((v) => !v)} />
     </section>
@@ -876,7 +879,7 @@ function PreviewModal({ item, preview, draft, contactName, onClose }) {
             <Icon name={sent?.kind === 'audio' ? 'audio' : 'message'} />
           </span>
           <div>
-            <strong>{sent ? `${sent.name || 'No name'} · message ${sent.stage} of 3` : `Message ${item.step}${item.count > 1 ? ` · variation ${LETTER(item.variant)}` : ''}`}</strong>
+            <strong>{sent ? `${sent.name || 'No name'} · message ${sent.stage} of ${draft.templates.length}` : `Message ${item.step}${item.count > 1 ? ` · variation ${LETTER(item.variant)}` : ''}`}</strong>
             <span className="muted small">{sent ? `${sent.phone} · ${SEND_LABEL[sent.status] || sent.status} · ${when(sent.sentAt || sent.createdAt)}` : contactName}</span>
           </div>
           <button type="button" className="icon-btn" aria-label="Close" onClick={onClose}>
@@ -931,10 +934,12 @@ function PreviewModal({ item, preview, draft, contactName, onClose }) {
   );
 }
 
-// One message of the sequence and its variations, rotated between contacts.
-function StepEditor({ index, step, disabled, onChange, preview }) {
+// One message of the sequence and its variations (rotated between contacts).
+// Message 1 is required; the others can be removed.
+function StepEditor({ index, step, disabled, onChange, onRemove, preview }) {
   const refs = useRef([]);
   const vars = step.variations;
+  const n = index + 1;
   const set = (j, patch) => onChange({ variations: vars.map((v, k) => (k === j ? { ...v, ...patch } : v)) });
   const insert = (j, token) => {
     const el = refs.current[j];
@@ -949,21 +954,26 @@ function StepEditor({ index, step, disabled, onChange, preview }) {
     });
   };
   return (
-    <section className="panel or-step" aria-label={`Message ${index + 1}`}>
+    <section className="panel or-step" aria-label={`Message ${n}`}>
       <div className="or-card-head">
         <h3>
-          <span className="or-step-num">{index + 1}</span> Message {index + 1}
+          <span className="or-step-num">{n}</span> Message {n}
         </h3>
         {vars.length > 1 && <span className="or-badge">Rotates · {vars.length}</span>}
-        <button type="button" className="btn btn-sm" disabled={disabled || vars.length >= 20} onClick={() => onChange({ variations: [...vars, { text: '', fallback: '' }] })} aria-label={`Add message to step ${index + 1}`}>
-          <Icon name="plus" size={13} /> Add message
+        <button type="button" className="btn btn-sm btn-ghost" disabled={disabled || vars.length >= 20} onClick={() => onChange({ variations: [...vars, { text: '', fallback: '' }] })} aria-label={`Add variation to message ${n}`} title="Another version, rotated between contacts">
+          <Icon name="plus" size={13} /> Variation
         </button>
+        {onRemove && (
+          <button type="button" className="icon-btn danger" disabled={disabled} aria-label={`Remove message ${n}`} title="Remove message" onClick={onRemove}>
+            <Icon name="trash" size={14} />
+          </button>
+        )}
       </div>
       <div className="or-vars">
         {vars.map((v, j) => (
           <div key={j} className="or-var template">
             <div className="or-var-head">
-              <span className="or-var-tag">{vars.length > 1 ? LETTER(j) : index + 1}</span>
+              {vars.length > 1 && <span className="or-var-tag">{LETTER(j)}</span>}
               <span className="or-tokens">
                 <button type="button" className="chip-toggle" disabled={disabled} onClick={() => insert(j, '{name}')}>
                   {'{name}'}
@@ -972,9 +982,11 @@ function StepEditor({ index, step, disabled, onChange, preview }) {
                   {'{business name}'}
                 </button>
               </span>
-              <button type="button" className="icon-btn danger" disabled={disabled || vars.length <= 1} title={vars.length <= 1 ? 'At least one message is needed' : 'Delete'} aria-label={`Delete message ${index + 1}${vars.length > 1 ? LETTER(j) : ''}`} onClick={() => onChange({ variations: vars.filter((_, k) => k !== j) })}>
-                <Icon name="trash" size={14} />
-              </button>
+              {vars.length > 1 && (
+                <button type="button" className="icon-btn danger" disabled={disabled} title="Delete variation" aria-label={`Delete message ${n}${LETTER(j)}`} onClick={() => onChange({ variations: vars.filter((_, k) => k !== j) })}>
+                  <Icon name="x" size={14} />
+                </button>
+              )}
             </div>
             <textarea
               ref={(el) => (refs.current[j] = el)}
@@ -983,7 +995,8 @@ function StepEditor({ index, step, disabled, onChange, preview }) {
               disabled={disabled}
               value={v.text}
               onChange={(e) => set(j, { text: e.target.value })}
-              aria-label={vars.length > 1 ? `Message ${index + 1}${LETTER(j)}` : `Message ${index + 1}`}
+              aria-label={vars.length > 1 ? `Message ${n}${LETTER(j)}` : `Message ${n}`}
+              aria-required={index === 0}
               placeholder="Write the message…"
             />
             {(placeholders(v.text) || v.fallback) && (
@@ -995,7 +1008,7 @@ function StepEditor({ index, step, disabled, onChange, preview }) {
                 value={v.fallback}
                 placeholder="When the name or business isn’t known"
                 onChange={(e) => set(j, { fallback: e.target.value })}
-                aria-label={vars.length > 1 ? `Message ${index + 1}${LETTER(j)} without a name` : `Message ${index + 1} without a name`}
+                aria-label={vars.length > 1 ? `Message ${n}${LETTER(j)} without a name` : `Message ${n} without a name`}
               />
             )}
             {preview?.[j] && (
@@ -1010,105 +1023,146 @@ function StepEditor({ index, step, disabled, onChange, preview }) {
   );
 }
 
-function Attachments({ draft, disabled, edit, notify }) {
+// Which message the links and voice files go with (only when there is a choice).
+function SendWith({ draft, disabled, edit }) {
+  const n = draft.templates.length;
+  if (n < 2) return null;
+  return (
+    <label className="or-with">
+      <span>With</span>
+      <select disabled={disabled} value={Math.min(draft.attachStep || n, n)} onChange={(e) => edit({ attachStep: Number(e.target.value) })} aria-label="Attachments go with">
+        {draft.templates.map((_, i) => (
+          <option key={i} value={i + 1}>
+            Message {i + 1}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+// Links: shown only when there is at least one.
+function LinksSection({ draft, disabled, edit }) {
+  const links = draft.links;
+  if (!links.length) return null;
+  const setLink = (i, patch) => edit({ links: links.map((l, k) => (k === i ? { ...l, ...patch } : l)) });
+  return (
+    <section className="panel or-links" aria-label="Links">
+      <div className="or-card-head">
+        <h3>
+          <Icon name="link" size={15} /> Links <span className="or-count">{links.length}</span>
+        </h3>
+        <SendWith draft={draft} disabled={disabled} edit={edit} />
+      </div>
+      <ul className="or-link-list">
+        {links.map((l, i) => {
+          const problem = l.url || l.title ? urlProblem(l.url) : null;
+          return (
+            <li key={i} className={problem ? 'bad' : ''}>
+              <span className="or-link-icon">
+                <Icon name="link" size={14} />
+              </span>
+              <input className="or-link-title" disabled={disabled} value={l.title} maxLength={60} placeholder="Title (optional)" onChange={(e) => setLink(i, { title: e.target.value })} aria-label={`Link ${i + 1} title`} />
+              <input className="or-link-url mono" disabled={disabled} value={l.url} placeholder="https://" autoFocus={!l.url && !l.title && i === links.length - 1} onChange={(e) => setLink(i, { url: e.target.value })} aria-label={`Link ${i + 1} address`} aria-invalid={Boolean(problem)} />
+              <button type="button" className="icon-btn danger" disabled={disabled} aria-label={`Remove link ${i + 1}`} onClick={() => edit({ links: links.filter((_, k) => k !== i) })}>
+                <Icon name="x" size={14} />
+              </button>
+              {problem && <span className="or-link-err">{problem}</span>}
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
+// Voice files: shown only when there is at least one (or a file was refused).
+function VoicesSection({ draft, disabled, edit, errors }) {
+  if (!draft.voices.length && !errors.length) return null;
+  return (
+    <section className="panel or-voices" aria-label="Voice files">
+      <div className="or-card-head">
+        <h3>
+          <Icon name="audio" size={15} /> Voice files <span className="or-count">{draft.voices.length}</span>
+        </h3>
+        {draft.voices.length > 0 && <SendWith draft={draft} disabled={disabled} edit={edit} />}
+      </div>
+      <ul className="or-voice-list">
+        {draft.voices.map((v, i) => (
+          <li key={v.id}>
+            <span className="or-voice-icon">
+              <Icon name="audio" size={15} />
+            </span>
+            <span className="or-voice-main">
+              <strong title={v.name}>{v.name}</strong>
+              <span>
+                <span className="or-badge">{fmtOf(v)}</span> {kb(v.size)} {v.ptt ? '· voice note' : '· audio file'}
+              </span>
+            </span>
+            <VoicePlayer voice={v} />
+            <button type="button" className="icon-btn" disabled={disabled || i === 0} aria-label={`Move ${v.name} up`} title="Send earlier" onClick={() => edit({ voices: draft.voices.map((x, k, a) => (k === i - 1 ? a[i] : k === i ? a[i - 1] : x)) })}>
+              <Icon name="chevron" size={13} className="or-up" />
+            </button>
+            <button type="button" className="icon-btn danger" disabled={disabled} aria-label={`Remove ${v.name}`} onClick={() => edit({ voices: draft.voices.filter((x) => x.id !== v.id) })}>
+              <Icon name="x" size={14} />
+            </button>
+          </li>
+        ))}
+      </ul>
+      {errors.map((e) => (
+        <p key={e} className="composer-error" role="alert">
+          {e}
+        </p>
+      ))}
+    </section>
+  );
+}
+
+// The campaign's content: message 1 (required), then only what the user adds.
+function Composer({ draft, disabled, edit, notify, preview }) {
   const [adding, setAdding] = useState(false);
   const [errors, setErrors] = useState([]);
-  const links = draft.links;
-  const setLink = (i, patch) => edit({ links: links.map((l, k) => (k === i ? { ...l, ...patch } : l)) });
-  const pick = async () => {
+  const steps = draft.templates;
+  const setStep = (i, step) => edit({ templates: steps.map((t, j) => (j === i ? step : t)) });
+  const removeStep = (i) => {
+    const templates = steps.filter((_, j) => j !== i);
+    const at = draft.attachStep || steps.length;
+    edit({ templates, attachStep: at === i + 1 ? templates.length : at > i + 1 ? at - 1 : Math.min(at, templates.length) });
+  };
+  const addVoice = async () => {
     setAdding(true);
     try {
       const r = await api.outreachAudioPick();
       if (r.canceled) return;
-      setErrors(r.errors || []);
+      const errs = [...(r.errors || [])];
       if (r.voices?.length) {
         const room = 10 - draft.voices.length;
         edit({ voices: [...draft.voices, ...r.voices.slice(0, room)] });
-        if (r.voices.length > room) setErrors((e) => [...e, 'Up to 10 voice files per campaign.']);
+        if (r.voices.length > room) errs.push('Up to 10 voice files per campaign.');
       } else if (!r.ok && !r.errors?.length && !planNeeded(r)) notify({ type: 'error', text: r.error });
+      setErrors(errs);
     } finally {
       setAdding(false);
     }
   };
   return (
-    <div className="or-attach">
-      <section className="panel or-attach-with" aria-label="Send attachments with">
-        <span className="or-label">Send links and voice files with</span>
-        <div className="segmented" role="group" aria-label="Attachments go with">
-          {[1, 2, 3].map((n) => (
-            <button key={n} type="button" disabled={disabled} className={draft.attachStep === n ? 'on' : ''} aria-pressed={draft.attachStep === n} onClick={() => edit({ attachStep: n })}>
-              Message {n}
-            </button>
-          ))}
-        </div>
-      </section>
-      <section className="panel or-links" aria-label="Links">
-        <div className="or-card-head">
-          <h3>
-            <Icon name="link" size={15} /> Links <span className="or-count">{links.length}</span>
-          </h3>
-          <button type="button" className="btn btn-sm" disabled={disabled || links.length >= 10} onClick={() => edit({ links: [...links, { title: '', url: '' }] })}>
-            <Icon name="plus" size={13} /> Add link
-          </button>
-        </div>
-        {!links.length && <p className="or-empty">No links.</p>}
-        <ul className="or-link-list">
-          {links.map((l, i) => {
-            const problem = l.url || l.title ? urlProblem(l.url) : null;
-            return (
-              <li key={i} className={problem ? 'bad' : ''}>
-                <span className="or-link-icon">
-                  <Icon name="link" size={14} />
-                </span>
-                <input className="or-link-title" disabled={disabled} value={l.title} maxLength={60} placeholder="Title (optional)" onChange={(e) => setLink(i, { title: e.target.value })} aria-label={`Link ${i + 1} title`} />
-                <input className="or-link-url mono" disabled={disabled} value={l.url} placeholder="https://" onChange={(e) => setLink(i, { url: e.target.value })} aria-label={`Link ${i + 1} address`} aria-invalid={Boolean(problem)} />
-                <button type="button" className="icon-btn danger" disabled={disabled} aria-label={`Remove link ${i + 1}`} onClick={() => edit({ links: links.filter((_, k) => k !== i) })}>
-                  <Icon name="x" size={14} />
-                </button>
-                {problem && <span className="or-link-err">{problem}</span>}
-              </li>
-            );
-          })}
-        </ul>
-      </section>
-      <section className="panel or-voices" aria-label="Voice files">
-        <div className="or-card-head">
-          <h3>
-            <Icon name="audio" size={15} /> Voice files <span className="or-count">{draft.voices.length}</span>
-          </h3>
-          <button type="button" className="btn btn-sm" disabled={disabled || adding || draft.voices.length >= 10} onClick={pick}>
-            <Icon name="plus" size={13} /> {adding ? 'Adding…' : 'Attach files'}
-          </button>
-        </div>
-        {!draft.voices.length && <p className="or-empty">MP3 · M4A · AAC · Ogg/Opus · AMR, up to 16 MB each.</p>}
-        <ul className="or-voice-list">
-          {draft.voices.map((v, i) => (
-            <li key={v.id}>
-              <span className="or-voice-icon">
-                <Icon name="audio" size={15} />
-              </span>
-              <span className="or-voice-main">
-                <strong title={v.name}>{v.name}</strong>
-                <span>
-                  <span className="or-badge">{fmtOf(v)}</span> {kb(v.size)} {v.ptt ? '· voice note' : '· audio file'}
-                </span>
-              </span>
-              <VoicePlayer voice={v} />
-              <button type="button" className="icon-btn" disabled={disabled || i === 0} aria-label={`Move ${v.name} up`} title="Send earlier" onClick={() => edit({ voices: draft.voices.map((x, k, a) => (k === i - 1 ? a[i] : k === i ? a[i - 1] : x)) })}>
-                <Icon name="chevron" size={13} className="or-up" />
-              </button>
-              <button type="button" className="icon-btn danger" disabled={disabled} aria-label={`Remove ${v.name}`} onClick={() => edit({ voices: draft.voices.filter((x) => x.id !== v.id) })}>
-                <Icon name="x" size={14} />
-              </button>
-            </li>
-          ))}
-        </ul>
-        {errors.map((e) => (
-          <p key={e} className="composer-error" role="alert">
-            {e}
-          </p>
-        ))}
-      </section>
+    <div className="or-messages campaign-templates">
+      {steps.map((step, i) => (
+        <StepEditor key={i} index={i} step={step} disabled={disabled} onChange={(s) => setStep(i, s)} onRemove={i > 0 ? () => removeStep(i) : null} preview={preview?.messages?.[i]} />
+      ))}
+      <LinksSection draft={draft} disabled={disabled} edit={edit} />
+      <VoicesSection draft={draft} disabled={disabled} edit={edit} errors={errors} />
+      <div className="or-add-row" role="group" aria-label="Add to the campaign">
+        <button type="button" className="btn" disabled={disabled || steps.length >= 10} onClick={() => edit({ templates: [...steps, { variations: [{ text: '', fallback: '' }] }] })}>
+          <Icon name="plus" size={14} /> Add Message
+        </button>
+        <button type="button" className="btn" disabled={disabled || draft.links.length >= 10} onClick={() => edit({ links: [...draft.links, { title: '', url: '' }] })}>
+          <Icon name="link" size={14} /> Add Link
+        </button>
+        <button type="button" className="btn" disabled={disabled || adding || draft.voices.length >= 10} onClick={addVoice}>
+          <Icon name="audio" size={14} /> {adding ? 'Adding…' : 'Add Voice'}
+        </button>
+      </div>
     </div>
   );
 }
@@ -1184,7 +1238,7 @@ export default function OutreachView({ notify, hidden }) {
       }, 150);
     });
     const offEv = api.onOutreachEvent((e) => {
-      if (e.type === 'replied') notify({ type: 'ok', text: `${e.phone} replied. The sequence stopped for them.` });
+      if (e.type === 'replied') notify({ type: 'ok', text: `${e.phone} replied. Their remaining messages still go.` });
       else if (e.type === 'opted_out') notify({ type: 'ok', text: `${e.phone} asked not to be contacted. They won’t be messaged again.` });
       else if (e.type === 'failed') notify({ type: 'error', text: `Message to ${e.phone} failed: ${e.error}${e.paused ? ' The campaign is paused.' : ''}` });
     });
@@ -1222,10 +1276,9 @@ export default function OutreachView({ notify, hidden }) {
     setDraft((d) => ({ ...d, ...patch }));
     setDirty(true);
   };
-  const editStep = (i, step) => edit({ templates: draft.templates.map((t, j) => (j === i ? step : t)) });
 
   async function save() {
-    const r = await api.outreachConfigure(snap.id, draft);
+    const r = await api.outreachConfigure(snap.id, { ...draft, links: draft.links.filter((l) => l.url.trim() || l.title.trim()) });
     if (r.ok) {
       // The saved campaign first, so the editor never shows the old one.
       await loadSnap(snap.id);
@@ -1428,7 +1481,7 @@ export default function OutreachView({ notify, hidden }) {
                   <span>Completed</span>
                 </div>
                 <div className="or-stat">
-                  <b className="mono">{counts.replied || 0}</b>
+                  <b className="mono">{contacts.filter((c) => c.repliedAt || c.state === 'replied').length}</b>
                   <span>Replied</span>
                 </div>
                 <div className={`or-stat ${counts.failed || failedSends ? 'tone-bad' : ''}`}>
@@ -1451,11 +1504,11 @@ export default function OutreachView({ notify, hidden }) {
                 <button key={key} type="button" role="tab" aria-selected={tab === key} className={tab === key ? 'on' : ''} onClick={() => setTab(key)}>
                   <Icon name={icon} size={14} /> {label}
                   {key === 'contacts' && <span className="or-count">{contacts.length}</span>}
-                  {key === 'attachments' && draft.links.length + draft.voices.length > 0 && <span className="or-count">{draft.links.length + draft.voices.length}</span>}
                 </button>
               ))}
             </nav>
 
+            <div className="or-pane">
             {tab === 'overview' && (
               <div className="or-overview">
                 <LiveQueue snap={snap} contacts={contacts} now={now} statusText={statusText} />
@@ -1465,27 +1518,25 @@ export default function OutreachView({ notify, hidden }) {
             )}
 
             {tab === 'messages' && (
-              <div className="or-messages campaign-templates">
-                <div className="or-msg-bar">
-                  <label className="or-field preview-for">
-                    <span>Preview for</span>
-                    <select value={previewPhone} onChange={(e) => setPreviewPhone(e.target.value)} aria-label="Preview for contact">
-                      {!contacts.length && <option value="">{preview?.sample ? `${preview.sample.name} · ${preview.sample.phone}` : 'A contact without a known name'}</option>}
-                      {contacts.map((c) => (
-                        <option key={c.phone} value={c.phone}>
-                          {c.name || 'No name'} · {c.phone}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                </div>
-                {draft.templates.map((step, i) => (
-                  <StepEditor key={i} index={i} step={step} disabled={running} onChange={(s) => editStep(i, s)} preview={preview?.messages?.[i]} />
-                ))}
-              </div>
+              <>
+                {contacts.length > 0 || preview?.sample ? (
+                  <div className="or-msg-bar">
+                    <label className="or-field preview-for">
+                      <span>Preview for</span>
+                      <select value={previewPhone} onChange={(e) => setPreviewPhone(e.target.value)} aria-label="Preview for contact">
+                        {!contacts.length && <option value="">{preview?.sample ? `${preview.sample.name} · ${preview.sample.phone}` : 'A contact without a known name'}</option>}
+                        {contacts.map((c) => (
+                          <option key={c.phone} value={c.phone}>
+                            {c.name || 'No name'} · {c.phone}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                ) : null}
+                <Composer draft={draft} disabled={running} edit={edit} notify={notify} preview={preview} />
+              </>
             )}
-
-            {tab === 'attachments' && <Attachments draft={draft} disabled={running} edit={edit} notify={notify} />}
 
             {tab === 'settings' && (
               <section className="panel or-settings campaign-settings" aria-label="Settings">
@@ -1607,10 +1658,15 @@ export default function OutreachView({ notify, hidden }) {
                                 </div>
                               </td>
                               <td className="progress-cell">
-                                <Stage n={c.stage} />
+                                <Stage n={c.stage} of={snap.config.templates.length} />
                                 <span className={`chip st-chip st-${c.state}`} title={c.note || ''}>
                                   {c.phone === snap.current ? 'Sending' : c.state === 'failed' && c.retryAt ? 'Failed: retrying' : STATE_LABEL[c.state] || c.state}
                                 </span>
+                                {c.repliedAt && c.state !== 'replied' && (
+                                  <span className="chip st-chip st-replied" title={`Replied ${when(c.repliedAt)}`}>
+                                    Replied
+                                  </span>
+                                )}
                               </td>
                               <td className="row-actions">
                                 {['queued', 'active'].includes(c.state) && (
@@ -1645,15 +1701,17 @@ export default function OutreachView({ notify, hidden }) {
               </>
             )}
 
+            </div>
+
             {dirty && (
               <div className="or-savebar" role="region" aria-label="Unsaved changes">
-                <span>Unsaved changes</span>
-                <button type="button" className="btn" disabled={running} onClick={() => (setDirty(false), setDraft(fresh(snap)))}>
-                  Discard
-                </button>
                 <button type="button" className="btn btn-primary" disabled={running} onClick={save}>
                   Save settings
                 </button>
+                <button type="button" className="btn" disabled={running} onClick={() => (setDirty(false), setDraft(fresh(snap)))}>
+                  Discard
+                </button>
+                <span>Unsaved changes</span>
               </div>
             )}
           </>
