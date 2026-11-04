@@ -1077,8 +1077,8 @@ export default function App({ onLock }) {
             )}
             <div className="buttons">
               {quota?.limit != null && (
-                <span className={`quota-chip ${quota.reached ? 'full' : quota.remaining <= 10 ? 'low' : ''}`} title="Leads found today with your plan (all sources together)" aria-label="Leads today">
-                  {quota.used} / {quota.limit} today
+                <span className={`quota-chip ${quota.reached ? 'full' : quota.remaining <= 10 ? 'low' : ''}`} title={quota.trial ? 'Leads left in your Free Trial (all sources together)' : 'Leads found today with your plan (all sources together)'} aria-label={quota.trial ? 'Trial leads and days left' : 'Leads today'}>
+                  {quota.trial ? `${quota.remaining} of ${quota.limit} leads left${plan?.state === 'active' ? ` · ${plan.daysLeft} day${plan.daysLeft === 1 ? '' : 's'} left` : ''}` : `${quota.used} / ${quota.limit} today`}
                 </span>
               )}
               <button type="submit" className="btn btn-primary" disabled={!canStart}>
@@ -1091,7 +1091,7 @@ export default function App({ onLock }) {
           </form>
           {quota?.reached && (
             <div className="quota-banner" role="alert">
-              <span>You have reached your daily limit of {quota.limit} leads. Upgrade your plan to find more leads.</span>
+              <span>{quota.message}</span>
               <button type="button" className="btn btn-sm btn-primary" onClick={() => setPlansOpen({ notice: null, upgrade: true })}>
                 <Icon name="crown" size={14} /> Upgrade Plan
               </button>

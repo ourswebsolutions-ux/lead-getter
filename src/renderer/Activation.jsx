@@ -23,7 +23,7 @@ export function planNeeded(res) {
 export function planPill(st) {
   if (!st) return { text: 'Plan…', tone: 'idle' };
   if (st.state === 'active') return { text: st.expiresAt ? `${st.planName} · ${st.daysLeft} day${st.daysLeft === 1 ? '' : 's'} left` : st.planName, tone: st.expiresAt && st.daysLeft <= 3 ? 'warn' : 'accent' };
-  if (st.state === 'expired') return { text: 'Plan ended · Renew', tone: 'danger' };
+  if (st.state === 'expired') return { text: st.trial ? 'Trial ended · Upgrade' : 'Plan ended · Renew', tone: 'danger' };
   return { text: 'Activate', tone: 'warn' };
 }
 
@@ -91,7 +91,7 @@ async function copy(text, label, notify) {
 
 export default function Activation({ status: st, notice, upgrade = false, onClose, notify }) {
   const [choosing, setChoosing] = useState(upgrade); // renewing (or upgrading from the daily limit), or changing plan after a request
-  const [plan, setPlan] = useState(st?.pending?.plan || st?.plan || 'monthly');
+  const [plan, setPlan] = useState(st?.pending?.plan || (st?.trial ? null : st?.plan) || 'monthly');
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(''); // '' | 'request' | 'verify'
   const [error, setError] = useState('');

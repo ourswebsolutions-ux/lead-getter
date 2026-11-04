@@ -822,9 +822,15 @@ class LeadStore {
   // Nested calls join the transaction already open.
   // The daily lead allowance (main/lead-quota.js): gate() -> { day, limit }
   // (limit null: unlimited); onLimit(gate) is told when a lead is refused.
-  setLeadGate(gate, onLimit = () => {}) {
+  setLeadGate(gate, onLimit = () => {}, onCredit = () => {}) {
     this.leadGate = gate;
     this.onLeadLimit = onLimit;
+    this.onLeadCredit = onCredit;
+  }
+
+  // Credits used before the app's data was cleared (they have no lead here).
+  seedCredits(day, n) {
+    for (let i = 1; i <= n; i++) this.db.prepare('INSERT OR IGNORE INTO lead_credits (lead_id, day, at, source) VALUES (?, ?, ?, ?)').run(-i, day, Date.now(), 'restored');
   }
 
   creditsOn(day) {
@@ -847,6 +853,7 @@ class LeadStore {
             throw refused;
           }
           this.db.prepare('INSERT OR IGNORE INTO lead_credits (lead_id, day, at, source) VALUES (?, ?, ?, ?)').run(r.lead.id, g.day, Date.now(), source);
+          this.onLeadCredit?.(g);
         }
         return r;
       });

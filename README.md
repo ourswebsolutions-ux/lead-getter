@@ -130,6 +130,13 @@ A business keeps the leads it has already become. One skipped earlier only becau
 
 Searching (Google Maps, Facebook, LinkedIn and podcasts), CSV export, WhatsApp linking/checks/sending and live campaigns need an active plan. Without one, saved leads can still be viewed, filtered and deleted, and test campaigns still run.
 
+**Free Trial:** every new computer gets it automatically at first start: 5 days from that moment and **30 leads in total** (all sources together), free, with no payment, code or administrator. All features work as on a paid plan. The app shows the days and leads left. At 30 leads, or after 5 days, lead finding stops and the plans are offered; choosing one uses the normal code flow, and a paid plan starts from that day.
+- The trial and its limits run in the same code as the paid plans. Lead limits are enforced in the database layer as below; duplicates use nothing.
+- The administrator gets an email through the same SMTP settings when a trial starts (Activation ID, start and end dates) and when its 30 leads are used up. If the email can't be sent the trial still runs, and the email is sent at a later start.
+- Reinstalling or clearing the app's data brings the same trial back (same dates, same leads used): a sealed record is kept outside the app's data folder (`.lead-finder-device` in the user's home folder).
+- Days and leads are set in `src/main/activation-config.json` (`trial`).
+- Computers with any plan, past or present, don't get a trial.
+
 **Daily lead allowance:** Monthly finds up to **100 unique new leads a day**, counted together across Google Maps, Facebook, LinkedIn (jobs, companies and people with their contact details) and Podcasts. 6 Months and Lifetime have no daily limit. The allowances and the time zone are in `src/main/activation-config.json` (`limits`).
 - Only new leads count. Finding a business, person or podcast that is already saved, or updating it, uses nothing.
 - It is enforced in the database layer: the check and the save are one transaction, so parallel searches, switching tabs and restarts can't go past it. The used count is stored (`lead_credits`).
@@ -160,6 +167,8 @@ If the activation email cannot be sent (the email server is down or refuses), th
 ### Limitations (no server)
 
 There is no server, so the code is created and checked on the customer's own computer. This **cannot be fully secure**, and it isn't presented as such:
+
+- **The Free Trial is enforced on the customer's computer, not on a server.** Another computer gets its own trial. Deleting the record in the home folder together with the app's data gives a new trial on the same computer. There is no admin panel: the administrator's record of trials is the emails.
 
 - **The SMTP login is inside every installed app.** Anyone who unpacks the app can extract it. Use a **send-only SMTP key** from a transactional email service (Brevo, Mailgun, SendGrid, Amazon SES), never a mailbox password or Gmail App Password. A mailbox login would let them read the Sent folder, and the codes in it. Someone with the key could also send email through that account, so watch its usage and replace the key if it is abused.
 - **The code briefly exists in the customer's app** before it is emailed. Only a slow scrypt hash is stored, and it expires after 10 minutes, but someone who can read the app's memory, or modifies the app, can get past the check.

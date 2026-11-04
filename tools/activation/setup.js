@@ -31,7 +31,10 @@ fs.writeFileSync(ENV_FILE, text, { mode: 0o600 });
 
 const env = loadEnv();
 const contact = { whatsapp: (env.CONTACT_WHATSAPP || '').replace(/\D/g, ''), phone: (env.CONTACT_PHONE || '').replace(/[^\d+]/g, '') };
-fs.writeFileSync(path.join(mainDir, 'activation-config.json'), `${JSON.stringify({ contact }, null, 2)}\n`);
+// Only the contact changes: the plan limits and the Free Trial in this file are kept.
+const configFile = path.join(mainDir, 'activation-config.json');
+const existing = fs.existsSync(configFile) ? JSON.parse(fs.readFileSync(configFile, 'utf8')) : {};
+fs.writeFileSync(configFile, `${JSON.stringify({ ...existing, contact }, null, 2)}\n`);
 
 const { missing, settings } = appSettings(env);
 if (missing.length) {

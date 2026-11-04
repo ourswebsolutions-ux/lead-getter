@@ -1,7 +1,7 @@
 'use strict';
 
-// The daily lead allowance of a plan: how many unique new leads a plan may
-// find per day, across every source (Google Maps, Facebook, LinkedIn,
+// The lead allowance of a plan: how many unique new leads a plan may find
+// per day (the Free Trial: in total), across every source (Google Maps, Facebook, LinkedIn,
 // Podcasts) together. Enforced in the database layer (LeadStore.guardedSave):
 // the check and the save are one transaction, so parallel searches, tab
 // changes and restarts cannot go past it; leads already saved (duplicates)
@@ -18,24 +18,32 @@ function dayIn(ms, timeZone) {
   return new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ms));
 }
 
+const TRIAL = 'free_trial';
+const TRIAL_ENDED = 'free_trial_ended';
+
 class LeadQuota {
-  // plan(): the active plan's id or null; now(): the plan clock; config: { timeZone, dailyLeads: { <plan id>: number | null } }.
+  // plan(): the active plan's id or null ('free_trial_ended': a trial that ran
+  // out); now(): the plan clock; config: { timeZone, dailyLeads: { <plan id>: number | null }, trialLeads }.
   constructor({ store, plan, now, config = {} }) {
     this.store = store;
     this.plan = plan;
     this.now = now;
     this.timeZone = config.timeZone || DEFAULT.timeZone;
     this.limits = { ...DEFAULT.dailyLeads, ...(config.dailyLeads || {}) };
+    this.trialLeads = config.trialLeads ?? 30;
   }
 
+  // The trial's leads are counted in total, under their own key: a day never resets them.
   day() {
-    return dayIn(this.now(), this.timeZone);
+    return [TRIAL, TRIAL_ENDED].includes(this.plan()) ? TRIAL : dayIn(this.now(), this.timeZone);
   }
 
   // The allowance of the active plan (null: unlimited).
   limit() {
     const plan = this.plan();
     if (!plan) return null; // no plan: searching is refused elsewhere
+    if (plan === TRIAL) return this.trialLeads;
+    if (plan === TRIAL_ENDED) return 0;
     const n = this.limits[plan];
     return Number.isInteger(n) && n >= 0 ? n : null;
   }
@@ -49,10 +57,13 @@ class LeadQuota {
     const day = this.day();
     const limit = this.limit();
     const used = this.store.creditsOn(day);
-    return { day, limit, used, remaining: limit == null ? null : Math.max(0, limit - used), reached: limit != null && used >= limit, plan: this.plan(), timeZone: this.timeZone };
+    return { day, limit, used, remaining: limit == null ? null : Math.max(0, limit - used), reached: limit != null && used >= limit, plan: this.plan(), timeZone: this.timeZone, trial: day === TRIAL, message: this.message(limit) };
   }
 
   message(limit = this.limit()) {
+    const plan = this.plan();
+    if (plan === TRIAL_ENDED) return 'Your Free Trial has ended. Upgrade your plan to find more leads.';
+    if (plan === TRIAL) return `You have used all ${limit} leads of your Free Trial. Upgrade your plan to find more leads.`;
     return `You have reached your daily limit of ${limit} leads. Upgrade your plan to find more leads.`;
   }
 

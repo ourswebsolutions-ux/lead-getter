@@ -24,6 +24,14 @@
 // 'activation.salt' (only on computers without a machine id). Records are
 // sealed with the build's secret, so editing the database doesn't help.
 //
+// The Free Trial is the plan a new computer starts with: startTrial() begins
+// it by itself (no payment, no code, no administrator), once per computer,
+// and tells the administrator through the same mailer. A failed email never
+// holds it back: the notice is kept and sent again at the next start. A
+// sealed file outside the app's data folder remembers that the trial was
+// used, and how many leads, so reinstalling or clearing the app's data
+// doesn't give a new one.
+//
 // Limits, stated plainly: everything runs on the customer's computer. The
 // code is in this process for a moment, and the build's secret and SMTP
 // login are inside the app. This stops ordinary users, not someone who
@@ -31,6 +39,8 @@
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { fallbackCode, newReference, validPattern } = require('./fallback-code');
 
@@ -39,6 +49,9 @@ const PLANS = [
   { id: 'six_months', name: '6 Months', priceLabel: 'PKR 15,000', months: 6 },
   { id: 'lifetime', name: 'Lifetime', priceLabel: 'PKR 50,000', months: null },
 ];
+const TRIAL_ID = 'free_trial';
+const trialPlan = { id: TRIAL_ID, name: 'Free Trial', priceLabel: 'Free', months: null };
+const planOf = (id) => (id === TRIAL_ID ? trialPlan : PLANS.find((p) => p.id === id));
 const DAY = 86_400_000;
 const CODE_TTL = 10 * 60 * 1000;
 const MAX_TRIES = 5;
@@ -102,8 +115,8 @@ class Activation {
   // config: { secret (base64), adminEmail, contact: { whatsapp, phone } };
   // mailer: { send({ to, subject, text }) } or null when SMTP isn't set up;
   // mailError(err) -> a safe description of a failed send.
-  constructor({ store, config, mailer = null, mailError = () => 'the email could not be sent', machineId = readMachineId, clock = () => Date.now(), random = (n) => crypto.randomInt(n), randomBytes = crypto.randomBytes }) {
-    Object.assign(this, { store, mailer, mailError, clock, random, randomBytes });
+  constructor({ store, config, mailer = null, mailError = () => 'the email could not be sent', machineId = readMachineId, clock = () => Date.now(), random = (n) => crypto.randomInt(n), randomBytes = crypto.randomBytes, trialFile = path.join(os.homedir(), '.lead-finder-device') }) {
+    Object.assign(this, { store, mailer, mailError, clock, random, randomBytes, trialFile });
     this.config = config || {};
     this.netOffset = null;
     const secret = Buffer.from(String(this.config.secret || ''), 'base64');
@@ -172,7 +185,98 @@ class Activation {
 
   current() {
     const rec = this.load('plan', 'activation');
-    return rec && PLANS.some((p) => p.id === rec.plan) ? rec : null;
+    return rec && planOf(rec.plan) ? rec : null;
+  }
+
+  // --- the Free Trial ---------------------------------------------------------
+
+  get trialConfig() {
+    const t = this.config.trial;
+    return Number.isInteger(t?.days) && t.days > 0 && Number.isInteger(t?.leads) && t.leads > 0 ? t : null;
+  }
+
+  // The sealed record outside the app's data: null when there is none,
+  // false when one is there but isn't valid (it counts as used).
+  trialMark() {
+    let rec;
+    try {
+      rec = JSON.parse(fs.readFileSync(this.trialFile, 'utf8'));
+    } catch (err) {
+      return err.code === 'ENOENT' ? null : false;
+    }
+    if (typeof rec?.mac !== 'string') return false;
+    const want = Buffer.from(this.seal('trial', rec));
+    const got = Buffer.from(rec.mac);
+    return want.length === got.length && crypto.timingSafeEqual(want, got) ? rec : false;
+  }
+
+  writeTrialMark(rec) {
+    try {
+      fs.writeFileSync(this.trialFile, JSON.stringify({ ...rec, mac: this.seal('trial', rec) }), { mode: 0o600 });
+    } catch {} // a home folder that can't be written doesn't stop the trial
+  }
+
+  // At every start: a computer with no plan yet gets the Free Trial. Once
+  // per computer: after a reinstall the same trial comes back (its dates and
+  // leads used), not a new one. Returns true when a trial was started or restored.
+  startTrial() {
+    const t = this.trialConfig;
+    if (!t || !this.secret) return false;
+    this.flushNotices();
+    if (this.store.getState('activation')) return false; // any plan, past or present
+    const mark = this.trialMark();
+    if (mark === false) return false;
+    const now = this.now();
+    if (mark) {
+      this.save('plan', 'activation', { plan: TRIAL_ID, startedAt: mark.startedAt, expiresAt: mark.expiresAt });
+      this.store.seedCredits(TRIAL_ID, mark.used || 0);
+      return true;
+    }
+    const rec = { plan: TRIAL_ID, startedAt: now, expiresAt: now + t.days * DAY };
+    this.writeTrialMark({ startedAt: rec.startedAt, expiresAt: rec.expiresAt, used: 0 });
+    this.save('plan', 'activation', rec);
+    this.notify(`Lead Finder Free Trial started for ${this.activationId}`, [`Activation ID: ${this.activationId}`, `Plan: ${trialPlan.name}`, 'Price: Free (PKR 0)', `Started: ${fmtTime(rec.startedAt)}`, `Ends: ${fmtTime(rec.expiresAt)}`, `Leads allowed: ${t.leads}`]);
+    return true;
+  }
+
+  // Leads used in the trial so far (remembered outside the app's data).
+  noteTrialUse(used) {
+    const mark = this.trialMark();
+    if (!mark) return;
+    const { mac, ...rec } = mark;
+    this.writeTrialMark({ ...rec, used });
+    const t = this.trialConfig;
+    if (t && used >= t.leads && !this.store.getState('activation.trialUsedUp')) {
+      this.store.setState('activation.trialUsedUp', true);
+      this.notify(`Lead Finder Free Trial leads used up for ${this.activationId}`, [`Activation ID: ${this.activationId}`, `Plan: ${trialPlan.name}`, `Leads used: ${used} of ${t.leads}`, `Started: ${fmtTime(rec.startedAt)}`, `Ends: ${fmtTime(rec.expiresAt)}`]);
+    }
+  }
+
+  // Emails for the administrator, through the same mailer as the codes. No
+  // code depends on them, so one that can't be sent is kept and tried again
+  // at the next start; nothing else waits for it.
+  notify(subject, lines) {
+    const list = this.store.getState('activation.notices') || [];
+    this.store.setState('activation.notices', [...list, { subject, text: lines.join('\n') }]);
+    return this.flushNotices();
+  }
+
+  async flushNotices() {
+    if (!this.configured || this.flushing) return;
+    this.flushing = true;
+    try {
+      // Read again each round: a notice may arrive during a send.
+      for (let n; (n = (this.store.getState('activation.notices') || [])[0]); ) {
+        try {
+          await this.mailer.send({ to: this.config.adminEmail, subject: n.subject, text: n.text });
+        } catch {
+          return;
+        }
+        this.store.setState('activation.notices', (this.store.getState('activation.notices') || []).slice(1));
+      }
+    } finally {
+      this.flushing = false;
+    }
   }
 
   // The code waiting to be entered, if it is still valid.
@@ -211,7 +315,8 @@ class Activation {
       ...base,
       state: expired ? 'expired' : 'active',
       plan: c.plan,
-      planName: PLANS.find((x) => x.id === c.plan).name,
+      planName: planOf(c.plan).name,
+      trial: c.plan === TRIAL_ID,
       expiresAt: c.expiresAt ? new Date(c.expiresAt).toISOString() : null,
       daysLeft: c.expiresAt && !expired ? Math.ceil((c.expiresAt - now) / DAY) : null,
       activatedAt: new Date(c.startedAt).toISOString(),
@@ -333,7 +438,8 @@ class Activation {
       this.store.setState('activation.pending', null);
       const months = PLANS.find((x) => x.id === p.plan).months;
       const cur = this.current();
-      const running = cur && cur.expiresAt !== null && now < cur.expiresAt;
+      // A paid plan starts now; days left of a trial are not added to it.
+      const running = cur && cur.plan !== TRIAL_ID && cur.expiresAt !== null && now < cur.expiresAt;
       const rec = { plan: p.plan, startedAt: now, expiresAt: months ? addMonths(new Date(running ? cur.expiresAt : now), months).getTime() : null };
       this.save('plan', 'activation', rec);
       return { ok: true, plan: p.plan, planName, expiresAt: rec.expiresAt ? new Date(rec.expiresAt).toISOString() : null };
@@ -343,4 +449,4 @@ class Activation {
   }
 }
 
-module.exports = { Activation, PLANS, CODE_TTL, MAX_TRIES, FALLBACK_TTL, FALLBACK_TRIES, FALLBACK_PER_DAY, FALLBACK_WRONG_PER_DAY, activationIdFor, addMonths, readMachineId };
+module.exports = { Activation, PLANS, TRIAL_ID, CODE_TTL, MAX_TRIES, FALLBACK_TTL, FALLBACK_TRIES, FALLBACK_PER_DAY, FALLBACK_WRONG_PER_DAY, activationIdFor, addMonths, readMachineId };

@@ -174,7 +174,9 @@ function createActivation() {
   const config = activationConfig();
   const { createMailer, mailError } = require('./mailer');
   const mailer = config.smtp?.host ? createMailer(config.smtp, { allowInsecure: !app.isPackaged }) : null;
-  return new Activation({ store, config, mailer, mailError });
+  // End-to-end tests only (never packaged): their own record of the trial.
+  const trialFile = !app.isPackaged && process.env.LEAD_FINDER_TEST_TRIAL_FILE;
+  return new Activation({ store, config, mailer, mailError, ...(trialFile ? { trialFile } : {}) });
 }
 
 // --- the daily lead allowance (main/lead-quota.js) ---------------------------------
@@ -189,12 +191,14 @@ function initLeadQuota() {
     store,
     plan: () => {
       const st = activation.status();
-      return st.state === 'active' ? st.plan : null;
+      if (st.state === 'active') return st.plan;
+      return st.state === 'expired' && st.plan === 'free_trial' ? 'free_trial_ended' : null;
     },
     now: () => activation.now(),
-    config: { ...(activationConfig().limits || {}), ...(testLimits || {}) },
+    config: { ...(activationConfig().limits || {}), ...(testLimits || {}), trialLeads: activation.trialConfig?.leads },
   });
-  store.setLeadGate(() => leadQuota.gate(), onLeadLimit);
+  // The trial's leads are also remembered outside the app's data.
+  store.setLeadGate(() => leadQuota.gate(), onLeadLimit, (g) => g.day === 'free_trial' && activation.noteTrialUse(store.creditsOn('free_trial')));
   // End-to-end tests only (never packaged): a lead saved as a search saves it.
   if (testLimits) {
     globalThis.__leadFinderTest = {
@@ -246,6 +250,7 @@ function sendActivation() {
     waAccounts?.disconnectAll().catch(() => {});
   }
   lastActivationState = st.state;
+  if (leadQuota) send('quota:state', leadQuota.status());
   send('activation:status', st);
   return st;
 }
@@ -1594,6 +1599,7 @@ app.whenReady().then(() => {
     dropUnusedPodcastKeys();
     activation = createActivation();
     initLeadQuota();
+    activation.startTrial();
     // The subscription system's request log, from earlier versions.
     require('node:fs').rmSync(path.join(app.getPath('userData'), 'licence.log'), { force: true });
     const last = store.getState('lastSearch');

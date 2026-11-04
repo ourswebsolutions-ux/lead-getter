@@ -3,6 +3,10 @@
     "whatsapp": "923245237429",
     "phone": "+923245237429"
   },
+  "trial": {
+    "days": 5,
+    "leads": 30
+  },
   "limits": {
     "timeZone": "Asia/Karachi",
     "dailyLeads": {
