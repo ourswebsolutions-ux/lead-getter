@@ -90,15 +90,16 @@ class LeadStore {
       const original = this[method].bind(this);
       this[method] = (...args) => this.guardedSave(source, () => original(...args));
     }
+    if (!this.db.prepare("SELECT 1 FROM pragma_table_info('businesses') WHERE name = 'social_links'").get()) this.db.exec('ALTER TABLE businesses ADD COLUMN social_links TEXT');
     this.stmt = {
       get: this.db.prepare('SELECT * FROM businesses WHERE place_key = ?'),
       getLead: this.db.prepare(`${LEAD_SELECT} WHERE b.place_key = ?`),
       insert: this.db.prepare(`
         INSERT INTO businesses
-          (place_key, maps_url, name, phone, phone_raw, phone_status, phone_country, address, website_status, website_detail,
+          (place_key, maps_url, name, phone, phone_raw, phone_status, phone_country, address, website_status, website_detail, social_links,
            qualified, keyword, category_id, discovered_at, discovered_date, checked_at)
         VALUES
-          (:place_key, :maps_url, :name, :phone, :phone_raw, :phone_status, :phone_country, :address, :website_status, :website_detail,
+          (:place_key, :maps_url, :name, :phone, :phone_raw, :phone_status, :phone_country, :address, :website_status, :website_detail, :social_links,
            :qualified, :keyword, :category_id, :now, :today, :now)`),
       // A business that becomes a lead now is dated today and filed under
       // this search's category; an existing lead keeps both (a missing
@@ -107,7 +108,7 @@ class LeadStore {
         UPDATE businesses SET
           maps_url = :maps_url, name = :name, phone = :phone, phone_raw = :phone_raw, phone_status = :phone_status,
           phone_country = :phone_country, address = :address,
-          website_status = :website_status, website_detail = :website_detail,
+          website_status = :website_status, website_detail = :website_detail, social_links = :social_links,
           qualified = :qualified, checked_at = :now,
           category_id = CASE WHEN qualified = 0 AND :qualified = 1 THEN COALESCE(:category_id, category_id)
                              ELSE COALESCE(category_id, :category_id) END,
@@ -117,7 +118,7 @@ class LeadStore {
       adopt: this.db.prepare(`
         UPDATE businesses SET
           place_key = :place_key, maps_url = :maps_url, name = :name, phone = :phone, phone_raw = :phone_raw, phone_status = :phone_status,
-          phone_country = :phone_country, address = :address, website_status = :website_status, website_detail = :website_detail,
+          phone_country = :phone_country, address = :address, website_status = :website_status, website_detail = :website_detail, social_links = :social_links,
           keyword = COALESCE(keyword, :keyword), checked_at = :now, category_id = COALESCE(category_id, :category_id)
         WHERE id = :id`),
       categoryByKey: this.db.prepare('SELECT id, name FROM categories WHERE name_key = ?'),
@@ -1122,6 +1123,8 @@ class LeadStore {
         address: qualified ? address : null,
         website_status: status,
         website_detail: detail,
+        // The links read from the listing (null: not read yet).
+        social_links: result.socialLinks ? JSON.stringify(result.socialLinks) : existing?.social_links ?? null,
         qualified,
         keyword: result.keyword || existing?.keyword || null,
         category_id: result.categoryId ?? null,
@@ -1196,6 +1199,7 @@ class LeadStore {
             .run(r.postUrl, r.pageUrl || null, r.contactName || null, text, r.name || '', r.categoryId ?? null, id);
         } else {
           const ins = this.stmt.insert.run({
+            social_links: null,
             place_key: key,
             maps_url: r.postUrl,
             name: r.name || '',
@@ -1284,6 +1288,7 @@ class LeadStore {
           }
         } else {
           const ins = this.stmt.insert.run({
+            social_links: null,
             place_key: key,
             maps_url: r.sourceUrl || companyUrl || '',
             name: name || 'Company on LinkedIn',
@@ -1397,6 +1402,7 @@ class LeadStore {
           }
         } else {
           const ins = this.stmt.insert.run({
+            social_links: null,
             place_key: key,
             maps_url: profileUrl,
             name,
@@ -1599,6 +1605,7 @@ class LeadStore {
           }
         } else {
           const ins = this.stmt.insert.run({
+            social_links: null,
             place_key: key,
             maps_url: firstLink || r.rssUrl || '',
             name: r.title,
@@ -2358,6 +2365,15 @@ function statusText(row) {
   return row.website_status;
 }
 
+function listingLinksOf(json) {
+  try {
+    const list = JSON.parse(json || '[]');
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
 function toLead(row) {
   return {
     id: row.id,
@@ -2376,6 +2392,7 @@ function toLead(row) {
     mapsUrl: row.maps_url,
     websiteStatus: statusText(row),
     websiteDetail: row.website_detail || '',
+    listingLinks: listingLinksOf(row.social_links),
     websiteKind: ['has_website', 'possible_website'].includes(row.website_status) ? 'with' : row.website_status === 'not_checked' ? 'unknown' : 'without',
     keyword: row.keyword || '',
     categoryId: row.category_id ?? null,

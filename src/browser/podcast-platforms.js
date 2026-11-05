@@ -3,25 +3,27 @@
 // Where podcasts are found: one adapter per platform.
 //
 //   Apple Podcasts  public search and lookup API; no key. Lists RSS feeds.
-//   Spotify         in the browser: its podcast search (or a pasted show
-//                   link) opens in Chrome for the user to look through.
-//                   Lead Finder does not read Spotify's pages or use its API;
-//                   the user pastes a podcast's website or link here.
+//   Spotify, Deezer, in the browser: the search opens in the user's Chrome
+//   Player FM,      and the shows it lists are read from that page
+//   Pandora         (podcast-read.js). None has a public podcast search API;
+//                   no private API is used. A pasted Spotify show link opens
+//                   in Chrome.
+//   Listen Notes    its official API; an API key (listennotes.com/api). Lists
+//                   RSS feeds.
 //   YouTube         Data API v3; a free API key (console.cloud.google.com).
 //                   Podcast playlists only. Without a key, a pasted channel
 //                   link is read from the channel's public page. YouTube has
 //                   no podcast RSS; its channel's official video feed is
 //                   read for contact details, and a feed is matched by title.
-//   Amazon Music    in the browser, like Spotify: Amazon's terms do not allow
-//                   automated extraction, so its search opens in Chrome for
-//                   the user. A podcast page the user opens there (or a
-//                   pasted link) is matched by the name in its address.
+//   Amazon Music    pasted links only (not a switch): matched by the name in
+//                   the link's address.
 //   Website         a pasted podcast website (not a switch): its RSS feed
 //                   (from the page's feed link) and contact pages, where its
 //                   robots.txt permits.
 //
 // search(term, ctx) -> [podcast]; link(url, ctx) -> [podcast] for a pasted
-// address; a browser platform has searchUrl(term) / pageUrl(link) instead.
+// address; a browser platform has searchUrl(term) / pageUrl(link) instead,
+// and readable: true when its search is read from the page.
 // A podcast: { platform, platformId, title, host, description, url, feedUrl,
 // website, artwork, appleId, appleUrl, youtubeChannelId, episodes, store }.
 // Errors carry a plain-language message.
@@ -36,7 +38,11 @@ const PLATFORMS = {
   apple: { label: 'Apple Podcasts', keys: [] },
   spotify: { label: 'Spotify', keys: [], browser: true },
   youtube: { label: 'YouTube', keys: ['apiKey'] },
-  amazon: { label: 'Amazon Music', keys: [], browser: true },
+  listennotes: { label: 'Listen Notes', keys: ['apiKey'] },
+  deezer: { label: 'Deezer', keys: [], browser: true },
+  playerfm: { label: 'Player FM', keys: [], browser: true },
+  pandora: { label: 'Pandora', keys: [], browser: true },
+  amazon: { label: 'Amazon Music', keys: [], browser: true, hidden: true },
   website: { label: 'Website', keys: [], hidden: true },
 };
 
@@ -125,8 +131,9 @@ function fromApplePodcast(p) {
 
 // --- Spotify ---------------------------------------------------------------------
 
-// Opened in the user's Chrome; nothing is read from Spotify.
+// Its search is read from the user's Chrome (podcast-read.js).
 const spotify = {
+  readable: true,
   // Spotify's own search page (all result types; its Podcasts filter is a
   // tab on that page: "/search/<term>/podcasts" is not a results route and
   // shows "No Podcasts found").
@@ -137,6 +144,51 @@ const spotify = {
     return m ? `https://open.spotify.com/${m[1]}/${m[2]}` : null;
   },
 };
+
+// --- Listen Notes ----------------------------------------------------------------
+
+// The official API. The free plan has a small monthly allowance, so a search
+// asks for at most three pages (10 results each).
+const LISTEN_PAGES = 3;
+const LISTEN_API = 'https://listen-api.listennotes.com/api/v2/search';
+const listenGet = (params, creds, ctx) =>
+  request(`${LISTEN_API}?${new URLSearchParams(params)}`, { ...ctx, label: 'Listen Notes', headers: { 'X-ListenAPI-Key': creds.apiKey } });
+
+function fromListenNotes(p) {
+  return {
+    platform: 'listennotes',
+    platformId: p.id,
+    title: textOf(p.title_original || p.title || '').trim(),
+    host: textOf(p.publisher_original || p.publisher || '').trim(),
+    description: textOf(p.description_original || p.description || '').trim(),
+    url: p.listennotes_url || '',
+    feedUrl: p.rss || '',
+    website: p.website || '',
+    artwork: p.image || p.thumbnail || '',
+    appleId: p.itunes_id ? String(p.itunes_id) : '',
+  };
+}
+
+const listennotes = {
+  async search(term, { creds, fetchImpl, signal, limit = 50 }) {
+    const found = [];
+    let offset = 0;
+    for (let page = 0; page < LISTEN_PAGES && found.length < limit; page++) {
+      const res = await listenGet({ q: term, type: 'podcast', offset }, creds, { fetchImpl, signal });
+      found.push(...(res.results || []).map(fromListenNotes));
+      if (!res.next_offset || !res.results?.length) break;
+      offset = res.next_offset;
+    }
+    return found.slice(0, limit);
+  },
+  check: (creds, ctx) => listenGet({ q: 'news', type: 'podcast' }, creds, ctx),
+};
+
+// --- Deezer, Player FM, Pandora ---------------------------------------------------
+
+const deezer = { readable: true, searchUrl: (t) => `https://www.deezer.com/search/${encodeURIComponent(t)}/episode`, pageUrl: () => null };
+const playerfm = { readable: true, searchUrl: (t) => `https://player.fm/search/${encodeURIComponent(t)}`, pageUrl: () => null };
+const pandora = { readable: true, searchUrl: (t) => `https://www.pandora.com/search/${encodeURIComponent(t)}/podcasts`, pageUrl: () => null };
 
 // --- YouTube ---------------------------------------------------------------------
 
@@ -281,7 +333,7 @@ const website = {
   },
 };
 
-const ADAPTERS = { apple, spotify, youtube, amazon, website };
+const ADAPTERS = { apple, spotify, youtube, listennotes, deezer, playerfm, pandora, amazon, website };
 
 // Which platform a pasted address belongs to, or null.
 function platformOfUrl(input) {
@@ -317,7 +369,7 @@ function browserFindOf(url, windowPlatform, openerUrl = '') {
   }
   if (/^music\.amazon\./.test(host)) return amazon.pageUrl(url) ? { platform: 'amazon', url } : null;
   // Spotify, Amazon and Apple's own pages, and sign-in or app-store pages.
-  if (/(^|\.)(spotify\.com|scdn\.co|spotify\.link|amazon\.[a-z.]+|amazon\.com|apple\.com|google\.com|facebook\.com|accounts\.[a-z.]+)$/.test(host)) return null;
+  if (/(^|\.)(spotify\.com|scdn\.co|spotify\.link|deezer\.com|dzcdn\.net|player\.fm|pandora\.com|amazon\.[a-z.]+|amazon\.com|apple\.com|google\.com|facebook\.com|accounts\.[a-z.]+)$/.test(host)) return null;
   const from = windowPlatform === 'spotify' ? spotify.pageUrl(openerUrl) : windowPlatform === 'amazon' ? amazon.pageUrl(openerUrl) : null;
   return { platform: 'website', url, extraLinks: from ? { [windowPlatform]: from } : null };
 }

@@ -12,10 +12,12 @@
 // until every platform has answered, then its feed is looked for by exact
 // title; if that feed is a podcast already found, the two are merged.
 //
-// Spotify is a browser platform: its search (or a pasted show link) is
-// opened in the user's Chrome (openInBrowser) for the user to look through;
-// nothing is read from it and no results are counted for it. A pasted
-// podcast website is read where its robots.txt permits.
+// Spotify, Deezer, Player FM and Pandora are browser platforms: the search
+// opens in the user's Chrome and the shows it lists are read from that page
+// (readInBrowser, podcast-read.js). They list no RSS feeds, so each feed is
+// looked for by title, like YouTube. A pasted Spotify show link is only
+// opened (openInBrowser). A pasted podcast website is read where its
+// robots.txt permits.
 //
 // Every podcast found is saved at once (email discovery pending), then again
 // with what discovery found, so a stopped or failed search loses nothing.
@@ -33,14 +35,16 @@
 //   'status'   { state: 'running' | 'done' | 'stopped' | 'failed', found, done, withEmail, noEmail, failed, newLeads, message }
 
 const { ADAPTERS, PLATFORMS, platformOfUrl, titleKey, sameHost, feedKey, feedByTitle, keywordTerms, relevant } = require('./podcast-platforms');
+const { SITES } = require('./podcast-read');
 const { processPodcast, fetchFeed, parseFeed } = require('./podcasts');
 const { textOf } = require('./website-contacts');
 
 class PodcastSearch {
-  // openInBrowser(url): opens a page in the user's Chrome (main.js); allow(url):
+  // openInBrowser(url): opens a page in the user's Chrome (main.js);
+  // readInBrowser(platform, term, options): the shows a platform's search lists; allow(url):
   // whether a website permits automated reading (robots.js).
-  constructor({ query, platforms = ['apple'], creds = {}, store, keyword, categoryId = null, country = null, signal, emit = () => {}, fetchImpl, feedCache, findContacts, limit = 50, concurrency = 3, adapters = ADAPTERS, openInBrowser = null, allow = async () => true, seed = null, extraLinks = null, runId = null }) {
-    Object.assign(this, { query: String(query || '').trim(), platforms, creds, store, keyword: keyword ?? query, categoryId, country, fetchImpl, feedCache, findContacts, limit, concurrency, adapters, openInBrowser, allow, seed, extraLinks, signal });
+  constructor({ query, platforms = ['apple'], creds = {}, store, keyword, categoryId = null, country = null, signal, emit = () => {}, fetchImpl, feedCache, findContacts, limit = 50, concurrency = 3, adapters = ADAPTERS, openInBrowser = null, readInBrowser = null, allow = async () => true, seed = null, extraLinks = null, runId = null }) {
+    Object.assign(this, { query: String(query || '').trim(), platforms, creds, store, keyword: keyword ?? query, categoryId, country, fetchImpl, feedCache, findContacts, limit, concurrency, adapters, openInBrowser, readInBrowser, allow, seed, extraLinks, signal });
     this.runId = runId || `run${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
     this.emit = (event, payload) => emit(event, event === 'lead' ? payload : { runId: this.runId, ...payload });
     this.entries = [];
@@ -143,12 +147,44 @@ class PodcastSearch {
         loadedUrl: at.url || url,
         message:
           what === 'link'
-            ? `${label} page opened in Chrome. Lead Finder does not read ${label}: open the podcast’s website from there (or paste it here) to find its email.`
-            : `${label} search opened in Chrome. Lead Finder does not read ${label}: open a podcast${id === 'amazon' ? '' : '’s website'} from there and it is added here with its email.`,
+            ? `${label} page opened in Chrome. Open the podcast’s website from there (or paste it here) to find its email.`
+            : `${label} search opened in Chrome. Open a podcast${id === 'amazon' ? '' : '’s website'} from there and it is added here with its email.`,
       });
     } catch (err) {
       if (this.signal?.aborted) return;
       this.emit('platform', { id, state: 'failed', message: `${label} could not be opened in Chrome: ${err.message}` });
+    }
+  }
+
+  // A browser platform's search, read from the page in Chrome. The feed of
+  // each show is then looked for by title. Its place in the platform's own
+  // results is why it is kept: these pages show no description to compare
+  // with the keyword.
+  async readPlatform(id) {
+    const { label } = PLATFORMS[id];
+    this.emit('platform', { id, state: 'searching', message: `Reading ${label} in Chrome` });
+    try {
+      const onWait = (message) => this.emit('platform', { id, state: 'searching', message });
+      const shows = await this.readInBrowser(id, this.query, { limit: this.limit, signal: this.signal, onWait });
+      if (this.signal?.aborted) return;
+      shows.forEach((s, i) =>
+        this.add({
+          platform: id,
+          platformId: s.id,
+          title: s.title,
+          host: s.host || '',
+          description: '',
+          url: s.url,
+          artwork: s.artwork || '',
+          fromSearch: true,
+          rank: i + 1,
+          feedNote: `${label} lists no RSS feed, and no podcast with this name was found on Apple Podcasts`,
+        }),
+      );
+      this.emit('platform', { id, state: 'done', count: shows.length, rejected: 0, message: shows.length ? `${shows.length} found` : SITES[id].empty });
+    } catch (err) {
+      if (this.signal?.aborted) return;
+      this.emit('platform', { id, state: 'failed', message: err.code ? err.message : `${label} could not be read in Chrome: ${err.message}` });
     }
   }
 
@@ -162,6 +198,7 @@ class PodcastSearch {
       this.emit('platform', { id, state: 'links_only', message: `${def.label} has no public podcast search. Paste an ${def.label} podcast link instead.` });
       return;
     }
+    if (def.browser && this.adapters[id].readable && this.readInBrowser) return this.readPlatform(id);
     if (def.browser) return this.openPage(id, this.adapters[id].searchUrl(this.query), 'search');
     if (def.keys.length && !this.creds[id]) {
       this.emit('platform', { id, state: 'needs_key', message: `${def.label} needs an API key. Add it in Settings.` });
@@ -207,7 +244,7 @@ class PodcastSearch {
     }
     // Not about the keyword by its name, publisher, genre or listing: its
     // feed's own description decides (read once, before it is saved).
-    const quick = relevant([p.title, p.host, p.genre, p.description].join(' '), this.terms);
+    const quick = p.fromSearch || relevant([p.title, p.host, p.genre, p.description].join(' '), this.terms);
     const e = {
       key: `${this.runId}:${++this.seq}`,
       verify: !quick && Boolean(p.feedUrl),

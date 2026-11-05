@@ -80,7 +80,7 @@ test('Pasted links are recognised by platform; any other web address is a websit
   assert.equal(pf.platformOfUrl('true crime'), null);
   assert.equal(pf.titleKey('The Crime Junkie Podcast'), pf.titleKey('Crime Junkie'));
   assert.ok(pf.sameHost('Audiochuck', 'audiochuck') && pf.sameHost('', 'Anyone') && !pf.sameHost('NBC News', 'Audiochuck'));
-  assert.deepEqual(Object.keys(pf.PLATFORMS).filter((k) => !pf.PLATFORMS[k].hidden), ['apple', 'spotify', 'youtube', 'amazon'], 'no Podcast Index');
+  assert.deepEqual(Object.keys(pf.PLATFORMS).filter((k) => !pf.PLATFORMS[k].hidden), ['apple', 'spotify', 'youtube', 'listennotes', 'deezer', 'playerfm', 'pandora'], 'no Podcast Index, and Amazon Music only from pasted links');
   assert.deepEqual(pf.PLATFORMS.spotify.keys, [], 'Spotify needs no keys');
 });
 

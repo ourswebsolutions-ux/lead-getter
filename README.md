@@ -387,11 +387,14 @@ The lead's main email is the person's best address that isn't invalid, and its p
 | Situation | Result |
 |---|---|
 | Maps shows a website link to the business's own domain | Excluded |
-| Maps shows only a Facebook / Instagram / WhatsApp / Linktree / similar link, and the web check finds no own site | **Lead**: "No website (social page only)" |
+| Maps shows only a Facebook / Instagram / WhatsApp / Telegram / Linktree / similar link, in the Website row or anywhere else on the listing (its links section, a "Book online" button), and the web check finds no own site | **Lead**: "No website (social page only)", with the links kept |
+| No Website row, but a button on the listing links to a domain carrying the business's name | Excluded (it has a website) |
 | Maps shows no website, and a Google web search for the business finds no matching site | **Lead**: "No website found" |
 | The web search shows a knowledge-panel website, or a result domain that matches the business name | Excluded (website or possible website) |
 | Details didn't fully load, the web check failed or timed out, or it was blocked | Unverified: kept out of the table and re-checked on a later search |
 | Permanently closed | Excluded |
+
+**Social and contact links are never treated as a website.** Every link on a listing is looked at, and the ones to social and contact pages are kept with the lead: in the tooltip of its *Social page only* chip and in the CSV's **Social Links** column. Leads saved as "No website" by an earlier version are opened once more when a search finds them again, to read their links, without a new web check.
 
 Qualifying a lead never fetches a business's website (only the optional email search above does), so a site that is temporarily down can't make a business look website-less. Directory and listing sites (Zameen, Yelp, OLX, Google listings, and so on) never count as the business's own website. Matching domains to names is a heuristic that errs toward excluding a business.
 
@@ -407,15 +410,17 @@ Each platform has its own switch; any one, several or all can be on (at least on
 |---|---|---|
 | Apple Podcasts | Apple's public search and lookup API (results for the exact keyword; feeds listed) | nothing |
 | YouTube | Data API v3 (playlists YouTube marks as podcasts; other playlists are counted as rejected) | a free API key (Settings) |
-| Spotify | **opens Spotify's search** (`open.spotify.com/search/<keyword>`) in your Chrome, in a window of its own | nothing; Chrome may ask you to Allow |
-| Amazon Music | **opens Amazon Music's search** (`music.amazon.com/search/<keyword>?filter=IsLibrary%7Cfalse`) in your Chrome, in a window of its own | nothing; Chrome may ask you to Allow |
+| Listen Notes | Its official API (results list RSS feeds). A search uses up to 3 requests of your plan's allowance | an API key (Settings; free plan at listennotes.com/api) |
+| Spotify | **reads Spotify's search in your Chrome**, in a window of its own: the shows on its podcast results | nothing; Chrome may ask you to Allow |
+| Deezer | **reads Deezer's search in your Chrome** (its Episodes tab names each show; Deezer's public API no longer answers podcast searches) | nothing |
+| Player FM | **reads Player FM's search in your Chrome** | nothing. If it asks you to confirm you're human, complete that in its Chrome window (up to 2 minutes) and the search continues |
+| Pandora | **reads Pandora's search in your Chrome** | Pandora works only from the United States: a VPN connected to the US |
 
-**Spotify and Amazon Music are never read automatically.** Spotify offers no permitted way to read its search, and Amazon's Conditions of Use do not allow robots or data extraction, so Lead Finder only opens their search pages for you. When you open a podcast there, only that page's address is used:
+**Platforms read in Chrome:** none of them has a public podcast search, so Lead Finder reads the show names and links their search page shows you, at a person's pace, like the Google Maps and LinkedIn pages. No private API is used, and nothing gets around a human check or a region limit. These pages are read automatically, which those services' terms may not allow; it is your choice to turn them on. They show no RSS feeds, so each show's feed is looked for by its exact title on Apple Podcasts, and its emails are found from there. A show with no match is still saved, with its platform link and "no RSS feed" in its note.
 
-- an **Amazon Music podcast page** you open (its address ends with the podcast's name) is added, and its RSS feed is found by exact title on Apple Podcasts;
-- a **podcast website** you open from the Spotify or Amazon Music window is added and read like a pasted website.
+**Spotify:** audiobooks have the same kind of address as podcasts, so they are left out. In some countries Spotify's search lists audiobooks but no podcasts: you then get "Spotify showed no podcasts for this search", and a VPN brings the podcasts back. A **podcast website** you open from a platform's Chrome window is also added and read like a pasted website.
 
-Both are added to this search, under its keyword. Nothing else from those sites is read, counted or saved. (Spotify's "/search/<keyword>/podcasts" address is not a results page; it shows "No Podcasts found". Some Spotify accounts and countries show no podcasts in Spotify's search at all.)
+**Amazon Music** is no longer a search platform. Its pasted links still work, and podcasts found there earlier stay.
 
 **Pasted links:** Apple Podcasts; YouTube channels and playlists (channels need no key); Amazon Music podcast links that end with the podcast's name; Spotify show links (opened in Chrome); and any podcast website (its RSS feed link and contact pages).
 

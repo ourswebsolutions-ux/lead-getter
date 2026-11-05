@@ -9,6 +9,9 @@ const SOCIAL_HOSTS = [
   'twitter.com', 'x.com', 'tiktok.com', 'linkedin.com', 'youtube.com', 'youtu.be',
   'pinterest.com', 'snapchat.com', 'threads.net', 'wa.me', 'whatsapp.com', 'api.whatsapp.com',
   'linktr.ee', 't.me', 'telegram.me',
+  // Chat and contact links, and link-in-bio pages.
+  'wa.link', 'wl.co', 'm.me', 'messenger.com', 'fb.watch', 'threads.com', 'telegram.org', 'line.me', 'viber.com',
+  'vk.com', 'discord.gg', 'beacons.ai', 'bio.link', 'lnk.bio', 'linkin.bio', 'linkr.bio', 'tap.bio', 'taplink.cc', 'solo.to',
 ];
 
 // Google-owned listing pages: the Maps listing itself is not a website.
@@ -31,6 +34,8 @@ const DIRECTORY_HOSTS = [
   'zaubacorp.com', 'opencorporates.com', 'quora.com', 'reddit.com', 'medium.com',
   'dawn.com', 'tribune.com.pk', 'propertyguru.com', 'bayut.com', 'dubizzle.com',
 ];
+
+const MAX_LINKS = 10;
 
 function hostMatchesList(host, list) {
   return list.some((d) => host === d || host.endsWith(`.${d}`));
@@ -67,6 +72,31 @@ function classifyWebsite(raw) {
     return { kind: 'listing', host, url: display };
   }
   return { kind: 'independent', host, url: display };
+}
+
+// The social and contact links on a listing, its Website row first: a
+// listing shows them in its own "links" section and on buttons such as "Book
+// online", so a business without a Website row can still have them. Never a
+// website; kept with the lead as its online presence.
+function socialLinksOf({ website, links } = {}) {
+  const found = new Map();
+  for (const raw of [website, ...(links || [])]) {
+    if (!raw) continue;
+    const c = classifyWebsite(raw);
+    if (c.kind === 'social') found.set(c.url.toLowerCase(), found.get(c.url.toLowerCase()) || c.url);
+  }
+  return [...found.values()].slice(0, MAX_LINKS);
+}
+
+// A business's own site linked from a listing without a Website row (a "Book
+// online" or "Learn more" button): only when the domain carries its name, as
+// booking services and other sites are linked this way too.
+function ownSiteOf({ name, links } = {}) {
+  for (const raw of links || []) {
+    const c = classifyWebsite(raw);
+    if (c.kind === 'independent' && hostMatchesName(c.host, name)) return { url: c.url, raw };
+  }
+  return null;
 }
 
 // Words too generic to tie a domain to a particular business.
@@ -140,6 +170,8 @@ function presenceQuery(name, address) {
 
 module.exports = {
   classifyWebsite,
+  socialLinksOf,
+  ownSiteOf,
   hostMatchesName,
   judgeWebPresence,
   presenceQuery,

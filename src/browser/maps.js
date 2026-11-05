@@ -340,6 +340,8 @@ function extractInPage() {
   return {
     name: clean(h1.textContent),
     website: websiteEl ? websiteEl.href || websiteEl.getAttribute('href') || '' : '',
+    // Every other web link on the listing: its links section, "Book online"...
+    links: [...new Set([...root.querySelectorAll('a[href]')].map((a) => a.href).filter((h) => /^https?:/.test(h)))].slice(0, 60),
     phoneTel,
     phoneText,
     address,

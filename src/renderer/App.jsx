@@ -415,7 +415,7 @@ function websiteChip(l) {
   if (l.websiteStatus.startsWith('No website (social page only')) {
     const host = l.websiteDetail || '';
     return (
-      <span className="chip chip-soft" title={l.websiteStatus}>
+      <span className="chip chip-soft" title={[l.websiteStatus, ...(l.listingLinks || [])].join('\n')}>
         Social page only{host ? <span className="chip-detail">{host.split('/')[0]}</span> : null}
       </span>
     );

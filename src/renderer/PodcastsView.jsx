@@ -8,13 +8,17 @@ const PLATFORMS = [
   { id: 'apple', label: 'Apple Podcasts', short: 'Apple' },
   { id: 'spotify', label: 'Spotify', short: 'Spotify' },
   { id: 'youtube', label: 'YouTube', short: 'YouTube' },
-  { id: 'amazon', label: 'Amazon Music', short: 'Amazon' },
+  { id: 'listennotes', label: 'Listen Notes', short: 'Listen Notes' },
+  { id: 'deezer', label: 'Deezer', short: 'Deezer' },
+  { id: 'playerfm', label: 'Player FM', short: 'Player FM' },
+  { id: 'pandora', label: 'Pandora', short: 'Pandora' },
 ];
-const LABEL = { ...Object.fromEntries(PLATFORMS.map((p) => [p.id, p.label])), website: 'Website' };
+const LABEL = { ...Object.fromEntries(PLATFORMS.map((p) => [p.id, p.label])), amazon: 'Amazon Music', website: 'Website' };
 
 // Keys each platform needs (Settings dialog).
 const KEYS = {
   youtube: { fields: [['apiKey', 'API key']], where: 'console.cloud.google.com → APIs → YouTube Data API v3 → Credentials' },
+  listennotes: { fields: [['apiKey', 'API key']], where: 'listennotes.com/api → Get API key (free plan available)' },
 };
 
 // Recognisable, single-colour platform marks.
@@ -51,6 +55,36 @@ export function PlatformIcon({ id, size = 16 }) {
         <path d="M5 3.4v5.2M5 3.4l3.3 1.1v5.2M8.3 4.5l3.2 1.1v5" strokeWidth="1.3" />
         <path d="M2.4 11.5c3.3 2 7.8 2 11.2-.2" strokeWidth="1.4" />
         <path d="m12 10.6 1.6.7-.5 1.6" strokeWidth="1.2" />
+      </svg>
+    );
+  if (id === 'listennotes')
+    return (
+      <svg {...common} fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M2.6 11V8a5.4 5.4 0 0 1 10.8 0v3" strokeWidth="1.4" />
+        <rect x="1.8" y="9.6" width="2.8" height="4" rx="1.1" fill="currentColor" stroke="none" />
+        <rect x="11.4" y="9.6" width="2.8" height="4" rx="1.1" fill="currentColor" stroke="none" />
+      </svg>
+    );
+  if (id === 'deezer')
+    return (
+      <svg {...common} fill="currentColor">
+        <rect x="1.4" y="9.6" width="2.8" height="4" rx=".6" />
+        <rect x="5" y="6.6" width="2.8" height="7" rx=".6" />
+        <rect x="8.6" y="3.6" width="2.8" height="10" rx=".6" />
+        <rect x="12.2" y="7.6" width="2.4" height="6" rx=".6" />
+      </svg>
+    );
+  if (id === 'playerfm')
+    return (
+      <svg {...common} fill="none" stroke="currentColor">
+        <circle cx="8" cy="8" r="6.4" strokeWidth="1.4" />
+        <path d="m6.4 5.2 4.4 2.8-4.4 2.8Z" fill="currentColor" stroke="none" />
+      </svg>
+    );
+  if (id === 'pandora')
+    return (
+      <svg {...common} fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M5 14V2.4h3.6a3.5 3.5 0 0 1 0 7H5" strokeWidth="2" />
       </svg>
     );
   // A website.
@@ -153,7 +187,7 @@ function KeysDialog({ settings, focus, onClose, onSaved, notify }) {
           </span>
           <div>
             <strong>Search settings</strong>
-            <span className="muted">Results per platform, and your YouTube API key.</span>
+            <span className="muted">Results per platform, and your API keys.</span>
           </div>
           <button type="button" className="icon-btn" aria-label="Close" onClick={onClose} disabled={busy}>
             <Icon name="x" size={14} />
@@ -787,7 +821,7 @@ export default function PodcastsView({ notify, hidden, categories = [] }) {
                 const on = settings.platforms[p.id];
                 const needsKey = KEYS[p.id] && !settings.keys[p.id];
                 const ps = platformState[p.id];
-                const browser = p.id === 'spotify' || p.id === 'amazon';
+                const browser = ['spotify', 'deezer', 'playerfm', 'pandora'].includes(p.id);
                 return (
                   <button
                     key={p.id}
@@ -798,7 +832,7 @@ export default function PodcastsView({ notify, hidden, categories = [] }) {
                     className={`pc-chip pf-${p.id} ${on ? 'on' : ''}`}
                     disabled={running}
                     onClick={() => togglePlatform(p.id)}
-                    title={browser ? `Opens ${p.label}’s search in Chrome for you; podcasts you open there are added here` : needsKey ? `${p.label} needs your free API key (Settings)` : `Search ${p.label}`}
+                    title={browser ? `Searches ${p.label} in your Chrome and adds the podcasts it shows` : needsKey ? `${p.label} needs your free API key (Settings)` : `Search ${p.label}`}
                   >
                     <PlatformIcon id={p.id} />
                     <span>{p.short}</span>

@@ -38,8 +38,8 @@ test('Podcasts tab: platform switches, keys dialog, links handled, no Chats tab'
   assert.equal(await pc.getByRole('button', { name: /Find emails/ }).count(), 0, 'no manual Find emails button');
 
   const chip = (name) => pc.getByRole('switch', { name });
-  const states = async () => Promise.all(['Apple Podcasts', 'Spotify', 'YouTube', 'Amazon Music'].map((n) => chip(n).getAttribute('aria-checked')));
-  assert.equal(await pc.getByRole('switch').count(), 4, 'no Podcast Index');
+  const states = async () => Promise.all(['Apple Podcasts', 'Spotify', 'YouTube', 'Deezer'].map((n) => chip(n).getAttribute('aria-checked')));
+  assert.equal(await pc.getByRole('switch').count(), 7, 'no Podcast Index, no Amazon Music');
   assert.deepEqual(await states(), ['true', 'false', 'false', 'false']);
   // Independent: Spotify and YouTube on, Apple off.
   await chip('Spotify').click();
@@ -64,7 +64,7 @@ test('Podcasts tab: platform switches, keys dialog, links handled, no Chats tab'
   await win.waitForFunction(() => document.querySelector('[role=radio][aria-checked=true]')?.textContent === '100');
   assert.equal((await win.evaluate(() => window.leadFinder.podcastSettings())).limit, 100);
   assert.equal(await dlg.getByRole('button', { name: 'Connect' }).isDisabled(), true);
-  assert.match(await dlg.locator('.pc-keys-title').innerText(), /YouTube API key/);
+  assert.match(await dlg.locator('.pc-keys-title').innerText(), /Platform keys/);
   assert.equal(await dlg.getByLabel('Client ID').count(), 0, 'no Spotify keys');
   await dlg.getByLabel('API key').waitFor();
   await dlg.getByRole('button', { name: 'Close', exact: true }).last().click();

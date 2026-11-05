@@ -1105,11 +1105,19 @@ button.chip.src-podcast:hover { background: color-mix(in srgb, #8e44c9 22%, tran
   --pf-spotify: #1a9f4b;
   --pf-youtube: #e0261b;
   --pf-amazon: #1b8db5;
+  --pf-listennotes: #c2185b;
+  --pf-deezer: #7b3fe4;
+  --pf-playerfm: #c8551b;
+  --pf-pandora: #2f6fd0;
 }
 .pf-apple { --pf: var(--pf-apple); }
 .pf-spotify { --pf: var(--pf-spotify); }
 .pf-youtube { --pf: var(--pf-youtube); }
 .pf-amazon { --pf: var(--pf-amazon); }
+.pf-listennotes { --pf: var(--pf-listennotes); }
+.pf-deezer { --pf: var(--pf-deezer); }
+.pf-playerfm { --pf: var(--pf-playerfm); }
+.pf-pandora { --pf: var(--pf-pandora); }
 .pf-website { --pf: var(--text-2); }
 
 .podcasts {

@@ -6,7 +6,7 @@
 
 const mapsDefault = require('./maps');
 const { checkWebPresence } = require('./web-check');
-const { classifyWebsite } = require('./website');
+const { classifyWebsite, socialLinksOf, ownSiteOf } = require('./website');
 const contactsDefault = require('./website-contacts');
 
 const DEFAULT_PACING = {
@@ -391,6 +391,9 @@ class SearchSession {
     // reopen it if this search's filter includes it (its contact details were
     // not kept then).
     if (!row.qualified) return !isLeadFor(this.websiteFilter, row.website_status);
+    // Saved as "no website" before a listing's other links were read: opened
+    // once more, for them. The web check is not repeated (see qualify).
+    if (row.website_status === 'no_website' && row.social_links == null && isLeadFor(this.websiteFilter, 'no_website')) return false;
     // A number that was extracted but rejected as invalid is not retried.
     return !(row.qualified && ((!row.phone && !row.phone_raw) || !row.address));
   }
@@ -455,7 +458,7 @@ class SearchSession {
       return;
     }
 
-    const verdict = await this.qualify(details, page);
+    const verdict = await this.qualify(details, page, existing);
     this.setStep('analyzing');
     const result = {
       placeKey: key,
@@ -466,6 +469,7 @@ class SearchSession {
       address: details.address,
       websiteStatus: verdict.status,
       websiteDetail: verdict.detail || null,
+      socialLinks: socialLinksOf(details),
       isLead: isLeadFor(this.websiteFilter, verdict.status),
       keyword: this.keyword,
       categoryId: this.categoryId,
@@ -536,18 +540,21 @@ class SearchSession {
 
   // Applies the qualification rules. Only 'no_website' and 'social_only'
   // become leads; anything inconclusive is 'unverified' and kept out.
-  async qualify(details, mainPage) {
+  async qualify(details, mainPage, existing = null) {
     if (details.closed) return { status: 'closed' };
-    let social = null;
-    if (details.website) {
-      const c = classifyWebsite(details.website);
-      if (c.kind === 'independent') return { status: 'has_website', detail: c.url };
-      if (c.kind === 'social') social = c.url;
+    if (details.website && classifyWebsite(details.website).kind === 'independent') return { status: 'has_website', detail: classifyWebsite(details.website).url };
+    const own = ownSiteOf(details);
+    if (own) {
+      details.website = own.raw;
+      return { status: 'has_website', detail: own.url };
     }
+    const social = socialLinksOf(details)[0] || null;
     if (!details.infoLoaded) return { status: 'unverified', detail: 'listing details did not load' };
     // "With website" searches only want businesses with a website on Maps;
     // the web check that confirms "no website" is not needed for the rest.
     if (this.websiteFilter === 'with') return { status: 'unverified', detail: 'no website on Maps (not checked further)' };
+    // Already found to have no website; only its links were still to be read.
+    if (existing?.qualified && existing.website_status === 'no_website') return social ? { status: 'social_only', detail: social } : { status: 'no_website' };
 
     this.setStep('qualifying');
     this.status('running', `Checking website status: ${details.name}`);

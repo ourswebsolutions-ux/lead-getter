@@ -13,6 +13,7 @@ const { LinkedInSession } = require('../browser/linkedin-session');
 const { runSources } = require('../browser/search-sources');
 const podcastLib = require('../browser/podcasts');
 const { PodcastSearch } = require('../browser/podcast-search');
+const { readResults } = require('../browser/podcast-read');
 const { PLATFORMS, ADAPTERS, browserFindOf } = require('../browser/podcast-platforms');
 const { robotsChecker } = require('../browser/robots');
 const { EmailVerifier } = require('../browser/email-verify');
@@ -72,7 +73,7 @@ const chrome = new ChromeConnection({
     return response === 0;
   },
 });
-const tabs = { main: null, check: null, detail: null, facebook: null, linkedin: null, spotify: null, amazon: null };
+const tabs = { main: null, check: null, detail: null, facebook: null, linkedin: null, spotify: null, amazon: null, deezer: null, playerfm: null, pandora: null };
 let lastStatus = { state: 'idle', message: 'Ready' };
 let interrupted = null; // last search, if the app ended while it was running
 
@@ -357,19 +358,20 @@ function validateFilter(raw) {
 // --- Chrome tabs -----------------------------------------------------------
 
 // Google Maps works in the tabs of one window (main, check, detail);
-// Facebook and LinkedIn each have a window of their own, and so does
-// Spotify (only ever opened for the user to look at; never read). Each search worker
+// Facebook and LinkedIn each have a window of their own, and so does each
+// podcast platform read in Chrome. Each search worker
 // only ever uses its own pages, so none navigates, hides or slows down
 // another's page.
 const MAPS_TABS = ['main', 'check', 'detail'];
 const FACEBOOK_TABS = ['facebook'];
 const LINKEDIN_TABS = ['linkedin'];
+const OWN_WINDOWS = ['facebook', 'linkedin', 'spotify', 'amazon', 'deezer', 'playerfm', 'pandora'];
 
 async function tab(name) {
   const t = tabs[name];
   if (t && !t.isClosed()) return t;
   if (!chrome.connected) throw new Error('Target page, context or browser has been closed');
-  tabs[name] = ['facebook', 'linkedin', 'spotify', 'amazon'].includes(name) ? await chrome.newWindowPage() : await newMapsTab();
+  tabs[name] = OWN_WINDOWS.includes(name) ? await chrome.newWindowPage() : await newMapsTab();
   return tabs[name];
 }
 
@@ -379,7 +381,7 @@ async function tab(name) {
 async function newMapsTab() {
   const beside = MAPS_TABS.map((k) => tabs[k]).find((p) => p && !p.isClosed());
   if (beside) return chrome.newTabBeside(beside);
-  if (['facebook', 'linkedin', 'spotify', 'amazon'].some((k) => tabs[k] && !tabs[k].isClosed())) return chrome.newWindowPage();
+  if (OWN_WINDOWS.some((k) => tabs[k] && !tabs[k].isClosed())) return chrome.newWindowPage();
   return chrome.context.newPage();
 }
 
@@ -1447,6 +1449,7 @@ function runPodcasts({ query, platforms = [], categoryId, seed = null, extraLink
   const settings = podcastSettings();
   const run = new PodcastSearch({
     openInBrowser: openPodcastPage,
+    readInBrowser: readPodcastPage,
     allow: robotsChecker({ signal: controller.signal }),
     query,
     keyword: keyword ?? query,
@@ -1485,10 +1488,10 @@ function runPodcasts({ query, platforms = [], categoryId, seed = null, extraLink
 }
 
 // --- podcasts opened in the browser (Spotify, Amazon Music) ------------------------
-// Lead Finder never reads Spotify's or Amazon's pages. When the user opens a
-// podcast there, only that page's address is used: an Amazon Music podcast
-// page (its address names the podcast), or a podcast website opened from
-// either window (read like a pasted website, where its robots.txt permits).
+// When the user opens a podcast from a platform's window, only that page's
+// address is used: an Amazon Music podcast page (its address names the
+// podcast), or a podcast website opened from the window (read like a pasted
+// website, where its robots.txt permits).
 
 let browserSearch = { keyword: '', categoryId: null };
 const browserSeen = new Set();
@@ -1537,17 +1540,27 @@ function drainBrowserFinds() {
   runPodcasts({ query: next.url, extraLinks: next.extraLinks, keyword: browserSearch.keyword || next.url, categoryId: browserSearch.categoryId });
 }
 
-// A browser platform's page (Spotify) in the user's Chrome, in its own
-// window, for the user to look through. Chrome is connected the same way as
-// for a lead search (it may ask the user to Allow); the page is never read.
-async function openPodcastPage(url, signal, platform = 'spotify') {
+// A browser platform's window in the user's Chrome. Chrome is connected the
+// same way as for a lead search (it may ask the user to Allow).
+async function podcastWindow(platform, signal) {
   if (!chrome.connected) {
     const profile = await chrome.connect({ signal });
     if (!search) resetTabs(profile);
     sendStatus({ profile: profileLabel(profile) });
   }
-  const page = await tab(platform === 'amazon' ? 'amazon' : 'spotify');
+  const page = await tab(platform);
   watchBrowserWindow(page, platform);
+  return page;
+}
+
+// The shows a platform's search lists, read from its window.
+async function readPodcastPage(platform, term, options) {
+  return readResults(await podcastWindow(platform, options.signal), platform, term, options);
+}
+
+// A platform's page, opened for the user to look through.
+async function openPodcastPage(url, signal, platform = 'spotify') {
+  const page = await podcastWindow(platform, signal);
   const res = await page.goto(url, { waitUntil: 'commit', timeout: 30_000 });
   await page.bringToFront().catch(() => {});
   // Where Chrome actually is (only the address; nothing on the page is read).
@@ -1592,12 +1605,16 @@ function openListing(url) {
   const maps = /^(www\.)?google\.[a-z.]+$/.test(u.hostname) && u.pathname.startsWith('/maps/');
   const facebook = /^(www|m|web)\.facebook\.com$/.test(u.hostname);
   const linkedin = /^([a-z]{2,3}\.|www\.)?linkedin\.com$/.test(u.hostname) && /^\/(company|jobs\/view|feed\/update|posts|in)\//.test(u.pathname);
-  // A podcast's page on Apple Podcasts, Spotify, YouTube or Amazon Music.
+  // A podcast's page on a platform Lead Finder searches.
   const podcast =
     (u.hostname === 'podcasts.apple.com' && /\/id\d+/.test(u.pathname)) ||
     (u.hostname === 'open.spotify.com' && /^\/show\//.test(u.pathname)) ||
     (/^(www\.)?youtube\.com$/.test(u.hostname) && /^\/(playlist|channel\/|@)/.test(u.pathname)) ||
-    (/^music\.amazon\.[a-z.]+$/.test(u.hostname) && /^\/podcasts\//.test(u.pathname));
+    (/^music\.amazon\.[a-z.]+$/.test(u.hostname) && /^\/podcasts\//.test(u.pathname)) ||
+    (/^(www\.)?listennotes\.com$/.test(u.hostname) && /^\/(podcasts|c)\//.test(u.pathname)) ||
+    (/^(www\.)?deezer\.com$/.test(u.hostname) && /^\/([a-z]{2}\/)?show\/\d+/.test(u.pathname)) ||
+    (u.hostname === 'player.fm' && /^\/series\//.test(u.pathname)) ||
+    (/^(www\.)?pandora\.com$/.test(u.hostname) && /^\/podcast\//.test(u.pathname));
   if (u.protocol !== 'https:' || !(maps || facebook || linkedin || podcast)) {
     return { ok: false };
   }
