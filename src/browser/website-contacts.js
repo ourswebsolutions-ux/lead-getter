@@ -54,23 +54,57 @@ const hostOf = (url) => {
   }
 };
 
-// Emails, phones and contact-page links on one page.
+const decodeMailto = (s) => {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s; // a stray % in the address
+  }
+};
+
+// Cloudflare's email protection: the address is shown to visitors, by a
+// script, from a hex string in the page.
+function cloudflareEmails(html) {
+  const out = [];
+  for (const m of String(html).matchAll(/data-cfemail="([0-9a-f]{4,})"|\/cdn-cgi\/l\/email-protection#([0-9a-f]{4,})/gi)) {
+    const hex = m[1] || m[2];
+    if (hex.length % 2) continue;
+    const key = parseInt(hex.slice(0, 2), 16);
+    let email = '';
+    for (let i = 2; i < hex.length; i += 2) email += String.fromCharCode(parseInt(hex.slice(i, i + 2), 16) ^ key);
+    out.push(email);
+  }
+  return out;
+}
+
+// The business's own data for search engines ("email": "..." in JSON-LD).
+function structuredEmails(html) {
+  return [...String(html).matchAll(/"email"\s*:\s*"(?:mailto:)?([^"\s]+@[^"\s]+)"/gi)].map((m) => m[1]);
+}
+
+// Emails, phones and contact-page links on one page (all of it: header,
+// navigation, body and footer).
 function contactsFromHtml(html, baseUrl, { country = null } = {}) {
   const links = hrefsOf(html, baseUrl);
   const text = textOf(html);
   const emails = new Set();
   for (const l of links) {
     const m = /^mailto:([^?]+)/i.exec(l.href);
-    if (m) emails.add(decodeURIComponent(m[1]).trim().toLowerCase());
+    if (m) emails.add(decodeMailto(m[1]).trim().toLowerCase());
   }
   for (const m of text.matchAll(EMAIL)) emails.add(m[0].toLowerCase().replace(/\.$/, ''));
+  for (const e of [...cloudflareEmails(html), ...structuredEmails(html)]) if (new RegExp(`^${EMAIL.source}$`, 'i').test(e)) emails.add(e.toLowerCase());
   const tels = links.filter((l) => /^tel:/i.test(l.href)).map((l) => l.href);
   const { phones } = findPhones(text, { country, links: tels, max: 5 });
   const host = hostOf(baseUrl);
   const contactPages = links
     .filter((l) => hostOf(l.href) === host && /contact|about|reach|support|get-in-touch|enquir|inquir|guest|booking|be-on|advertis|sponsor|press|media-kit|work-with|partner/i.test(`${l.href} ${l.text}`))
     .map((l) => l.href.split('#')[0])
-    .filter((h, i, a) => h && a.indexOf(h) === i);
+    .filter((h, i, a) => h && a.indexOf(h) === i)
+    // Contact pages first, then About, then the rest (they are read in this order).
+    .map((h, i) => [/contact|reach|get-in-touch|enquir|inquir/i.test(h) ? 0 : /about/i.test(h) ? 1 : 2, i, h])
+    .sort((a, b) => a[0] - b[0] || a[1] - b[1])
+    .map((x) => x[2]);
   return { emails: [...emails].filter((e) => !NOT_AN_EMAIL.test(e)), phones, contactPages };
 }
 
@@ -118,10 +152,29 @@ async function fetchPage(url, { fetchImpl = globalThis.fetch, timeout = 12_000, 
   return { ok: false };
 }
 
+// Where contact details usually are, for sites whose links are not in the
+// page (menus built by scripts). Tried only when an email is still missing.
+const USUAL_PAGES = ['/contact', '/contact-us', '/about', '/about-us'];
+
+// The pages to read after the home page: the ones it links to, then the usual ones.
+function nextPages(found, base, guess) {
+  const list = [...found];
+  if (guess) for (const p of USUAL_PAGES) list.push(new URL(p, base).toString());
+  const seen = new Set([base.replace(/\/$/, '')]);
+  return list.filter((u) => {
+    const k = u.replace(/\/$/, '');
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
 // { emails: [best first], phones: [{ phone, raw, status, country }],
 //   pages: [urls read], error }.
 // allow(url) -> Promise<boolean>: pages it refuses are not read (robots.txt).
-async function findContacts(website, { country = null, fetchImpl, signal, maxPages = 3, timeout, allow } = {}) {
+// stopAtEmail: no more pages once an email is found (the home page's own
+// links, then, with guess, the usual addresses of a contact or about page).
+async function findContacts(website, { country = null, fetchImpl, signal, maxPages = 3, timeout, allow, stopAtEmail = false, guess = false } = {}) {
   if (allow && !(await allow(website))) return { emails: [], phones: [], pages: [], error: 'its robots.txt does not permit automated reading' };
   const home = await fetchPage(website, { fetchImpl, signal, timeout });
   if (!home.ok) return { emails: [], phones: [], pages: [], error: home.error || `HTTP ${home.status || 'error'}` };
@@ -131,7 +184,8 @@ async function findContacts(website, { country = null, fetchImpl, signal, maxPag
   const phones = [...first.phones];
   // The page each email was first seen on.
   const emailPages = Object.fromEntries(first.emails.map((e) => [e, home.url]));
-  for (const url of first.contactPages.slice(0, maxPages - 1)) {
+  for (const url of nextPages(first.contactPages, home.url, guess)) {
+    if (pages.length >= maxPages || (stopAtEmail && emails.length)) break;
     if (allow && !(await allow(url))) continue;
     const p = await fetchPage(url, { fetchImpl, signal, timeout });
     if (!p.ok) continue;
@@ -148,7 +202,7 @@ async function findContacts(website, { country = null, fetchImpl, signal, maxPag
 
 // The same, read in a browser tab: for sites that refuse a plain request
 // (bot protection, HTTP 403) or need scripts to show their contact details.
-async function findContactsInPage(page, website, { country = null, maxPages = 3, timeout = 25_000 } = {}) {
+async function findContactsInPage(page, website, { country = null, maxPages = 3, timeout = 25_000, allow, stopAtEmail = false, guess = false } = {}) {
   const read = async (url) => {
     try {
       const res = await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
@@ -162,13 +216,16 @@ async function findContactsInPage(page, website, { country = null, maxPages = 3,
       return null;
     }
   };
+  if (allow && !(await allow(website))) return { emails: [], phones: [], pages: [], error: 'its robots.txt does not permit automated reading' };
   const home = await read(website);
   if (!home) return { emails: [], phones: [], pages: [], error: 'could not be opened' };
   const pages = [home.url];
   const first = contactsFromHtml(home.html, home.url, { country });
   const emails = [...first.emails];
   const phones = [...first.phones];
-  for (const url of first.contactPages.slice(0, maxPages - 1)) {
+  for (const url of nextPages(first.contactPages, home.url, guess)) {
+    if (pages.length >= maxPages || (stopAtEmail && emails.length)) break;
+    if (allow && !(await allow(url))) continue;
     const p = await read(url);
     if (!p) continue;
     pages.push(p.url);

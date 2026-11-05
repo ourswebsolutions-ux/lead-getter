@@ -192,6 +192,7 @@ function initLeadQuota() {
     plan: () => {
       const st = activation.status();
       if (st.state === 'active') return st.plan;
+      if (st.state === 'cancelled') return 'cancelled';
       return st.state === 'expired' && st.plan === 'free_trial' ? 'free_trial_ended' : null;
     },
     now: () => activation.now(),
@@ -237,8 +238,21 @@ function requireLeadAllowance() {
 function requirePlan() {
   const st = activation.status();
   if (st.state === 'active') return { ok: true };
-  const error = st.state === 'expired' ? `Your ${st.planName} plan has ended. Renew it under Activate to continue.` : 'This needs an active plan. Click Activate at the top to choose a plan.';
+  const error = st.state === 'cancelled' ? `Your ${st.planName} subscription has been cancelled. Contact us under Activate to reactivate it.` : st.state === 'expired' ? `Your ${st.planName} plan has ended. Renew it under Activate to continue.` : 'This needs an active plan. Click Activate at the top to choose a plan.';
   return { ok: false, subscription: st.state, error };
+}
+
+// Subscriptions the administrator cancelled by email (main/cancellations.js).
+let cancellationPoller = null;
+function startCancellationChecks() {
+  const { CancellationPoller } = require('./cancellations');
+  cancellationPoller = new CancellationPoller({
+    config: activationConfig().cancellations,
+    activation,
+    state: { get: (k) => store.getState(k), set: (k, v) => store.setState(k, v) },
+    onCancelled: () => sendActivation(),
+  });
+  cancellationPoller.start();
 }
 
 let lastActivationState = null;
@@ -400,7 +414,7 @@ function profileLabel(profile) {
 
 // rawKeyword/rawCategory: the Google Maps and Facebook search; rawLinkedIn:
 // LinkedIn's own search (its search bar). Only the sources switched on run.
-async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn, rawLocation = '') {
+async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn, rawLocation = '', rawFindEmails = false) {
   // The source switches above the Leads table, as they are now.
   const withMaps = mapsSearchOn();
   const withFacebook = facebookSearchOn();
@@ -431,6 +445,7 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn, raw
     }
   }
   const websiteFilter = WEBSITE_FILTERS.has(rawWebsite) ? rawWebsite : 'without';
+  const findEmails = rawFindEmails === true;
   if (search) return { ok: false, error: 'A search is already running.' };
   const plan = requirePlan();
   if (!plan.ok) return plan;
@@ -519,7 +534,7 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn, raw
           if (leadQuota) send('quota:state', leadQuota.status());
           verifier?.poke(); // check the new number on WhatsApp in the background
         },
-        createMaps: (emit) => new SearchSession({ keyword, categoryId: category.id, websiteFilter, store, signal: controller.signal, pages, recovery: recoveryFor(MAPS_TABS), emit }),
+        createMaps: (emit) => new SearchSession({ keyword, categoryId: category.id, websiteFilter, findEmails, allow: findEmails ? robotsChecker({ signal: controller.signal }) : null, store, signal: controller.signal, pages, recovery: recoveryFor(MAPS_TABS), emit }),
         createFacebook: (emit) =>
           new FacebookSession({
             keyword,
@@ -1600,6 +1615,7 @@ app.whenReady().then(() => {
     activation = createActivation();
     initLeadQuota();
     activation.startTrial();
+    startCancellationChecks();
     // The subscription system's request log, from earlier versions.
     require('node:fs').rmSync(path.join(app.getPath('userData'), 'licence.log'), { force: true });
     const last = store.getState('lastSearch');
@@ -1762,7 +1778,7 @@ app.whenReady().then(() => {
     store.setState('lastSearch', { state: 'dismissed' });
     return { ok: true };
   });
-  handle('search:start', (keyword, category, website, linkedin, location) => startSearch(keyword, category, website, linkedin, location));
+  handle('search:start', (keyword, category, website, linkedin, location, findEmails) => startSearch(keyword, category, website, linkedin, location, findEmails));
   handle('search:stop', () => stopSearch());
   handle('maps:get', () => ({ on: mapsSearchOn() }));
   handle('maps:set', (on) => setMapsSearch(on));

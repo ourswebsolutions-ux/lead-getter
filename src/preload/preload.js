@@ -23,8 +23,9 @@ contextBridge.exposeInMainWorld('leadFinder', {
   deleteCategory: (id) => ipcRenderer.invoke('categories:delete', Number(id)),
   // linkedin: LinkedIn's own search (used when LinkedIn Lead Search is on).
   // location: where LinkedIn People search looks (e.g. "USA").
-  startSearch: (keyword, category, website, linkedin, location) =>
-    ipcRenderer.invoke('search:start', String(keyword ?? ''), String(category ?? ''), String(website ?? 'without'), String(linkedin ?? ''), String(location ?? '')),
+  // findEmails: Google Maps: also read each lead's website for its public emails.
+  startSearch: (keyword, category, website, linkedin, location, findEmails) =>
+    ipcRenderer.invoke('search:start', String(keyword ?? ''), String(category ?? ''), String(website ?? 'without'), String(linkedin ?? ''), String(location ?? ''), findEmails === true),
   // App lock (4-digit PIN)
   lockState: () => ipcRenderer.invoke('lock:state'),
   lockSetup: (pin, confirm) => ipcRenderer.invoke('lock:setup', String(pin ?? ''), String(confirm ?? '')),

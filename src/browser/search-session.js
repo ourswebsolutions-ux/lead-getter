@@ -7,6 +7,7 @@
 const mapsDefault = require('./maps');
 const { checkWebPresence } = require('./web-check');
 const { classifyWebsite } = require('./website');
+const contactsDefault = require('./website-contacts');
 
 const DEFAULT_PACING = {
   listing: [2500, 5000], // pause between opened listings
@@ -67,7 +68,9 @@ function isNetworkError(err) {
 }
 
 class SearchSession {
-  constructor({ keyword, categoryId = null, websiteFilter = 'without', store, pages, emit, signal, recovery = null, maps = mapsDefault, webCheck = checkWebPresence, pacing = {}, random = Math.random }) {
+  // findEmails: also read each lead's website for its public emails; allow:
+  // robots.txt check for those pages; contacts, fetchImpl: for tests.
+  constructor({ keyword, categoryId = null, websiteFilter = 'without', store, pages, emit, signal, recovery = null, maps = mapsDefault, webCheck = checkWebPresence, pacing = {}, random = Math.random, findEmails = false, allow = null, contacts = contactsDefault, fetchImpl }) {
     this.keyword = keyword;
     this.categoryId = categoryId;
     this.websiteFilter = WEBSITE_FILTERS.has(websiteFilter) ? websiteFilter : 'without';
@@ -78,6 +81,11 @@ class SearchSession {
     this.signal = signal;
     this.maps = maps;
     this.webCheck = webCheck;
+    this.findEmails = findEmails;
+    this.allow = allow;
+    this.contacts = contacts;
+    this.fetchImpl = fetchImpl;
+    this.emailSites = new Map(); // website host -> what was found there (each site is read once)
     this.pacing = { ...DEFAULT_PACING, ...pacing };
     this.random = random;
     this.slow = 1;
@@ -415,6 +423,8 @@ class SearchSession {
       this.stats.processed++;
       if (existing.qualified && isLeadFor(this.websiteFilter, existing.website_status)) this.stats.leads++;
       this.status('running', `Already checked: ${existing.name}`);
+      // A lead saved by an earlier search: its website is still read once.
+      if (this.findEmails && existing.qualified && !existing.email && (!existing.discovery || existing.discovery.startsWith('email: could not read'))) await this.addEmails(existing.id, existing.website_detail, existing.website_status, page);
       return;
     }
 
@@ -468,10 +478,60 @@ class SearchSession {
       if (saved.isNewLead) this.stats.newLeads++;
       this.emit('lead', saved.lead);
       this.status('running', `Lead found: ${saved.lead.name}`);
+      if (this.findEmails) await this.addEmails(saved.lead.id, details.website, verdict.status, page);
     } else {
       this.status('running', `Not a lead: ${details.name} (${describeVerdict(verdict.status)})`);
     }
     await this.pause(this.pacing.listing);
+  }
+
+  // "Find Emails from Websites": the public emails of a lead's own website,
+  // saved on that lead. A failed site is noted on the lead and never stops
+  // the search. Each site is read once per search.
+  async addEmails(leadId, detail, status, page) {
+    if (status !== 'has_website' || !detail) return;
+    // An earlier search saved the domain only.
+    const website = fullUrl(detail);
+    const host = siteHost(website);
+    if (!host) return;
+    this.setStep('analyzing');
+    this.status('running', `Looking for emails on ${host}`);
+    if (!this.emailSites.has(host)) this.emailSites.set(host, await this.readEmails(website, page));
+    const found = this.emailSites.get(host);
+    const discovery = found.error ? `email: could not read ${host} (${found.error})` : found.emails.length ? `email: found on ${host} (${found.pages.length} page${found.pages.length === 1 ? '' : 's'} read)` : `email: none published on ${host} (${found.pages.length} page${found.pages.length === 1 ? '' : 's'} read)`;
+    let lead;
+    try {
+      lead = this.store.saveLeadEmails(leadId, { website, emails: found.emails, emailPages: found.emailPages, discovery });
+    } catch (err) {
+      throw new FatalSearchError(`Could not save to the local database (${String(err?.message || err).split('\n')[0]}). The search was stopped.`);
+    }
+    if (lead) this.emit('lead', lead);
+    if (found.emails.length) this.status('running', `Email found for ${lead?.name || host}: ${found.emails[0]}`);
+  }
+
+  // A direct request first; in Chrome (the check tab) when the site refuses
+  // one or shows nothing without its scripts. Never past its robots.txt.
+  async readEmails(website, page) {
+    const opts = { fetchImpl: this.fetchImpl, signal: this.signal, allow: this.allow, maxPages: EMAIL_PAGES, stopAtEmail: true, guess: true };
+    let direct;
+    try {
+      direct = await this.op(() => this.contacts.findContacts(website, opts));
+    } catch (err) {
+      if (err instanceof StopRequested || err instanceof BrowserClosed) throw err;
+      return { emails: [], pages: [], error: 'could not be read' };
+    }
+    if (direct.emails.length || /robots/.test(direct.error || '')) return direct;
+    let tab = null;
+    try {
+      tab = await this.op(() => this.pages.check());
+      const seen = await this.op(() => this.contacts.findContactsInPage(tab, website, { allow: this.allow, maxPages: EMAIL_PAGES, stopAtEmail: true, guess: true }));
+      return seen.emails.length || direct.error ? seen : direct;
+    } catch (err) {
+      if (err instanceof StopRequested || err instanceof BrowserClosed) throw err;
+      return direct;
+    } finally {
+      await this.op(() => page.bringToFront()).catch(rethrowControl);
+    }
   }
 
   // Applies the qualification rules. Only 'no_website' and 'social_only'
@@ -519,6 +579,25 @@ class SearchSession {
     }
   }
 }
+
+// Pages read per website when looking for emails.
+const EMAIL_PAGES = 6;
+
+const fullUrl = (site) => {
+  try {
+    return new URL(/^https?:\/\//i.test(site) ? site : `https://${site}`).toString();
+  } catch {
+    return '';
+  }
+};
+
+const siteHost = (url) => {
+  try {
+    return new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+  } catch {
+    return '';
+  }
+};
 
 // Which businesses a search keeps as leads, by its website filter.
 const WEBSITE_FILTERS = new Set(['without', 'with', 'all']);

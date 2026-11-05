@@ -20,10 +20,11 @@ function dayIn(ms, timeZone) {
 
 const TRIAL = 'free_trial';
 const TRIAL_ENDED = 'free_trial_ended';
+const CANCELLED = 'cancelled';
 
 class LeadQuota {
   // plan(): the active plan's id or null ('free_trial_ended': a trial that ran
-  // out); now(): the plan clock; config: { timeZone, dailyLeads: { <plan id>: number | null }, trialLeads }.
+  // out; 'cancelled': cancelled by the administrator); now(): the plan clock; config: { timeZone, dailyLeads: { <plan id>: number | null }, trialLeads }.
   constructor({ store, plan, now, config = {} }) {
     this.store = store;
     this.plan = plan;
@@ -43,7 +44,7 @@ class LeadQuota {
     const plan = this.plan();
     if (!plan) return null; // no plan: searching is refused elsewhere
     if (plan === TRIAL) return this.trialLeads;
-    if (plan === TRIAL_ENDED) return 0;
+    if (plan === TRIAL_ENDED || plan === CANCELLED) return 0;
     const n = this.limits[plan];
     return Number.isInteger(n) && n >= 0 ? n : null;
   }
@@ -62,6 +63,7 @@ class LeadQuota {
 
   message(limit = this.limit()) {
     const plan = this.plan();
+    if (plan === CANCELLED) return 'Your subscription has been cancelled. Lead finding is stopped. Contact us under Activate to reactivate it.';
     if (plan === TRIAL_ENDED) return 'Your Free Trial has ended. Upgrade your plan to find more leads.';
     if (plan === TRIAL) return `You have used all ${limit} leads of your Free Trial. Upgrade your plan to find more leads.`;
     return `You have reached your daily limit of ${limit} leads. Upgrade your plan to find more leads.`;

@@ -111,6 +111,16 @@ A business keeps the leads it has already become. One skipped earlier only becau
 
 **Export CSV** exports exactly what's shown, so with *Not on WhatsApp* selected, the file contains only those numbers.
 
+### Find Emails from Websites
+
+An option next to the Google Maps switch, **off by default**. Off, Google Maps works exactly as before and no business website is visited. Turning it on while the filter is *Without website* changes the filter to *All businesses*, because those businesses have no site to read.
+
+On, after a lead with its own website is saved, Lead Finder reads that site for the emails it publishes: the home page (header, navigation, body and footer), then, only while no email is found, its Contact page, About page and similar pages, up to 6 pages per site. Sites that refuse a plain request or show nothing without their scripts are read in Chrome. `mailto:` links, visible addresses, Cloudflare-protected addresses and the site's structured data all count. Nothing is guessed.
+
+- The best address (the site's own domain first) is saved as the lead's email and the rest with it, each with the page it came from. An email a lead already has is never replaced.
+- Each site is read once per search, so branches of one business don't repeat it. A lead saved by an earlier search gets its email when a later search meets it; once a site was read, it isn't read again.
+- A site's `robots.txt` is respected, including in Chrome. A site that can't be read is noted on the lead (*Discovery*) and never stops the search.
+
 ## App lock (4-digit PIN)
 
 - On first launch you create a four-digit PIN and confirm it. After that, every launch shows the unlock screen.
@@ -164,10 +174,25 @@ Searching (Google Maps, Facebook, LinkedIn and podcasts), CSV export, WhatsApp l
 
 If the activation email cannot be sent (the email server is down or refuses), the app does not fail: it shows a **reference** to send us with the Activation ID and plan, and we give the code for that request after payment (administrator: tools/activation/README.md). That code works only for that request, once, for 30 minutes, with 3 tries; a failed email never activates anything by itself, and every plan check still applies.
 
+### Cancelling a subscription by email
+
+The administrator sends an email **from `ADMIN_EMAIL` to the SMTP account (`SMTP_USER`)**:
+
+```
+Subject: Subscription Cancellation
+
+Activation ID: LF-089S-2JVN-5CMD (stop)
+```
+
+A scheduled job on GitHub reads that inbox and publishes a signed list of cancelled computers, and each copy of the app checks the list. On the listed computer the plan (Monthly, 6 Months, Lifetime or the Free Trial) ends at once: lead collection stops, including a running search, and the app shows that the subscription was cancelled. Saved leads stay. The administrator gets an email when the command is accepted, ignored or refused, and another when the computer has applied it. A new code after that activates the computer again. Setup and the rules for commands: [tools/activation/README.md](tools/activation/README.md).
+
+The mailbox is never opened by the app, a command needs a valid DKIM signature from the administrator's address, and the list holds only hashes of Activation IDs.
+
 ### Limitations (no server)
 
 There is no server, so the code is created and checked on the customer's own computer. This **cannot be fully secure**, and it isn't presented as such:
 
+- **A cancellation reaches a computer only when it checks the list:** at each start and every 10 minutes while open, after the inbox job has run. A computer kept offline, or blocked from GitHub, keeps its plan until it next reads the list, and someone who modifies the app can skip the check.
 - **The Free Trial is enforced on the customer's computer, not on a server.** Another computer gets its own trial. Deleting the record in the home folder together with the app's data gives a new trial on the same computer. There is no admin panel: the administrator's record of trials is the emails.
 
 - **The SMTP login is inside every installed app.** Anyone who unpacks the app can extract it. Use a **send-only SMTP key** from a transactional email service (Brevo, Mailgun, SendGrid, Amazon SES), never a mailbox password or Gmail App Password. A mailbox login would let them read the Sent folder, and the codes in it. Someone with the key could also send email through that account, so watch its usage and replace the key if it is abused.
@@ -335,9 +360,9 @@ The lead's main email is the person's best address that isn't invalid, and its p
 
 **Where it shows:** LinkedIn chip and Source filter, title · company under the name, a Verified / Unverified / Invalid badge, and the CSV columns *LinkedIn Profile URL, Person Title, Company, All Phones* (with *Email Status* and *All Emails*). Live test with your own logged-in Chrome: `node test/integration/linkedin-people.js "SEO" "USA" 3`.
 
-**ContactOut extension as the contact provider.** With **Contacts from: ContactOut extension** (the default when ContactOut is installed in this computer's Chrome), people's emails and phones come from the [ContactOut](https://contactout.com) Chrome extension, used as you would use it yourself:
+**ContactOut extension as the contact provider.** ContactOut is always optional. With **Contacts from: ContactOut, else built-in** (the default when ContactOut is installed in this computer's Chrome), people's emails and phones come from the [ContactOut](https://contactout.com) Chrome extension, used as you would use it yourself:
 - **Where it runs:** Lead Finder works in your own Chrome (the DevTools connection), so the extensions of that Chrome profile run as usual on the LinkedIn pages it opens.
-- **Before the search:** ContactOut must be installed, enabled and signed in in the profile Lead Finder is connected to. Lead Finder checks this from that profile's settings (only ContactOut's own entry). If it isn't there, it says so and names the profiles that have it, without opening any profile.
+- **Before the search:** ContactOut must be installed, enabled and signed in in the profile Lead Finder is connected to. Lead Finder checks this from that profile's settings (only ContactOut's own entry). If it isn't there, it says so, names the profiles that have it, and the search continues with built-in discovery.
   - A separately launched Playwright browser would not work: Chrome 137+ ignores `--load-extension`, and it would not be signed in to ContactOut.
 - **On each profile:** ContactOut adds its panel to the page, an iframe (`#main-iframe`) from `contactout.com/extension/app`.
   - Lead Finder opens the panel with ContactOut's own button when it is closed.
@@ -347,7 +372,7 @@ The lead's main email is the person's best address that isn't invalid, and its p
 - **Saved with ContactOut as the source:** each email and phone says `ContactOut (work)` and so on; the lead gets a *ContactOut* chip and a *Contact Provider* CSV column. Details LinkedIn's own Contact info shows are credited to LinkedIn.
 - **Verify emails** still checks ContactOut's emails with the mail servers when it is on.
 - **Reveal with credits** (off by default): also clicks ContactOut's "Find email" / "Show phone" buttons. This uses your ContactOut credits, exactly as clicking them yourself does. Off: only what ContactOut shows by itself is read.
-- **Never worked around:** a ContactOut login prompt, used-up credits or limits, or a security check ends ContactOut's use for that search. If ContactOut was the only source, the search stops. So does a panel that doesn't appear on two profiles in a row.
+- **Never worked around:** a ContactOut login prompt, used-up credits or limits, a security check, or a panel that doesn't appear on two profiles in a row ends ContactOut's use for that search. The search continues with built-in discovery. A person ContactOut has no details for also gets built-in discovery: their company's website and public phone, email and website.
 - **Other choices:** *Built-in discovery* uses the engine above instead; *ContactOut + built-in* uses both.
 - **Terms:** ContactOut's terms may restrict automated use of its extension or service, and it may limit or suspend accounts. You are responsible for using it within your plan and their terms.
 - **Live test** (your Chrome, the ContactOut profile, logged in to LinkedIn): `node test/integration/linkedin-people.js "SEO" "USA" 3 contactout`.
@@ -368,7 +393,7 @@ The lead's main email is the person's best address that isn't invalid, and its p
 | Details didn't fully load, the web check failed or timed out, or it was blocked | Unverified: kept out of the table and re-checked on a later search |
 | Permanently closed | Excluded |
 
-Lead Finder never fetches a business's website itself, so a site that is temporarily down can't make a business look website-less. Directory and listing sites (Zameen, Yelp, OLX, Google listings, and so on) never count as the business's own website. Matching domains to names is a heuristic that errs toward excluding a business.
+Qualifying a lead never fetches a business's website (only the optional email search above does), so a site that is temporarily down can't make a business look website-less. Directory and listing sites (Zameen, Yelp, OLX, Google listings, and so on) never count as the business's own website. Matching domains to names is a heuristic that errs toward excluding a business.
 
 ## Podcasts
 

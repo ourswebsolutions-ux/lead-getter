@@ -43,6 +43,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { fallbackCode, newReference, validPattern } = require('./fallback-code');
+const { hashId } = require('./cancellations');
 
 const PLANS = [
   { id: 'monthly', name: 'Monthly', priceLabel: 'PKR 4,500', months: 1 },
@@ -310,6 +311,7 @@ class Activation {
       : null;
     const c = this.current();
     if (!c) return { ...base, state: 'none', plan: null };
+    if (c.cancelledAt) return { ...base, state: 'cancelled', plan: c.plan, planName: planOf(c.plan).name, trial: c.plan === TRIAL_ID, expiresAt: null, daysLeft: null, activatedAt: new Date(c.startedAt).toISOString(), cancelledAt: new Date(c.cancelledAt).toISOString() };
     const expired = c.expiresAt !== null && now >= c.expiresAt;
     return {
       ...base,
@@ -327,6 +329,26 @@ class Activation {
     return this.status().state === 'active';
   }
 
+  // The signed list of cancellations (main/cancellations.js): ends this
+  // computer's plan if the administrator cancelled it. A plan activated after
+  // the cancellation stands, so a customer can be reactivated with a new code.
+  // Sealed like every plan record, and an old copy of the record is cancelled
+  // again by the next check. Returns true when the plan was cancelled now.
+  applyCancellations(entries) {
+    const c = this.current();
+    if (!c || c.cancelledAt) return false;
+    const id = hashId(this.activationId);
+    const at = Math.max(0, ...entries.filter((e) => e?.id === id && Number.isFinite(e.at)).map((e) => e.at));
+    if (!at || c.startedAt >= at) return false;
+    const { mac, ...rec } = c;
+    this.save('plan', 'activation', { ...rec, cancelledAt: at });
+    const when = new Date(this.now()).toISOString();
+    this.store.setState('activation.cancelLog', [...(this.store.getState('activation.cancelLog') || []), { at: when, activationId: this.activationId, plan: c.plan }].slice(-50));
+    this.notify(`Lead Finder subscription cancelled: ${planOf(c.plan).name}`, [`Activation ID: ${this.activationId}`, `Plan: ${planOf(c.plan).name}`, `Cancelled on the customer's computer: ${fmtTime(this.now())}`]);
+    this.flushNotices();
+    return true;
+  }
+
   // Step 1: a new code for `plan`, emailed to the administrator. Replaces
   // any earlier code. { ok, expiresAt } or { ok: false, reason, error }.
   async request(plan) {
@@ -337,7 +359,7 @@ class Activation {
     if (this.busy) return fail('busy', this.busy === 'sending' ? 'An activation request is already being sent.' : 'A code is being checked.');
     const cur = this.current();
     const now = this.now();
-    if (cur && cur.expiresAt === null) return fail('lifetime', 'You already have the Lifetime plan.');
+    if (cur && cur.expiresAt === null && !cur.cancelledAt) return fail('lifetime', 'You already have the Lifetime plan.');
     const sent = (this.store.getState('activation.requests') || []).filter((t) => t > now - 60 * 60 * 1000 && t <= now);
     const wait = sent.length ? sent[sent.length - 1] + RESEND_GAP - now : 0;
     if (wait > 0) return fail('wait', `Please wait ${Math.ceil(wait / 1000)} seconds before requesting a new code.`);
@@ -439,7 +461,7 @@ class Activation {
       const months = PLANS.find((x) => x.id === p.plan).months;
       const cur = this.current();
       // A paid plan starts now; days left of a trial are not added to it.
-      const running = cur && cur.plan !== TRIAL_ID && cur.expiresAt !== null && now < cur.expiresAt;
+      const running = cur && cur.plan !== TRIAL_ID && !cur.cancelledAt && cur.expiresAt !== null && now < cur.expiresAt;
       const rec = { plan: p.plan, startedAt: now, expiresAt: months ? addMonths(new Date(running ? cur.expiresAt : now), months).getTime() : null };
       this.save('plan', 'activation', rec);
       return { ok: true, plan: p.plan, planName, expiresAt: rec.expiresAt ? new Date(rec.expiresAt).toISOString() : null };

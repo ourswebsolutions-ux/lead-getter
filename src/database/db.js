@@ -1322,6 +1322,25 @@ class LeadStore {
     );
   }
 
+  // "Find Emails from Websites": what a lead's own website publishes. emails:
+  // best first; emailPages: { email: page url }; discovery: what was checked.
+  // Only empty fields are filled in. Returns the lead, or null when it is
+  // no longer a lead.
+  saveLeadEmails(id, { website = null, emails = [], emailPages = {}, discovery = null }) {
+    return this.withRetry(() =>
+      this.transaction(() => {
+        const row = this.db.prepare(`${LEAD_SELECT} WHERE b.id = ?`).get(id);
+        if (!row?.qualified) return null;
+        const list = [...new Set(emails.map((e) => String(e).toLowerCase()))].slice(0, 30);
+        const json = list.length ? JSON.stringify(list.map((email) => ({ email, kind: 'company', from: 'website', url: emailPages?.[email] || '' }))) : null;
+        this.db
+          .prepare('UPDATE businesses SET email = COALESCE(email, ?), emails = COALESCE(emails, ?), website_url = COALESCE(website_url, ?), discovery = COALESCE(?, discovery) WHERE id = ?')
+          .run(list[0] || null, json, website, discovery, id);
+        return toLead(this.db.prepare(`${LEAD_SELECT} WHERE b.id = ?`).get(id));
+      }),
+    );
+  }
+
   // --- LinkedIn people ----------------------------------------------------------
 
   // Saves a person found with LinkedIn People search and contact discovery:

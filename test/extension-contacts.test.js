@@ -153,7 +153,7 @@ async function runPeople(t, { extension, config = { contactout: true }, store = 
 const contactout = (over = {}) => ({ provider: ext.PROVIDERS.contactout, only: true, reveal: false, timeout: 5000, preflight: { installed: true, enabled: true, where: ['Ali'] }, ...over });
 
 test('ContactOut on each profile: its panel opened with its own button, what it shows saved with ContactOut as the source; credits used up end it', { skip: !exe && 'Google Chrome not installed' }, async (t) => {
-  const { outcome, stats, store, coLoads, fetched, statuses } = await runPeople(t, { extension: contactout() });
+  const { outcome, stats, store, coLoads, statuses } = await runPeople(t, { extension: contactout() });
   assert.equal(outcome.state, 'done', outcome.message);
   const by = Object.fromEntries(store.listLeads({ source: 'linkedin' }).map((l) => [l.name, l]));
   // Jane: the work email and the mobile ContactOut shows; the masked personal email is not taken.
@@ -168,12 +168,14 @@ test('ContactOut on each profile: its panel opened with its own button, what it 
   assert.deepEqual(by['Lena Fischer 🚀'].emails.map((e) => [e.email, e.from]), [['lena.fischer@gmail.example', 'LinkedIn contact info']]);
   assert.deepEqual(by['Lena Fischer 🚀'].contactProviders, []);
   assert.match(by['Lena Fischer 🚀'].discovery, /ContactOut showed no contact details/);
-  // Sam: credits used up: ContactOut is not used further, and (it being the only source) the search stops.
+  // Sam: credits used up: ContactOut is not used further; the search carries on with built-in discovery.
+  assert.ok(by['Sam Roe'], 'the search goes on after ContactOut stops');
+  assert.deepEqual(by['Sam Roe'].contactProviders, []);
   assert.match(outcome.message, /credits or limit are used up.*stopped using ContactOut/);
   assert.ok(statuses.some((s) => /stopped using ContactOut/.test(s)));
   assert.equal(stats.fromExtension, 1);
-  // ContactOut only: no website or email-format discovery was done.
-  assert.deepEqual(fetched, []);
+  // Jane had ContactOut's details: no website or email-format discovery for her.
+  assert.ok(!by['Jane Doe'].discovery.includes('email format'));
   // The extension loads itself on every profile (the unrelated one too); Lead Finder reads it on the people it keeps.
   assert.deepEqual(coLoads.filter(Boolean), ['jane-doe-seo', 'omar-khan-1', 'lena-fischer', 'pat-lee', 'sam-roe']);
   // The export names the provider.
@@ -187,15 +189,17 @@ test('ContactOut reveal buttons are clicked only with "Reveal with credits" on',
   assert.deepEqual(omar.contactProviders, ['contactout']);
 });
 
-test('ContactOut not in the Chrome profile in use: no profile is opened, and the profiles that have it are named; not loaded: it is reported, not invented', { skip: !exe && 'Google Chrome not installed' }, async (t) => {
+test('ContactOut not in the Chrome profile in use: profiles are still opened with built-in discovery, and the profiles that have it are named; not loaded: the same, and it is reported, not invented', { skip: !exe && 'Google Chrome not installed' }, async (t) => {
   const none = await runPeople(t, { extension: contactout({ preflight: { installed: false, enabled: false, where: ['Ali'] } }) });
-  assert.ok(!none.visited.some((u) => /\/in\//.test(u)), 'no profile opened');
-  assert.match(none.outcome.message, /ContactOut is not installed in the Chrome profile Lead Finder is using\. It is installed in the Chrome profile "Ali"/);
-  // Installed but its panel never appears on the pages (e.g. signed out of Chrome sync, blocked): stops after two profiles.
+  assert.equal(none.outcome.state, 'done', none.outcome.message);
+  assert.ok(none.visited.some((u) => /\/in\//.test(u)), 'profiles are opened without ContactOut');
+  assert.ok(none.store.listLeads({ source: 'linkedin' }).length >= 3);
+  assert.ok(none.statuses.some((s) => /ContactOut is not installed in the Chrome profile Lead Finder is using\. It is installed in the Chrome profile "Ali".*built-in discovery only/.test(s)));
+  // Installed but its panel never appears on the pages (e.g. signed out of Chrome sync, blocked): not used after two profiles; the search goes on.
   const missing = await runPeople(t, { extension: contactout(), config: {} });
   assert.match(missing.outcome.message, /ContactOut did not appear on LinkedIn profiles/);
-  assert.equal(missing.stats.profiles, 2);
-  assert.ok(missing.store.listLeads({ source: 'linkedin' }).every((l) => !l.email));
+  assert.ok(missing.stats.profiles > 2, `profiles: ${missing.stats.profiles}`);
+  assert.ok(missing.fetched.length > 0, 'company websites are checked instead');
 });
 
 test('LinkedIn 2026 layout and ContactOut 5.18 (as seen live): button iframe, panel off screen until clicked, View email/phone revealed, a monthly limit stops it', { skip: !exe && 'Google Chrome not installed' }, async (t) => {
@@ -212,9 +216,9 @@ test('LinkedIn 2026 layout and ContactOut 5.18 (as seen live): button iframe, pa
   assert.deepEqual(jane.contactProviders, ['contactout']);
   // "Find work email" (a separate search) is never clicked.
   assert.ok(!JSON.stringify(store.listLeads()).includes('should-not-click'));
-  // Omar: nothing found. Lena: the monthly limit: ContactOut's use ends, and (only source) the search stops.
+  // Omar: nothing found. Lena: the monthly limit: ContactOut's use ends, and built-in discovery carries on.
   assert.equal(by['Omar Khan'].email, '');
   assert.equal(by['Lena Fischer 🚀']?.contactProviders.length || 0, 0);
   assert.match(outcome.message, /credits or limit are used up.*stopped using ContactOut/);
-  assert.equal(by['Sam Roe'], undefined, 'no profile opened after the limit');
+  assert.deepEqual(by['Sam Roe']?.contactProviders, [], 'the next profile is read without ContactOut');
 });

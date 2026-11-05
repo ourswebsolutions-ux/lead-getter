@@ -242,7 +242,6 @@ class LinkedInSession extends SearchSession {
     if (ext?.preflight && !(ext.preflight.installed && ext.preflight.enabled)) {
       const where = ext.preflight.where?.length ? ` It is installed in the Chrome profile${ext.preflight.where.length === 1 ? '' : 's'} ${ext.preflight.where.map((w) => `"${w}"`).join(', ')}: open Chrome with that profile and search again.` : '';
       this.extensionStopped = `${ext.provider.label} is ${ext.preflight.installed ? 'disabled' : 'not installed'} in the Chrome profile Lead Finder is using.${where}`;
-      if (ext.only) return this.progress('people', this.extensionStopped);
       this.status('running', `LinkedIn: ${this.extensionStopped} Contacts come from built-in discovery only.`);
       this.extension = null;
     }
@@ -264,8 +263,6 @@ class LinkedInSession extends SearchSession {
         this.stats.linkedin.people++;
         await this.processPerson(page, p);
         if (this.blocked) return;
-        // The extension was the only source and can no longer be used: stop opening profiles.
-        if (this.extension?.only && this.extensionStopped) return;
       }
     }
   }
@@ -328,8 +325,10 @@ class LinkedInSession extends SearchSession {
     const ci = await this.liPage(page, () => this.li.readContactInfo(page, profileUrl));
     if (ci?.mode === 'ok') info = ci.info;
     else if (!ci) failed.push(`LinkedIn contact info (${this.blocked || 'closed'})`);
-    // The company: website and phone (not looked up when the extension is the only source).
-    const only = Boolean(this.extension?.only);
+    // The company: website and phone. Not looked up only when the extension
+    // is the chosen source and gave contact details for this person; when it
+    // is missing, stopped or found nothing, built-in discovery does the work.
+    const only = Boolean(this.extension?.only && !this.extensionStopped && provided.some((x) => x.emails.length || x.phones.length));
     const company = only ? { name: p.company, companyUrl: this.li.cleanCompanyUrl(p.companyHref), website: '', phone: null } : await this.companyFor(page, { name: p.company, companyUrl: this.li.cleanCompanyUrl(p.companyHref), location: p.location });
     const ownSite = only ? '' : (info.websites || []).map((h) => this.li.cleanWebsite(h)).find(Boolean) || '';
     this.progress('people', `${p.name}: contact discovery`);

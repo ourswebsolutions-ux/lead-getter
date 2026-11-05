@@ -7,7 +7,9 @@
 //   - writes src/main/activation-secret.json (git-ignored; packaged into
 //     builds made here): the secret, ADMIN_EMAIL and the SMTP settings;
 //   - writes the contact numbers into src/main/activation-config.json
-//     (committed).
+//     (committed), with the public key of the cancellation list;
+//   - creates CANCEL_SIGNING_KEY in .env (kept if it exists). It stays there
+//     and in the CANCELLATION_CONFIG repository secret, never in the app.
 // GitHub release builds need the same file as the ACTIVATION_CONFIG
 // repository secret (printed below).
 
@@ -15,6 +17,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { ENV_FILE, loadEnv, appSettings } = require('./lib');
+const { newKeys } = require('./cancel-lib');
+
+const CANCEL_LIST = 'https://raw.githubusercontent.com/ourswebsolutions-ux/lead-getter/cancellations/cancellations.json';
 
 const mainDir = path.join(__dirname, '..', '..', 'src', 'main');
 
@@ -27,6 +32,12 @@ if (!has('ACTIVATION_SECRET') || process.argv.includes('--new-secret')) {
   set('ACTIVATION_SECRET', crypto.randomBytes(32).toString('base64'));
   console.log('Created a new activation secret in .env. Back up .env.');
 }
+let cancelKey = null;
+if (!has('CANCEL_SIGNING_KEY')) {
+  cancelKey = newKeys();
+  set('CANCEL_SIGNING_KEY', cancelKey.privateKey);
+  console.log('Created the key that signs the cancellation list in .env. Back up .env.');
+}
 fs.writeFileSync(ENV_FILE, text, { mode: 0o600 });
 
 const env = loadEnv();
@@ -34,7 +45,8 @@ const contact = { whatsapp: (env.CONTACT_WHATSAPP || '').replace(/\D/g, ''), pho
 // Only the contact changes: the plan limits and the Free Trial in this file are kept.
 const configFile = path.join(mainDir, 'activation-config.json');
 const existing = fs.existsSync(configFile) ? JSON.parse(fs.readFileSync(configFile, 'utf8')) : {};
-fs.writeFileSync(configFile, `${JSON.stringify({ ...existing, contact }, null, 2)}\n`);
+const cancellations = cancelKey ? { url: CANCEL_LIST, publicKey: cancelKey.publicKey } : existing.cancellations;
+fs.writeFileSync(configFile, `${JSON.stringify({ ...existing, contact, ...(cancellations ? { cancellations } : {}) }, null, 2)}\n`);
 
 const { missing, settings } = appSettings(env);
 if (missing.length) {

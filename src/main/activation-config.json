@@ -14,5 +14,9 @@
       "six_months": null,
       "lifetime": null
     }
+  },
+  "cancellations": {
+    "url": "https://raw.githubusercontent.com/ourswebsolutions-ux/lead-getter/cancellations/cancellations.json",
+    "publicKey": "MCowBQYDK2VwAyEAAr8kzvyTuEQ2kBr0Zo2o0wNuvWCUAglGA730gVaZni8="
   }
 }

@@ -13,7 +13,7 @@ const mail = startSmtp({ port, unref: true });
 const smtp = { host: '127.0.0.1', port, user: 'sender@example.com', pass: 'test-pass', from: 'Lead Finder <sender@example.com>', insecure: true };
 // fallbackPattern: none here (the developer's private one in
 // tools/activation/.env never applies to tests).
-const activationConfig = { secret: crypto.randomBytes(32).toString('base64'), adminEmail: 'admin@example.com', smtp, fallbackPattern: null, trial: null };
+const activationConfig = { secret: crypto.randomBytes(32).toString('base64'), adminEmail: 'admin@example.com', smtp, fallbackPattern: null, trial: null, cancellations: null };
 const activationEnv = { LEAD_FINDER_ACTIVATION_CONFIG: JSON.stringify(activationConfig), LEAD_FINDER_NO_NETWORK_TIME: '1' };
 
 // The code in the latest email for an Activation ID.

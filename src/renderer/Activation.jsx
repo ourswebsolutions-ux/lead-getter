@@ -23,6 +23,7 @@ export function planNeeded(res) {
 export function planPill(st) {
   if (!st) return { text: 'Plan…', tone: 'idle' };
   if (st.state === 'active') return { text: st.expiresAt ? `${st.planName} · ${st.daysLeft} day${st.daysLeft === 1 ? '' : 's'} left` : st.planName, tone: st.expiresAt && st.daysLeft <= 3 ? 'warn' : 'accent' };
+  if (st.state === 'cancelled') return { text: 'Subscription cancelled', tone: 'danger' };
   if (st.state === 'expired') return { text: st.trial ? 'Trial ended · Upgrade' : 'Plan ended · Renew', tone: 'danger' };
   return { text: 'Activate', tone: 'warn' };
 }
@@ -30,6 +31,7 @@ export function planPill(st) {
 export function statusLine(st) {
   if (!st) return 'Checking plan…';
   if (st.state === 'active') return st.expiresAt ? `${st.planName} until ${fmtDate(st.expiresAt)}` : `${st.planName}, never expires`;
+  if (st.state === 'cancelled') return `${st.planName} cancelled ${fmtDate(st.cancelledAt)}`;
   if (st.state === 'expired') return `${st.planName} ended ${fmtDate(st.expiresAt)}`;
   return 'No plan yet';
 }
@@ -172,8 +174,8 @@ export default function Activation({ status: st, notice, upgrade = false, onClos
     if (!r.ok) notify({ type: 'error', text: 'No contact number is set up in this copy of Lead Finder.' });
   }
 
-  const chip = !st ? null : st.state === 'active' ? ['Active', 'accent'] : st.state === 'expired' ? ['Ended', 'danger'] : null;
-  const line = !st || st.state === 'none' ? 'Choose a plan to use Lead Finder' : st.state === 'expired' ? `${st.planName} ended ${fmtDate(st.expiresAt)}` : st.expiresAt ? `Until ${fmtDate(st.expiresAt)} · ${st.daysLeft} day${st.daysLeft === 1 ? '' : 's'} left` : 'Never expires';
+  const chip = !st ? null : st.state === 'active' ? ['Active', 'accent'] : st.state === 'cancelled' ? ['Cancelled', 'danger'] : st.state === 'expired' ? ['Ended', 'danger'] : null;
+  const line = !st || st.state === 'none' ? 'Choose a plan to use Lead Finder' : st.state === 'cancelled' ? `This subscription was cancelled on ${fmtDate(st.cancelledAt)}. Lead finding is stopped. Contact us to reactivate it.` : st.state === 'expired' ? `${st.planName} ended ${fmtDate(st.expiresAt)}` : st.expiresAt ? `Until ${fmtDate(st.expiresAt)} · ${st.daysLeft} day${st.daysLeft === 1 ? '' : 's'} left` : 'Never expires';
   const minsLeft = pending ? Math.max(0, Math.ceil((Date.parse(pending.expiresAt) - now) / 60_000)) : 0;
 
   return (
@@ -181,7 +183,7 @@ export default function Activation({ status: st, notice, upgrade = false, onClos
       <div className="sub-panel" role="dialog" aria-modal="true" aria-label="Subscription">
         <header className="sub-head">
           <div className="sub-title">
-            <h2>{st?.state === 'active' || st?.state === 'expired' ? `${st.planName} plan` : 'Activate Lead Finder'}</h2>
+            <h2>{st?.state === 'active' || st?.state === 'expired' || st?.state === 'cancelled' ? `${st.planName} plan` : 'Activate Lead Finder'}</h2>
             <p className="sub-line">{line}</p>
           </div>
           {chip && <span className={`sub-chip tone-${chip[1]}`}>{chip[0]}</span>}

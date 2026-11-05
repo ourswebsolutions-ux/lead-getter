@@ -1,0 +1,50 @@
+name: Subscription cancellations
+
+# Reads the SMTP account's inbox for cancellation emails and publishes the
+# signed list on the "cancellations" branch, which every copy of the app reads.
+# Secrets: CANCELLATION_CONFIG (the signing key, never built into the app);
+# ACTIVATION_CONFIG for the existing mail login. See tools/activation/README.md.
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cancellations
+
+jobs:
+  inbox:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Open the list
+        run: |
+          if git fetch -q origin cancellations; then
+            git worktree add -q state FETCH_HEAD
+          else
+            git worktree add -q --detach state
+            cd state && git checkout -q --orphan list && git rm -rfq .
+          fi
+      - name: Read the inbox
+        env:
+          CANCELLATION_CONFIG: ${{ secrets.CANCELLATION_CONFIG }}
+          ACTIVATION_CONFIG: ${{ secrets.ACTIVATION_CONFIG }}
+        run: node tools/activation/run-cancellations.js --state state/cancellations.json
+      - name: Publish the list
+        working-directory: state
+        run: |
+          [ -f cancellations.json ] || exit 0
+          git add cancellations.json
+          git diff --cached --quiet && exit 0
+          git -c user.name='github-actions[bot]' -c user.email='41898283+github-actions[bot]@users.noreply.github.com' commit -q -m 'Update the cancellation list'
+          git push -q origin HEAD:cancellations

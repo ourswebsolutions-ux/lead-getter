@@ -535,6 +535,7 @@ export default function App({ onLock }) {
   const [wa, setWa] = useState(null);
   const [composeLead, setComposeLead] = useState(null);
   const [websiteFilter, setWebsiteFilter] = useState('without'); // for the next search
+  const [findEmails, setFindEmails] = useState(false); // Google Maps: read each lead's website for emails
   const [siteView, setSiteView] = useState('all'); // table: all | without | with
   const [waView, setWaView] = useState('all'); // all | available | unavailable (WhatsApp's own check)
   const [campaignView, setCampaignView] = useState('all'); // all | seen | unseen
@@ -872,7 +873,7 @@ export default function App({ onLock }) {
       localStorage.setItem('lf-linkedin-keyword', li);
       localStorage.setItem('lf-linkedin-location', loc);
     } catch {}
-    const res = await api.startSearch(kw, cat, websiteFilter, li, liSettings.modes.people ? loc : '');
+    const res = await api.startSearch(kw, cat, websiteFilter, li, liSettings.modes.people ? loc : '', mapsOn && findEmails);
     if (!res.ok) {
       // No active plan: show the Activate panel with the reason.
       if (!planNeeded(res)) notify({ type: 'error', text: res.error });
@@ -1123,7 +1124,7 @@ export default function App({ onLock }) {
                   <label className="select-wrap provider-select" title={liSettings.contact?.installedIn?.length ? `ContactOut is enabled in your Chrome profile${liSettings.contact.installedIn.length === 1 ? '' : 's'} ${liSettings.contact.installedIn.join(', ')}. Lead Finder must be connected to that profile to use it.` : 'ContactOut is not installed in this computer\'s Chrome.'}>
                     <span>Contacts from</span>
                     <select aria-label="Contacts from" value={liSettings.contact?.provider || 'builtin'} disabled={active} onChange={(e) => changeLinkedIn({ contact: { ...liSettings.contact, provider: e.target.value } })}>
-                      <option value="contactout">ContactOut extension</option>
+                      <option value="contactout">ContactOut, else built-in</option>
                       <option value="builtin">Built-in discovery</option>
                       <option value="both">ContactOut + built-in</option>
                     </select>
@@ -1214,6 +1215,22 @@ export default function App({ onLock }) {
               </button>
               <span className="source-label">Google Maps</span>
             </span>
+            {mapsOn && (
+              <label className="check-wrap" title={findEmails && websiteFilter === 'without' ? 'Businesses without a website have no site to read. Choose With website or All businesses.' : "Visits each lead's website (home, Contact, About and similar public pages) and saves the business emails it publishes."}>
+                <input
+                  type="checkbox"
+                  checked={findEmails}
+                  disabled={active}
+                  aria-label="Find Emails from Websites"
+                  onChange={(e) => {
+                    setFindEmails(e.target.checked);
+                    // "Without website" has no sites to read.
+                    if (e.target.checked && websiteFilter === 'without') setWebsiteFilter('all');
+                  }}
+                />
+                <span>Find Emails from Websites</span>
+              </label>
+            )}
             <span className="source-item" title={facebookOn ? 'Public Facebook posts are searched at the same time as Google Maps, with the same keyword and category (in a separate Chrome window, using your Facebook login).' : 'Off: Facebook is not searched.'}>
               <button
                 type="button"
