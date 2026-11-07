@@ -15,9 +15,11 @@
 // Spotify, Deezer, Player FM and Pandora are browser platforms: the search
 // opens in the user's Chrome and the shows it lists are read from that page
 // (readInBrowser, podcast-read.js). They list no RSS feeds, so each feed is
-// looked for by title, like YouTube. A pasted Spotify show link is only
-// opened (openInBrowser). A pasted podcast website is read where its
-// robots.txt permits.
+// looked for by title, like YouTube. A Spotify show's own page and episode
+// pages are read too (readPage), one at a time, so its emails do not depend
+// on a feed existing; a pasted show or episode link is read the same way.
+// Without readPage such a link is only opened (openInBrowser). A pasted
+// podcast website is read where its robots.txt permits.
 //
 // Every podcast found is saved at once (email discovery pending), then again
 // with what discovery found, so a stopped or failed search loses nothing.
@@ -39,12 +41,16 @@ const { SITES } = require('./podcast-read');
 const { processPodcast, fetchFeed, parseFeed } = require('./podcasts');
 const { textOf } = require('./website-contacts');
 
+
 class PodcastSearch {
+  // readPage(url, options): a Spotify show or episode page (podcast-read.js);
+  // log(line): what was read and what failed, for the app's log.
   // openInBrowser(url): opens a page in the user's Chrome (main.js);
   // readInBrowser(platform, term, options): the shows a platform's search lists; allow(url):
   // whether a website permits automated reading (robots.js).
-  constructor({ query, platforms = ['apple'], creds = {}, store, keyword, categoryId = null, country = null, signal, emit = () => {}, fetchImpl, feedCache, findContacts, limit = 50, concurrency = 3, adapters = ADAPTERS, openInBrowser = null, readInBrowser = null, allow = async () => true, seed = null, extraLinks = null, runId = null }) {
-    Object.assign(this, { query: String(query || '').trim(), platforms, creds, store, keyword: keyword ?? query, categoryId, country, fetchImpl, feedCache, findContacts, limit, concurrency, adapters, openInBrowser, readInBrowser, allow, seed, extraLinks, signal });
+  constructor({ query, platforms = ['apple'], creds = {}, store, keyword, categoryId = null, country = null, signal, emit = () => {}, fetchImpl, feedCache, findContacts, limit = 50, concurrency = 3, adapters = ADAPTERS, openInBrowser = null, readInBrowser = null, readPage = null, log = () => {}, allow = async () => true, seed = null, extraLinks = null, runId = null }) {
+    Object.assign(this, { query: String(query || '').trim(), platforms, creds, store, keyword: keyword ?? query, categoryId, country, fetchImpl, feedCache, findContacts, limit, concurrency, adapters, openInBrowser, readInBrowser, readPage, log, allow, seed, extraLinks, signal });
+    this.chromeTurn = Promise.resolve();
     this.runId = runId || `run${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
     this.emit = (event, payload) => emit(event, event === 'lead' ? payload : { runId: this.runId, ...payload });
     this.entries = [];
@@ -55,7 +61,8 @@ class PodcastSearch {
     // found: podcasts in this search; newLeads: saved for the first time;
     // duplicates: already saved (or the same podcast twice); rejected: results
     // that are not podcasts or could not be saved.
-    this.stats = { found: 0, done: 0, withEmail: 0, noEmail: 0, failed: 0, newLeads: 0, duplicates: 0, rejected: 0, saved: 0 };
+    // episodes, emails: episode descriptions checked and addresses found.
+    this.stats = { found: 0, done: 0, withEmail: 0, noEmail: 0, failed: 0, newLeads: 0, duplicates: 0, rejected: 0, saved: 0, episodes: 0, emails: 0 };
     this.seq = 0;
     this.searchId = null;
     // A keyword search keeps only podcasts about its keyword (a pasted link
@@ -83,6 +90,7 @@ class PodcastSearch {
       // Podcasts from platforms without feeds: their feed by title.
       for (const e of this.deferred) {
         if (this.signal?.aborted) break;
+        await this.readShow(e);
         await this.resolveByTitle(e);
       }
     } finally {
@@ -95,7 +103,7 @@ class PodcastSearch {
     for (const e of this.entries) if (e.state === 'queued') this.update(e, { state: 'stopped' });
     const s = this.stats;
     const state = this.signal?.aborted ? 'stopped' : 'done';
-    const summary = `${s.found} podcast${s.found === 1 ? '' : 's'} found, ${s.withEmail} with an email`;
+    const summary = `${s.found} podcast${s.found === 1 ? '' : 's'} found, ${s.withEmail} with an email${this.readsPages ? `, ${s.episodes} episode${s.episodes === 1 ? '' : 's'} checked, ${s.emails} email${s.emails === 1 ? '' : 's'} found` : ''}`;
     if (this.searchId) {
       try {
         this.store.finishSearch(this.searchId, state, s);
@@ -110,6 +118,7 @@ class PodcastSearch {
       this.emit('platform', { id: 'link', state: 'failed', message: 'Only web addresses (http or https) can be looked up.' });
       return;
     }
+    if (platform === 'spotify' && this.readPage && this.adapters.spotify.pageUrl(this.query)) return this.lookUpSpotify(this.adapters.spotify.pageUrl(this.query));
     if (PLATFORMS[platform].browser && !this.adapters[platform].link) {
       const url = this.adapters[platform].pageUrl(this.query);
       if (!url) {
@@ -127,6 +136,117 @@ class PodcastSearch {
       if (this.signal?.aborted) return;
       this.emit('platform', { id: platform, state: { needs_key: 'needs_key', not_permitted: 'not_permitted' }[err.code] || 'failed', message: err.message });
     }
+  }
+
+  // A pasted Spotify show or episode link, read in Chrome. An episode leads to
+  // its show, which is the podcast saved; the email keeps its episode.
+  async lookUpSpotify(url) {
+    this.emit('platform', { id: 'spotify', state: 'searching', message: 'Reading Spotify in Chrome' });
+    try {
+      const d = await this.spotifyPage(url);
+      if (this.signal?.aborted) return;
+      const spotify = this.blankPages();
+      const p = { platform: 'spotify', platformId: d.id, title: d.type === 'show' ? d.title : d.show || d.title, host: d.host || (d.type === 'show' ? '' : d.show), description: '', url: d.showUrl || d.url, artwork: d.artwork || '', fromSearch: true, spotify, feedNote: 'Spotify lists no RSS feed, and no podcast with this name was found on Apple Podcasts' };
+      this.keepPage(p, d);
+      spotify.opened = d.type === 'show' || !d.showUrl;
+      this.add(this.extraLinks ? { ...p, extraLinks: this.extraLinks } : p);
+      this.emit('platform', { id: 'spotify', state: 'done', count: 1, message: 'Link found' });
+    } catch (err) {
+      if (this.signal?.aborted) return;
+      this.log(`spotify: ${url}: page not read: ${err.message}`);
+      this.emit('platform', { id: 'spotify', state: 'failed', message: `Spotify could not be read in Chrome: ${err.message}` });
+    }
+  }
+
+  // Chrome has one Spotify window, so its pages are read one at a time.
+  spotifyPage(url) {
+    const onWait = (message) => this.emit('platform', { id: 'spotify', state: 'searching', message });
+    const run = this.chromeTurn.then(() => this.readPage(url, { signal: this.signal, onWait }));
+    this.chromeTurn = run.catch(() => {});
+    return run;
+  }
+
+  blankPages() {
+    return { opened: false, items: [], failed: [], rows: [], seen: new Set(), showRead: 0, episodesRead: 0 };
+  }
+
+  // What a Spotify page gave: its text with where it came from, so each email
+  // stays with its show or source episode.
+  keepPage(e, d) {
+    const s = e.spotify;
+    const isShow = d.type === 'show';
+    s.seen.add(d.id);
+    if (d.text) s.items.push({ show: isShow, from: isShow ? 'Spotify show description' : `Spotify episode “${d.title.slice(0, 120)}”`, url: d.url, text: d.text });
+    if (!isShow) this.stats.episodes++;
+    if (isShow) {
+      s.showRead++;
+      s.rows = d.episodes || [];
+      if (d.description) e.description = d.description;
+      if (!e.host && d.host) e.host = d.host;
+      if (!e.artwork && d.artwork) e.artwork = d.artwork;
+      e.platformLabel = 'Spotify';
+    } else s.episodesRead++;
+    this.log(`spotify: ${isShow ? 'show' : 'episode'} “${d.title}”: ${d.text ? `description read (${d.fromMetadata ? 'page metadata' : 'visible page'})` : 'no description on the page'}`);
+  }
+
+  // The show's page: its description and episode list, once.
+  async readShow(e) {
+    if (!this.readPage || !e.links?.spotify || e.spotify?.opened) return;
+    e.spotify = e.spotify || this.blankPages();
+    e.spotify.opened = true;
+    this.readsPages = true;
+    this.progress();
+    this.update(e, { step: 'Reading the Spotify show page' });
+    try {
+      const d = await this.spotifyPage(e.links.spotify);
+      if (!this.signal?.aborted) this.keepPage(e, d);
+    } catch (err) {
+      if (this.signal?.aborted) return;
+      e.spotify.failed.push(`Spotify show page (${err.message})`);
+      this.log(`spotify: show “${e.title}”: page not read: ${err.message}`);
+    }
+    this.update(e, { step: '' });
+  }
+
+  progress() {
+    const s = this.stats;
+    this.status('running', `Checking show ${Math.min(s.done + 1, s.found)} of ${s.found} · ${s.episodes} episode${s.episodes === 1 ? '' : 's'} checked · ${s.emails} email${s.emails === 1 ? '' : 's'} found`);
+  }
+
+  // Episode pages, newest first, up to max or until enough() says the show's
+  // own email was found; then what the show page listed of the others.
+  async readEpisodes(e, step, { max, enough, take }) {
+    const s = e.spotify;
+    const todo = s.rows.filter((r) => !s.seen.has(r.id));
+    const pages = todo.slice(0, max);
+    for (const [i, r] of pages.entries()) {
+      if (this.signal?.aborted) return;
+      if (enough()) break;
+      step(`Reading Spotify episode ${i + 1} of ${pages.length}`);
+      this.progress();
+      try {
+        const d = await this.spotifyPage(r.url);
+        this.keepPage(e, { ...d, title: d.title || r.title, id: r.id });
+        take();
+      } catch (err) {
+        if (this.signal?.aborted) return;
+        s.failed.push(`Spotify episode “${r.title.slice(0, 120)}” (${err.message})`);
+        this.log(`spotify: episode “${r.title}”: page not read: ${err.message}`);
+      }
+    }
+    for (const r of todo) if (!s.seen.has(r.id) && r.text) s.items.push({ from: `Spotify episode “${r.title.slice(0, 120)}”`, url: r.url, text: r.text });
+  }
+
+  // A feed with the same title but another publisher name: the same podcast
+  // when it has one of the episodes or the description read from the page.
+  async sameShow(e, listing) {
+    const got = this.feedCache?.get(listing.feedUrl) || (await fetchFeed(listing.feedUrl, { fetchImpl: this.fetchImpl, signal: this.signal }).catch(() => ({ ok: false })));
+    const f = got.ok ? parseFeed(got.xml) : null;
+    if (!f?.ok) return false;
+    this.feedCache?.set(listing.feedUrl, got);
+    const titles = new Set(e.spotify.rows.map((r) => titleKey(r.title)).filter(Boolean));
+    const start = (s) => textOf(s).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '').slice(0, 60);
+    return f.items.some((i) => titles.has(titleKey(i.title))) || Boolean(e.description && start(e.description).length >= 30 && start(e.description) === start(f.description));
   }
 
   // A browser platform's page, opened in Chrome for the user.
@@ -274,7 +394,8 @@ class PodcastSearch {
     this.update(e, {});
     // A website is checked as it is: a title alone (no host to compare) could
     // match a different podcast of the same name.
-    if (e.feedUrl || e.appleId || e.platform === 'website') this.enqueue(e);
+    const pageFirst = this.readPage && e.links.spotify && !e.spotify?.opened;
+    if ((e.feedUrl || e.appleId || e.platform === 'website') && !pageFirst) this.enqueue(e);
     else this.deferred.push(e);
   }
 
@@ -345,6 +466,19 @@ class PodcastSearch {
       this.deferred.splice(i, 1);
       this.enqueue(e);
     }
+    // Checked before this Spotify listing arrived, and no email: its pages
+    // are still to be read.
+    if (p.platform === 'spotify' && e.state === 'done' && !e.result?.email && this.readPage && !e.spotify?.opened) {
+      this.stats.done--;
+      this.stats.episodes -= e.result?.episodes || 0;
+      this.stats.emails -= (e.result?.emails || []).filter((x) => x.kind !== 'platform').length;
+      if (e.result?.status === 'failed') this.stats.failed--;
+      else this.stats.noEmail--;
+      e.result = null;
+      e.state = 'queued';
+      this.enqueue(e);
+      return;
+    }
     // Already saved: the lead gets the new platform link.
     if (e.state === 'done' && e.result) this.save(e);
     else if (e.leadId) this.store.savePodcastLead({ id: e.appleId || '', title: e.title, appleUrl: e.links.apple || '', rssUrl: e.feedUrl || '', links: e.links, pending: true });
@@ -355,7 +489,7 @@ class PodcastSearch {
     this.update(e, { step: 'Finding its RSS feed by title' });
     let hit = null;
     try {
-      hit = await feedByTitle(e, { fetchImpl: this.fetchImpl, signal: this.signal });
+      if (!e.feedUrl && !e.appleId) hit = await feedByTitle(e, { fetchImpl: this.fetchImpl, signal: this.signal, confirm: e.spotify?.showRead ? (x) => this.sameShow(e, x) : null });
     } catch (err) {
       if (this.signal?.aborted) return;
     }
@@ -428,7 +562,10 @@ class PodcastSearch {
       }
       if (!this.savePending(e)) return;
     }
+    await this.readShow(e);
+    if (this.signal?.aborted) return;
     this.update(e, { state: 'running', step: 'Starting' });
+    if (e.spotify) e.readEpisodes = (step, options) => this.readEpisodes(e, step, options);
     let r;
     try {
       r = await processPodcast(e, {
@@ -448,14 +585,18 @@ class PodcastSearch {
       r = { title: e.title, host: e.host, rssUrl: '', rssStatus: 'failed', emails: [], email: '', status: 'failed', statusText: `Not checked: ${err?.message || 'unexpected error'}`, failed: [String(err?.message || err)], checked: [] };
       r.discovery = `email: ${r.statusText}`;
     }
+    if (r.spotifyLog) this.log(`spotify: “${e.title}”: ${r.spotifyLog}`);
     e.result = r;
     this.stats.done++;
+    this.stats.episodes += r.episodes || 0;
+    this.stats.emails += r.emails.filter((x) => x.kind !== 'platform').length;
     if (r.email) this.stats.withEmail++;
     else if (r.status === 'failed') this.stats.failed++;
     else this.stats.noEmail++;
     e.state = 'done';
     this.save(e);
-    this.status('running', `${this.stats.done} of ${this.stats.found} checked · ${this.stats.withEmail} with an email`);
+    if (this.readsPages) this.progress();
+    else this.status('running', `${this.stats.done} of ${this.stats.found} checked · ${this.stats.withEmail} with an email`);
   }
 
   save(e) {

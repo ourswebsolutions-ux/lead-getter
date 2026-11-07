@@ -418,8 +418,9 @@ function LeadDetails({ lead }) {
             <li key={e.email}>
               <MailLink email={e.email} className="mono" />
               {e.kind === 'platform' && <span className="pc-tag">hosting platform</span>}
-              <span className="muted">{e.from}</span>
+              <span className="muted">{e.source ? `${e.source}${e.episode ? `: ${e.episode}` : ''}` : e.from}</span>
               {e.url && <ExtLink url={e.url}>source</ExtLink>}
+              {lead.podcastLinks?.spotify && lead.podcastLinks.spotify !== e.url && <ExtLink url={lead.podcastLinks.spotify}>Spotify</ExtLink>}
             </li>
           ))}
         </ul>

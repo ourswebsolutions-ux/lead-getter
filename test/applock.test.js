@@ -82,3 +82,68 @@ test('without a keychain the PIN is still only stored as a salted scrypt hash', 
   assert.equal(Buffer.from(rec.data.hash, 'base64').length, 32);
   assert.equal(new AppLock({ store, cipher: null }).unlock('4821').ok, true);
 });
+
+test('forgotten PIN: a new PIN is emailed to the administrator only; entering it makes it the PIN', async () => {
+  const store = new LeadStore(':memory:');
+  let t = 5_000_000;
+  new AppLock({ store, cipher }).setup('4821', '4821');
+  const lock = new AppLock({ store, cipher, now: () => t });
+  const sent = [];
+  const send = async (pin, expiresAt) => sent.push({ pin, expiresAt });
+  const r = await lock.requestReset(send);
+  assert.equal(r.ok, true);
+  assert.match(sent[0].pin, /^\d{4}$/);
+  assert.equal(sent[0].expiresAt, t + 24 * 60 * 60_000);
+  assert.ok(!JSON.stringify(store.getState('app_lock_reset')).includes(sent[0].pin), 'only a hash is kept');
+  assert.equal(r.pin, undefined, 'never given to the window');
+  // Limits: one per minute, five per day.
+  assert.match((await lock.requestReset(send)).error, /wait \d+ seconds/);
+  t += 61_000;
+  const second = (await lock.requestReset(send), sent.at(-1).pin);
+  const newPin = sent.at(-1).pin;
+  assert.equal(second, newPin);
+  // The newest reset PIN replaces the earlier one.
+  if (sent[0].pin !== newPin) assert.equal(lock.unlock(sent[0].pin).ok, false);
+  const ok = lock.unlock(newPin);
+  assert.deepEqual([ok.ok, ok.reset], [true, true]);
+  // It is now the PIN, on the next start too; the old one no longer works.
+  const next = new AppLock({ store, cipher, now: () => t });
+  assert.equal(next.unlock(newPin).ok, true);
+  if (newPin !== '4821') assert.equal(new AppLock({ store, cipher, now: () => t }).unlock('4821').ok, false);
+  assert.equal(store.getState('app_lock_reset'), null);
+});
+
+test('reset PIN: expires after 24 hours; the old PIN still works and cancels it; a failed email keeps nothing', async () => {
+  const store = new LeadStore(':memory:');
+  let t = 9_000_000;
+  new AppLock({ store, cipher }).setup('4821', '4821');
+  const lock = new AppLock({ store, cipher, now: () => t });
+  let pin = '';
+  await lock.requestReset(async (p) => (pin = p));
+  t += 24 * 60 * 60_000 + 1;
+  if (pin !== '4821') assert.equal(lock.unlock(pin).ok, false, 'expired');
+  t += 61_000;
+  await lock.requestReset(async (p) => (pin = p));
+  assert.equal(lock.unlock('4821').ok, true, 'remembered after all');
+  if (pin !== '4821') assert.equal(new AppLock({ store, cipher, now: () => t }).unlock(pin).ok, false, 'that reset is cancelled');
+  t += 61_000;
+  await assert.rejects(lock.requestReset(async () => { throw new Error('smtp down'); }), /smtp down/);
+  assert.equal(store.getState('app_lock_reset'), null);
+  assert.equal((await lock.requestReset(async () => {})).ok, true, 'a failed send is not counted against the wait');
+  for (let i = 0; i < 3; i++) (t += 61_000), await lock.requestReset(async () => {});
+  t += 61_000;
+  assert.match((await lock.requestReset(async () => {})).error, /Too many reset requests today/);
+  assert.equal((await new AppLock({ store: new LeadStore(':memory:'), cipher }).requestReset(async () => assert.fail())).ok, false, 'no PIN yet');
+});
+
+test('reset PIN is guessed under the same limiter', async () => {
+  const store = new LeadStore(':memory:');
+  const t = 1_000_000;
+  new AppLock({ store, cipher }).setup('4821', '4821');
+  const lock = new AppLock({ store, cipher, now: () => t });
+  let pin = '';
+  await lock.requestReset(async (p) => (pin = p));
+  const wrong = ['0000', '1111', '2222', '3333', '5555', '6666'].filter((w) => w !== pin && w !== '4821');
+  for (const w of wrong.slice(0, 5)) lock.unlock(w);
+  assert.match(lock.unlock(pin).error, /wait/);
+});

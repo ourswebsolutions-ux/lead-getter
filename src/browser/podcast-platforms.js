@@ -443,11 +443,21 @@ function feedKey(url) {
 // The feed of a podcast found on a platform without feeds: the podcast with
 // exactly the same title (and a compatible host) on Apple Podcasts.
 // { feedUrl, appleId, appleUrl, from, match } or null.
-async function feedByTitle(p, { fetchImpl, signal } = {}) {
+// confirm(listing): whether a listing with the same title but another
+// publisher name is this podcast after all (its episodes are the same). The
+// two directories often name the publisher differently, and Apple may have
+// none ("Unknown").
+const NO_HOST = /^\s*(unknown|n\/a|none)?\s*$/i;
+async function feedByTitle(p, { fetchImpl, signal, confirm } = {}) {
   const key = titleKey(p.title);
   if (!key) return null;
   try {
-    const hit = (await apple.search(p.title, { fetchImpl, signal, limit: 25 })).find((x) => titleKey(x.title) === key && x.feedUrl && (p.titleFromLink || sameHost(x.host, p.host)));
+    const same = (await apple.search(p.title, { fetchImpl, signal, limit: 25 })).filter((x) => titleKey(x.title) === key && x.feedUrl);
+    let hit = same.find((x) => p.titleFromLink || NO_HOST.test(x.host) || sameHost(x.host, p.host));
+    for (const x of confirm ? same.slice(0, 3) : []) {
+      if (hit) break;
+      if (await confirm(x)) hit = x;
+    }
     if (hit) return { feedUrl: hit.feedUrl, appleId: hit.appleId, appleUrl: hit.appleUrl, from: 'Apple Podcasts (same title)', match: hit };
   } catch (err) {
     if (signal?.aborted) throw err;

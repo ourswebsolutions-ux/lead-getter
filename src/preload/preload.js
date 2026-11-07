@@ -31,6 +31,7 @@ contextBridge.exposeInMainWorld('leadFinder', {
   lockSetup: (pin, confirm) => ipcRenderer.invoke('lock:setup', String(pin ?? ''), String(confirm ?? '')),
   lockUnlock: (pin) => ipcRenderer.invoke('lock:unlock', String(pin ?? '')),
   lockChange: (current, next, confirm) => ipcRenderer.invoke('lock:change', String(current ?? ''), String(next ?? ''), String(confirm ?? '')),
+  lockReset: () => ipcRenderer.invoke('lock:reset'),
   lockNow: () => ipcRenderer.invoke('lock:lock'),
   // Subscription: this computer's Activation ID, plan status and activation codes.
   activationStatus: () => ipcRenderer.invoke('activation:status'),

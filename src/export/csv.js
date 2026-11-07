@@ -8,7 +8,7 @@ const HEADER = [
   'Facebook Post URL', 'Facebook Page URL', 'Contact Name', 'Post Text',
   'Email', 'Website', 'LinkedIn Company URL', 'LinkedIn Job URL', 'LinkedIn Post URL', 'Job Title', 'Discovery',
   'Podcast Host', 'Apple Podcasts URL', 'RSS Feed URL', 'All Emails', 'Podcast Platforms', 'Search Keyword', 'Email Status',
-  'LinkedIn Profile URL', 'Person Title', 'Company', 'All Phones', 'Contact Provider', 'Social Links',
+  'LinkedIn Profile URL', 'Person Title', 'Company', 'All Phones', 'Contact Provider', 'Social Links', 'Episode Title', 'Email Source', 'Spotify URL',
 ];
 
 const PLATFORM_TEXT = { apple: 'Apple Podcasts', spotify: 'Spotify', youtube: 'YouTube', amazon: 'Amazon Music', listennotes: 'Listen Notes', deezer: 'Deezer', playerfm: 'Player FM', pandora: 'Pandora', podcastindex: 'Podcast Index', website: 'Website' };
@@ -54,6 +54,8 @@ const WHATSAPP_TEXT = { available: 'Available', unavailable: 'Unavailable', fail
 function leadsToCsv(leads) {
   const rows = [HEADER];
   for (const l of leads) {
+    // Where the lead's main email was found.
+    const main = (l.emails || []).find((e) => e.email === l.email);
     rows.push([
       l.name,
       l.phone,
@@ -94,6 +96,9 @@ function leadsToCsv(leads) {
       (l.phones || []).map((p) => `${p.phone} (${p.kind === 'direct' ? 'direct' : 'company'}, ${p.status === 'valid' ? 'valid' : 'unverified'}) [${p.from}]`).join('; '),
       (l.contactProviders || []).map((k) => PROVIDER_TEXT[k] || k).join(', '),
       (l.listingLinks || []).join(' '),
+      main?.episode || '',
+      main?.source || '',
+      l.podcastLinks?.spotify || '',
     ]);
   }
   return '﻿' + rows.map((r) => r.map(escapeCell).join(',')).join('\r\n') + '\r\n';

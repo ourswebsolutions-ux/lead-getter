@@ -29,6 +29,10 @@ const UA = 'Mozilla/5.0 (Lead Finder; podcast contact lookup)';
 const FEED_LIMIT = 6_000_000; // bytes of a feed read (long feeds are cut, not refused)
 const MAX_ITEMS = 1000;
 const EPISODE_PAGES = 3; // episode pages read when the feed itself has no email
+// Spotify episode pages opened for a show whose description has no email.
+// A feed already gave every episode's description, so fewer are needed then.
+const SPOTIFY_PAGES = 10;
+const SPOTIFY_PAGES_WITH_FEED = 3;
 
 const EMAIL = /[a-z0-9._%+-]+@[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,24}/gi;
 // "name [at] domain [dot] com", "name (at) domain.com": written out to
@@ -329,18 +333,36 @@ function parseFeed(xml) {
   };
 }
 
+// A web address ending that really is one, among those that start like the
+// common endings (anything else after ".com" is the next word run in).
+const LONG_ENDING = /^(comcast|commbank|community|company|compare|computer|comsec|netbank|netflix|network|neustar|organic)$/;
+
+// An address as it was matched, without what stuck to it: punctuation around
+// it, and the next word when the text has no space: "me@gmail.comSubscribe",
+// "me@gmail.com.Thanks", "me@gmail.comsubscribe".
+function cleanEmail(found) {
+  const email = String(found)
+    .replace(/^[._%+-]+|[._%+-]+$/g, '')
+    .replace(/(@.*\.[a-z]{2,24})\.?[A-Z].*$/, '$1')
+    .toLowerCase();
+  const end = /\.(com|net|org)([a-z]+)$/.exec(email);
+  return end && !LONG_ENDING.test(end[1] + end[2]) ? email.slice(0, -end[2].length) : email;
+}
+
 // Emails in HTML or text: mailto: links, plain addresses and the written-out
 // "name [at] domain [dot] com" form.
 function emailsIn(html) {
   const out = new Set();
-  const raw = String(html || '');
+  // "<me@site.com>" is an address, not a tag.
+  const raw = String(html || '').replace(/<([^<>\s]+@[^<>\s]+)>/g, ' $1 ');
   for (const m of raw.matchAll(/mailto:([^"'?\s<>]+)/gi)) {
     try {
       out.add(decodeURIComponent(m[1]).trim().toLowerCase());
     } catch {}
   }
-  const text = /<[a-z!/]/i.test(raw) ? textOf(raw) : decode(raw);
-  for (const m of text.matchAll(EMAIL)) out.add(m[0].toLowerCase());
+  // Invisible characters (often between an address and the next word) separate.
+  const text = (/<[a-z!/]/i.test(raw) ? textOf(raw) : decode(raw)).replace(/[\u200b-\u200d\u2060\ufeff]/g, ' ');
+  for (const m of text.matchAll(EMAIL)) out.add(cleanEmail(m[0]));
   for (const m of text.matchAll(OBFUSCATED)) {
     const domain = m[2].replace(/\s*[[(]\s*dot\s*[\])]\s*/gi, '.').toLowerCase();
     if (/\.[a-z]{2,24}$/.test(domain)) out.add(`${m[1].toLowerCase()}@${domain}`);
@@ -426,7 +448,7 @@ async function processPodcast(p, { fetchImpl = globalThis.fetch, signal, country
       // A hosting platform's address in the text (its own boilerplate) is
       // not the podcast's; only one in the feed's owner fields is kept.
       if (kind === 'platform' && !/owner|editor|webmaster/i.test(from)) continue;
-      const level = /^RSS feed: episode/.test(from) ? 'episode' : /^RSS feed/.test(from) ? 'channel' : 'web';
+      const level = /^(RSS feed: episode|Spotify episode)/.test(from) ? 'episode' : /^(RSS feed|Spotify show)/.test(from) ? 'channel' : 'web';
       const cur = found.get(e);
       if (cur) {
         if (level === 'episode' && cur.level === 'episode') cur.count++;
@@ -500,10 +522,21 @@ async function processPodcast(p, { fetchImpl = globalThis.fetch, signal, country
     }
   };
   // The platform's own description (Spotify, YouTube, Podcast Index).
-  if (p.description && p.platformLabel) {
+  if (p.description && p.platformLabel && !p.spotify) {
     add(emailsIn(p.description), `${p.platformLabel} description`, p.url);
     sortLinks(linksIn(p.description));
   }
+  // Spotify's own pages (read in Chrome, podcast-search.js). A show needs no
+  // RSS feed for these.
+  let pageItems = 0;
+  const fromPages = () => {
+    for (const it of p.spotify?.items.slice(pageItems) || []) {
+      add(emailsIn(it.text), it.from, it.url);
+      if (it.show) sortLinks(linksIn(it.text));
+    }
+    pageItems = p.spotify?.items.length || 0;
+  };
+  fromPages();
   if (parsed) {
     r.title = r.title || parsed.title;
     r.host = r.host || parsed.author || parsed.owner.name;
@@ -519,7 +552,7 @@ async function processPodcast(p, { fetchImpl = globalThis.fetch, signal, country
     const episodeLinks = [];
     const linkCount = new Map();
     for (const it of parsed.items) {
-      add(emailsIn(it.html), `RSS feed: episode “${it.title.slice(0, 60)}”`, it.link || r.rssUrl, site);
+      add(emailsIn(it.html), `RSS feed: episode “${it.title.slice(0, 120)}”`, it.link || r.rssUrl, site);
       for (const l of linksIn(it.html)) linkCount.set(l, (linkCount.get(l) || 0) + 1);
       if (it.link && /^https?:/i.test(it.link) && !isMedia(it.link)) episodeLinks.push(it.link);
     }
@@ -538,6 +571,24 @@ async function processPodcast(p, { fetchImpl = globalThis.fetch, signal, country
     sortLinks([...channelLinks, ...[...linkCount.entries()].filter(([, n]) => n >= Math.max(2, parsed.items.length * 0.3)).sort((a, b) => b[1] - a[1]).map(([l]) => l)]);
 
     r.episodePages = episodeLinks;
+  }
+
+  // Its episodes, whenever the show description had no email (a feed does not
+  // replace them), until one proves to be the podcast's own.
+  const onSpotify = () => [...found.values()].filter((e) => /^Spotify/.test(e.from));
+  if (p.readEpisodes && !onSpotify().some((e) => e.level === 'channel')) {
+    await p.readEpisodes(step, { max: parsed ? SPOTIFY_PAGES_WITH_FEED : SPOTIFY_PAGES, enough: () => onSpotify().some(confident), take: fromPages });
+    fromPages();
+  }
+  if (p.spotify) {
+    const s = p.spotify;
+    r.description = r.description || String(p.description || '').replace(/\s+/g, ' ').trim().slice(0, 600);
+    if (s.showRead) r.checked.push('Spotify show description');
+    if (s.episodesRead) r.checked.push(`Spotify episode description${s.episodesRead === 1 ? '' : 's'} (${s.episodesRead})`);
+    r.failed.push(...s.failed);
+    r.pagesRead = s.showRead + s.episodesRead;
+    const seen = onSpotify().length;
+    r.spotifyLog = `show description ${s.showRead ? 'read' : 'not read'}, ${s.episodesRead} episode description${s.episodesRead === 1 ? '' : 's'} read${s.failed.length ? `, ${s.failed.length} failed` : ''}, ${seen} email${seen === 1 ? '' : 's'} found there`;
   }
 
   // A YouTube podcast: its channel's public video feed (titles and
@@ -636,15 +687,24 @@ async function processPodcast(p, { fetchImpl = globalThis.fetch, signal, country
   // mail, then platform forwarding addresses; the feed before the web;
   // the most mentioned first.
   const score = (e) => (e.kind === 'platform' ? 9 : e.kind === 'own' ? 0 : e.level === 'channel' ? 1 : e.level === 'web' ? 2 : e.count >= 2 ? 3 : 4);
-  r.emails = [...found.values()].sort((a, b) => score(a) - score(b) || (a.kind === 'free') - (b.kind === 'free') || b.count - a.count);
+  r.emails = [...found.values()].sort((a, b) => score(a) - score(b) || (a.kind === 'free') - (b.kind === 'free') || b.count - a.count).map((e) => ({ ...e, ...sourceOf(e.from) }));
   r.email = r.emails.find((e) => e.kind !== 'platform')?.email || '';
   if (r.email) r.status = 'found';
   else if (r.emails.length) r.status = 'platform_only';
   else if (r.failed.length) r.status = r.checked.length || r.rssStatus === 'valid' ? 'incomplete' : 'failed';
-  else r.status = r.rssStatus === 'missing' && !r.website ? 'failed' : 'not_found';
+  else r.status = r.rssStatus === 'missing' && !r.website && !r.pagesRead ? 'failed' : 'not_found';
   r.statusText = statusText(r);
   r.discovery = discovery(r);
   return r;
+}
+
+// Where an email was found, as the table and exports name it.
+function sourceOf(from) {
+  const episode = /episode “(.*)”$/.exec(from)?.[1] || '';
+  if (/^RSS feed/.test(from)) return { source: 'RSS', episode };
+  if (/^Spotify show/.test(from)) return { source: 'Show Description', episode };
+  if (/^Spotify episode/.test(from)) return { source: 'Episode Description', episode };
+  return { source: /description/i.test(from) ? 'Show Description' : 'Website', episode };
 }
 
 // "example.com/contact" (a page's host and path, for where an email was found).
@@ -666,7 +726,7 @@ function statusText(r) {
   if (r.status === 'found') return `Email found (${best.from})${confident(best) ? '' : ': mentioned in one episode only, may be a guest’s or sponsor’s'}`;
   if (r.status === 'platform_only') return `No email of the podcast's own; only the hosting platform's forwarding address (${r.emails[0].email})`;
   if (r.status === 'incomplete') return `No public email found; could not check: ${r.failed.join(', ')}`;
-  if (r.status === 'failed') return r.rssError ? `Not checked: ${r.rssError}${r.website ? '' : ', and no website is known'}` : `Not checked: ${r.failed.join(', ') || 'nothing could be read'}`;
+  if (r.status === 'failed') return r.rssError && !r.failed.length ? `Not checked: ${r.rssError}${r.website ? '' : ', and no website is known'}` : `Not checked: ${r.failed.join(', ') || 'nothing could be read'}`;
   return `No public email found (checked: ${r.checked.join(', ') || 'nothing to check'})`;
 }
 
@@ -675,6 +735,7 @@ function discovery(r) {
   return [
     `email: ${r.status === 'found' ? `found (${r.emails.find((e) => e.email === r.email).from})` : r.statusText}`,
     `rss: ${rss}`,
+    ...(r.spotifyLog ? [`spotify: ${r.spotifyLog}`] : []),
     `website: ${r.website ? `${hostOf(r.website)} (${r.websiteFrom})` : 'none found'}`,
     ...(r.emails.length > 1 ? [`all emails: ${r.emails.map((e) => e.email + (e.kind === 'platform' ? ' (hosting platform)' : '')).join(', ')}`] : []),
   ].join('; ');

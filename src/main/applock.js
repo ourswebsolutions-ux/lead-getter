@@ -5,12 +5,23 @@
 // available, because 10,000 possible PINs would otherwise be quick to try
 // offline. Failed attempts trigger growing lockouts. The main process keeps
 // every other function blocked until unlock() succeeds.
+//
+// Forgotten PIN: requestReset() makes a random four-digit PIN and has it
+// emailed to the administrator only (never shown here). The user gets it from
+// the administrator and enters it like any PIN: it then becomes their PIN.
+// Until then the old PIN still works (and using it cancels the reset). A reset
+// PIN lasts 24 hours, is kept only as a salted hash, and is guessed under the
+// same limiter as the PIN; requests are limited so the administrator is never
+// flooded.
 
 const crypto = require('node:crypto');
 
 const PIN_RE = /^\d{4}$/;
 const SCRYPT = { N: 1 << 15, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
 const FREE_ATTEMPTS = 5;
+const RESET_TTL = 24 * 60 * 60_000;
+const RESET_GAP = 60_000; // between two reset requests
+const RESET_PER_DAY = 5;
 
 const hash = (pin, salt) => crypto.scryptSync(pin, salt, 32, SCRYPT);
 
@@ -22,8 +33,8 @@ class AppLock {
     this.unlocked = false;
   }
 
-  record() {
-    const raw = this.store.getState('app_lock');
+  record(key = 'app_lock') {
+    const raw = this.store.getState(key);
     if (!raw) return null;
     if (raw.encrypted) {
       if (!this.cipher) throw new Error('The PIN record is encrypted but the system keychain is unavailable.');
@@ -32,8 +43,8 @@ class AppLock {
     return raw.data;
   }
 
-  save(rec) {
-    this.store.setState('app_lock', this.cipher ? { encrypted: true, data: this.cipher.encrypt(JSON.stringify(rec)).toString('base64') } : { encrypted: false, data: rec });
+  save(rec, key = 'app_lock') {
+    this.store.setState(key, this.cipher ? { encrypted: true, data: this.cipher.encrypt(JSON.stringify(rec)).toString('base64') } : { encrypted: false, data: rec });
   }
 
   attempts() {
@@ -55,10 +66,34 @@ class AppLock {
     return this.state();
   }
 
-  verify(pin) {
-    const rec = this.record();
+  verify(pin, rec = this.record()) {
     if (!rec || !PIN_RE.test(String(pin))) return false;
     return crypto.timingSafeEqual(hash(pin, Buffer.from(rec.salt, 'base64')), Buffer.from(rec.hash, 'base64'));
+  }
+
+  // The reset PIN waiting to be entered, if it is still valid.
+  pendingReset() {
+    const rec = this.record('app_lock_reset');
+    return rec && rec.expiresAt > this.now() ? rec : null;
+  }
+
+  // send(pin, expiresAt): emails the new PIN to the administrator; throws when
+  // it could not (nothing is kept then, and the request is not counted).
+  async requestReset(send) {
+    if (!this.store.getState('app_lock')) return { ok: false, error: 'No PIN is set yet.' };
+    const now = this.now();
+    const times = (this.store.getState('app_lock_resets') || []).filter((t) => t > now - 24 * 60 * 60_000 && t <= now);
+    const wait = times.length ? times[times.length - 1] + RESET_GAP - now : 0;
+    if (wait > 0) return { ok: false, error: `Please wait ${Math.ceil(wait / 1000)} seconds before asking again.` };
+    if (times.length >= RESET_PER_DAY) return { ok: false, error: 'Too many reset requests today. Please contact the administrator.' };
+    const pin = String(crypto.randomInt(10_000)).padStart(4, '0');
+    const expiresAt = now + RESET_TTL;
+    await send(pin, expiresAt);
+    const salt = crypto.randomBytes(16);
+    // Replaces (and so cancels) any earlier reset PIN.
+    this.save({ v: 1, salt: salt.toString('base64'), hash: hash(pin, salt).toString('base64'), expiresAt }, 'app_lock_reset');
+    this.store.setState('app_lock_resets', [...times, now]);
+    return { ok: true, expiresAt: new Date(expiresAt).toISOString() };
   }
 
   unlock(pin) {
@@ -67,8 +102,17 @@ class AppLock {
     if (!PIN_RE.test(String(pin))) return { ok: false, error: 'Enter exactly four digits.' };
     if (this.verify(pin)) {
       this.store.setState('app_lock_attempts', { failures: 0, lockedUntil: 0 });
+      this.store.setState('app_lock_reset', null); // remembered: the reset is not needed
       this.unlocked = true;
       return { ok: true };
+    }
+    if (this.verify(pin, this.pendingReset())) {
+      // The administrator's PIN becomes the user's PIN.
+      this.save(this.record('app_lock_reset'));
+      this.store.setState('app_lock_reset', null);
+      this.store.setState('app_lock_attempts', { failures: 0, lockedUntil: 0 });
+      this.unlocked = true;
+      return { ok: true, reset: true };
     }
     const { failures, lockedUntil } = this.recordFailure();
     return { ok: false, error: 'Incorrect PIN.', retryAfterMs: Math.max(0, lockedUntil - this.now()), attemptsLeft: Math.max(0, FREE_ATTEMPTS - failures) };
@@ -94,6 +138,7 @@ class AppLock {
     check(next, confirm);
     const salt = crypto.randomBytes(16);
     this.save({ v: 1, salt: salt.toString('base64'), hash: hash(next, salt).toString('base64') });
+    this.store.setState('app_lock_reset', null);
     return { ok: true };
   }
 
@@ -107,4 +152,4 @@ function check(pin, confirm) {
   if (pin !== confirm) throw new Error('The two PINs do not match.');
 }
 
-module.exports = { AppLock, PIN_RE };
+module.exports = { AppLock, PIN_RE, RESET_TTL, RESET_GAP, RESET_PER_DAY };

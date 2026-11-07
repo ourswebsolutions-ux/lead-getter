@@ -7,7 +7,8 @@ import Icon from './icons.jsx';
 const KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', 'del'];
 
 export default function LockScreen({ configured, onUnlocked }) {
-  const [step, setStep] = useState(configured ? 'unlock' : 'create'); // create | confirm | unlock
+  const [step, setStep] = useState(configured ? 'unlock' : 'create'); // create | confirm | unlock | reset
+  const [note, setNote] = useState('');
   const [first, setFirst] = useState('');
   const [pin, setPin] = useState('');
   const [error, setError] = useState('');
@@ -61,7 +62,7 @@ export default function LockScreen({ configured, onUnlocked }) {
 
   const press = useCallback(
     (k) => {
-      if (busy || wait) return;
+      if (busy || wait || step === 'reset') return;
       if (k === 'del') return setPin((p) => p.slice(0, -1));
       if (!/^\d$/.test(k)) return;
       setError('');
@@ -72,7 +73,7 @@ export default function LockScreen({ configured, onUnlocked }) {
         return next;
       });
     },
-    [busy, wait, submit],
+    [busy, wait, step, submit],
   );
 
   useEffect(() => {
@@ -84,11 +85,27 @@ export default function LockScreen({ configured, onUnlocked }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [press]);
 
-  const title = { create: 'Create your PIN', confirm: 'Confirm your PIN', unlock: 'Enter your PIN' }[step];
+  async function sendReset() {
+    setBusy(true);
+    let r;
+    try {
+      r = await window.leadFinder.lockReset();
+    } catch (err) {
+      r = { ok: false, error: err.message };
+    }
+    setBusy(false);
+    if (!r.ok) return setError(r.error);
+    setError('');
+    setNote('A new PIN was sent to the administrator. Contact them for it and enter it here (valid for 24 hours). It will become your PIN.');
+    setStep('unlock');
+  }
+
+  const title = { create: 'Create your PIN', confirm: 'Confirm your PIN', unlock: 'Enter your PIN', reset: 'Reset your PIN' }[step];
   const sub = {
     create: 'Choose a four-digit PIN to protect Lead Finder. You will need it every time the app opens.',
     confirm: 'Enter the same four digits again.',
-    unlock: 'Lead Finder is locked.',
+    unlock: note || 'Lead Finder is locked.',
+    reset: 'A new four-digit PIN will be emailed to the administrator. Contact them to get it, then enter it here: it becomes your PIN. Your current PIN keeps working until then.',
   }[step];
 
   return (
@@ -103,6 +120,22 @@ export default function LockScreen({ configured, onUnlocked }) {
         </span>
         <h1>{title}</h1>
         <p className="lock-sub">{sub}</p>
+        {step === 'reset' ? (
+          <>
+            <p className="lock-error" role="alert">
+              {error}
+            </p>
+            <div className="lock-actions">
+              <button type="button" className="btn btn-ghost" onClick={() => (setError(''), setStep('unlock'))} disabled={busy}>
+                Back
+              </button>
+              <button type="button" className="btn btn-primary" onClick={sendReset} disabled={busy}>
+                {busy ? 'Sending…' : 'Send reset PIN'}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
         <div className={`pin-dots ${shake ? 'shake' : ''}`} key={shake} aria-label={`${pin.length} of 4 digits entered`} role="status">
           {[0, 1, 2, 3].map((i) => (
             <span key={i} className={i < pin.length ? 'on' : ''} />
@@ -122,6 +155,13 @@ export default function LockScreen({ configured, onUnlocked }) {
             ),
           )}
         </div>
+        {step === 'unlock' && (
+          <button type="button" className="lock-link" onClick={() => (setError(''), setPin(''), setStep('reset'))} disabled={busy}>
+            Forgot PIN?
+          </button>
+        )}
+          </>
+        )}
       </div>
     </div>
   );

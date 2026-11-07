@@ -1557,7 +1557,7 @@ class LeadStore {
     const key = `pc:${crypto.createHash('sha256').update(ident).digest('hex').slice(0, 32)}`;
     const host = siteHost(r.website);
     const ph = r.phone && r.phone.phone ? r.phone : null;
-    const emails = Array.isArray(r.emails) && r.emails.length ? JSON.stringify(r.emails.map((e) => ({ email: e.email, kind: e.kind, from: e.from, url: e.url || '' })).slice(0, 30)) : null;
+    const emails = Array.isArray(r.emails) && r.emails.length ? JSON.stringify(r.emails.map((e) => ({ email: e.email, kind: e.kind, from: e.from, url: e.url || '', source: e.source || '', episode: e.episode || '' })).slice(0, 30)) : null;
     const text = r.description ? String(r.description).slice(0, 2000) : null;
     return this.withRetry(() =>
       this.transaction(() => {

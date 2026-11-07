@@ -7,6 +7,8 @@
 // who completes it in that window. Nothing here gets around a check or a
 // region limit: those are reported as they are.
 
+const { textOf } = require('./website-contacts');
+
 const fail = (message, code) => Object.assign(new Error(message), { code });
 const enc = encodeURIComponent;
 
@@ -136,9 +138,11 @@ async function readPage(page, site, spec, { limit, signal, onWait, pause }) {
   for (let i = 0; i < SCROLLS && shows.length < limit && !signal?.aborted; i++) {
     await page.evaluate(revealMore, site.path).catch(() => {});
     await sleep(pause * 2, signal);
-    const more = await page.evaluate(showsOnPage, args);
-    if (more.length <= shows.length) break;
-    shows = more;
+    // A long list may drop the rows scrolled past: everything seen is kept.
+    const seen = new Map(shows.map((s) => [s.id, s]));
+    for (const s of await page.evaluate(showsOnPage, args)) if (!seen.has(s.id)) seen.set(s.id, s);
+    if (seen.size <= shows.length) break;
+    shows = [...seen.values()];
   }
   return shows;
 }
@@ -153,4 +157,177 @@ async function readResults(page, platform, term, { limit = 50, signal, onWait, p
   return [];
 }
 
-module.exports = { SITES, readResults, showsOnPage };
+// --- a Spotify show or episode: its descriptions --------------------------------
+
+// What a page says about itself, for search engines and link previews, in its
+// JSON-LD and <meta> tags: the full description, whatever the page's layout.
+// An episode's reads "Listen to this episode from <show> on Spotify. <text>".
+function metadataOf(html) {
+  const out = { name: '', description: '', publisher: '', show: '' };
+  const clean = (s) => textOf(String(s || '').replace(/\\u([0-9a-f]{4})/gi, (_, h) => String.fromCharCode(parseInt(h, 16))).replace(/\\n/g, '\n')).trim();
+  const meta = (name) => {
+    const tag = String(html).match(new RegExp(`<meta\\b[^>]*(?:name|property)="${name}"[^>]*>`, 'i'))?.[0] || '';
+    return clean(/\bcontent="([^"]*)"/i.exec(tag)?.[1]);
+  };
+  for (const m of String(html).matchAll(/<script\b[^>]*application\/ld\+json[^>]*>([\s\S]*?)<\/script>/gi)) {
+    let data;
+    try {
+      data = JSON.parse(m[1]);
+    } catch {
+      continue;
+    }
+    if (!/\/(show|episode)\//.test(`${data?.url || ''}${data?.['@id'] || ''}`)) continue;
+    out.name = out.name || clean(data.name);
+    out.description = out.description || clean(data.description);
+    out.publisher = out.publisher || clean(data.publisher || data.author?.name);
+  }
+  out.name = out.name || meta('og:title');
+  out.description = out.description || meta('description');
+  const lead = /^Listen to (?:this episode from )?(.+?) on Spotify\.\s*/i.exec(out.description);
+  if (lead) {
+    out.description = out.description.slice(lead[0].length);
+    out.show = lead[1];
+  }
+  return out;
+}
+
+// Runs in the page: what is rendered, for what the metadata does not give.
+function detailsOnPage(episodePath) {
+  const main = document.querySelector('main, [role="main"], [data-testid="main-view-container"]') || document.body;
+  const re = new RegExp(episodePath);
+  const heads = [...main.querySelectorAll('h1, h2, h3')].filter((h) => /^(about|description|episode description)$/i.test(h.innerText.trim()));
+  // Visible text, plus the addresses behind mailto: links.
+  const withMail = (el) => [(el?.innerText || '').trim(), ...[...(el?.querySelectorAll('a[href^="mailto:" i]') || [])].map((a) => a.getAttribute('href'))].join('\n').trim();
+  const sections = heads.map((h) => {
+    let box = h.parentElement;
+    for (let i = 0; i < 4 && box !== main && box.innerText.length < h.innerText.length + 20; i++) box = box.parentElement;
+    return withMail(box);
+  });
+  const episodes = new Map();
+  for (const a of main.querySelectorAll('a[href]')) {
+    const m = re.exec(a.pathname);
+    if (!m || episodes.has(m[1])) continue;
+    const row = a.closest('[role="listitem"], [role="row"], [data-testid*="episode" i], li') || a.parentElement;
+    episodes.set(m[1], { id: m[1], title: (a.innerText || a.getAttribute('aria-label') || '').trim().split('\n')[0], url: a.origin + a.pathname, text: withMail(row).slice(0, 4000) });
+  }
+  const show = [...main.querySelectorAll('a[href]')].find((a) => /^\/(?:intl-[a-z-]+\/)?show\/[A-Za-z0-9]{10,30}/.test(a.pathname));
+  return {
+    head: `${document.head?.outerHTML || ''}${[...document.querySelectorAll('body script[type="application/ld+json"]')].map((s) => s.outerHTML).join('')}`,
+    heading: main.querySelector('h1')?.innerText.trim() || '',
+    sections,
+    body: withMail(main).slice(0, 20_000),
+    episodes: [...episodes.values()],
+    show: show ? { url: show.origin + show.pathname, name: show.innerText.trim().split('\n')[0] } : null,
+    artwork: document.querySelector('meta[property="og:image"]')?.content || '',
+  };
+}
+
+// Runs in the page: opens the descriptions cut short behind a "more" button.
+// Only these buttons are pressed: nothing is played, followed or signed in to.
+function expandDescriptions() {
+  const main = document.querySelector('main, [role="main"]') || document.body;
+  let pressed = 0;
+  for (const b of main.querySelectorAll('button, [role="button"]')) {
+    const text = (b.innerText || b.getAttribute('aria-label') || '').trim();
+    if (/^(\.\.\.|…)?\s*(show|see|read)\s+more$/i.test(text) && !b.closest('a')) {
+      b.click();
+      pressed++;
+    }
+  }
+  return pressed;
+}
+
+// Runs in the page: asks for more episodes, by its button or by scrolling to
+// the last one (the page loads more as it scrolls).
+function loadMoreEpisodes(episodePath) {
+  const main = document.querySelector('main, [role="main"]') || document.body;
+  const re = new RegExp(episodePath);
+  for (const b of main.querySelectorAll('button, [role="button"]')) {
+    if (/^(load|show|see)\s+more(\s+episodes)?$|^more episodes$/i.test((b.innerText || b.getAttribute('aria-label') || '').trim()) && !b.closest('a')) b.click();
+  }
+  const links = [...main.querySelectorAll('a[href]')].filter((a) => re.test(a.pathname));
+  links[links.length - 1]?.scrollIntoView({ block: 'end' });
+}
+
+const EPISODE_PATH = '^/(?:intl-[a-z-]+/)?episode/([A-Za-z0-9]{10,30})';
+const REGION = /not currently available in your region/i;
+const MISSING = /^page not available/i;
+const ROWS_WAIT = 5_000;
+const MORE_ROUNDS = 8; // times the show page is asked for more episodes
+const MAX_ROWS = 60; // episodes listed from one show page
+const BUSY_WAIT = 30_000; // after Spotify answers "too many requests"
+
+// One show or episode page. The page's own metadata (as served, then as it
+// stands once rendered) comes first; the visible description is added to it,
+// and the whole page is read only when neither exists. Throws with a reason
+// when the page cannot be read: that is never the same as "no email".
+async function readSpotifyPage(page, url, { signal, onWait, pause = 800, busyWait = BUSY_WAIT } = {}) {
+  const type = /\/episode\//.test(url) ? 'episode' : 'show';
+  let res = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+  if (res?.status() === 429) {
+    onWait?.('Spotify asks to slow down: waiting before the next page.');
+    await sleep(busyWait, signal);
+    if (signal?.aborted) throw fail('stopped', 'stopped');
+    res = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+    if (res?.status() === 429) throw fail('Spotify is limiting requests: try this podcast again later', 'busy');
+  }
+  const served = (await res?.text().catch(() => '')) || '';
+  const started = Date.now();
+  let waiting = false;
+  let got = null;
+  while (!signal?.aborted) {
+    const state = await page.evaluate(pageState);
+    if (REGION.test(`${state.title} ${state.text}`)) throw fail('Spotify does not offer this in your region: turn on your VPN and try again', 'region');
+    const check = HUMAN_CHECK.test(`${state.title} ${state.text}`);
+    if (check && !waiting) {
+      waiting = true;
+      onWait?.('Spotify is asking you to confirm you are human. Complete it in the Chrome window and the search continues.');
+    }
+    if (!check) {
+      got = await page.evaluate(detailsOnPage, EPISODE_PATH);
+      if (MISSING.test(`${got.heading}\n${state.title}`)) throw fail('Spotify says this page is not available', 'missing');
+      const ready = got.heading && (type === 'episode' || got.episodes.length || Date.now() - started > ROWS_WAIT);
+      if (ready) break;
+    }
+    if (Date.now() - started > (check ? CHECK_WAIT : LOAD_WAIT)) {
+      if (check) throw fail('Spotify’s check was not completed in the Chrome window', 'blocked');
+      break;
+    }
+    await sleep(pause, signal);
+  }
+  if (!got) throw fail('the page was not read', 'stopped');
+  if (await page.evaluate(expandDescriptions).catch(() => 0)) {
+    await sleep(pause, signal);
+    got = await page.evaluate(detailsOnPage, EPISODE_PATH).catch(() => got);
+  }
+  // Every episode the page will list, kept as it goes (long lists drop rows).
+  const rows = new Map((got.episodes || []).map((r) => [r.id, r]));
+  for (let i = 0; type === 'show' && i < MORE_ROUNDS && rows.size && rows.size < MAX_ROWS && !signal?.aborted; i++) {
+    await page.evaluate(loadMoreEpisodes, EPISODE_PATH).catch(() => {});
+    await sleep(pause * 2, signal);
+    const before = rows.size;
+    for (const r of (await page.evaluate(detailsOnPage, EPISODE_PATH).catch(() => got)).episodes) if (!rows.has(r.id)) rows.set(r.id, r);
+    if (rows.size === before) break;
+  }
+  const first = metadataOf(served);
+  const now = metadataOf(got.head);
+  const description = first.description || now.description;
+  const text = [...new Set([first.description, now.description, ...got.sections].filter(Boolean))].join('\n');
+  const final = page.url().replace(/[?#].*$/, '');
+  return {
+    type,
+    id: /\/(?:show|episode)\/([A-Za-z0-9]+)/.exec(url)?.[1] || '',
+    url: url.replace(/[?#].*$/, ''),
+    title: first.name || now.name || got.heading,
+    host: first.publisher || now.publisher || '',
+    show: got.show?.name || first.show || now.show || '',
+    showUrl: got.show?.url || (type === 'show' ? final : ''),
+    artwork: got.artwork,
+    description: description || got.sections.join('\n'),
+    text: text || got.body,
+    fromMetadata: Boolean(first.description || now.description),
+    episodes: type === 'show' ? [...rows.values()].slice(0, MAX_ROWS) : [],
+  };
+}
+
+module.exports = { SITES, readResults, showsOnPage, metadataOf, readSpotifyPage };

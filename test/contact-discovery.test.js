@@ -287,7 +287,7 @@ test('contact datasets: CSV columns by name, lookups by profile, name and compan
   const out = leadsToCsv([lead]).replace(/^﻿/, '').split('\r\n');
   const header = out[0].split(',');
   const row = out[1];
-  assert.deepEqual(header.slice(-6), ['LinkedIn Profile URL', 'Person Title', 'Company', 'All Phones', 'Contact Provider', 'Social Links']);
+  assert.deepEqual(header.slice(-9), ['LinkedIn Profile URL', 'Person Title', 'Company', 'All Phones', 'Contact Provider', 'Social Links', 'Episode Title', 'Email Source', 'Spotify URL']);
   assert.match(row, /,Verified,https:\/\/www\.linkedin\.com\/in\/jane-doe-seo,SEO Lead,Acme Growth,/);
   assert.match(row, /\+15125550142 \(direct, valid\)/);
 });

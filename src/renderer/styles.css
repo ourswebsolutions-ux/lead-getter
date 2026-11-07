@@ -810,6 +810,10 @@ html.theme-anim *, html.theme-anim *::before, html.theme-anim *::after {
 .pin-dots span.on { background: var(--accent); border-color: var(--accent); transform: scale(1.08); }
 .pin-dots.shake { animation: shake 360ms var(--ease); }
 @keyframes shake { 20%, 60% { transform: translateX(-7px); } 40%, 80% { transform: translateX(7px); } }
+.lock-link { margin-top: 14px; padding: 4px 8px; border: 0; border-radius: 6px; background: none; color: var(--accent); font: inherit; font-size: 13px; cursor: pointer; }
+.lock-link:hover { text-decoration: underline; }
+.lock-link:focus-visible { outline: none; box-shadow: var(--focus); }
+.lock-actions { display: flex; gap: 10px; justify-content: center; margin-top: 4px; }
 .lock-error { min-height: 20px; margin: 4px 0 10px; color: var(--danger); font-size: 13px; text-align: center; }
 .keypad { display: grid; grid-template-columns: repeat(3, 64px); gap: 10px; }
 .key { height: 52px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface-2); color: var(--text); font: 500 19px var(--mono); cursor: pointer; display: grid; place-items: center; transition: background var(--fast), border-color var(--fast), transform var(--fast); }
@@ -905,7 +909,7 @@ html.theme-anim *, html.theme-anim *::before, html.theme-anim *::after {
 
 
 /* Automatic updates */
-.update-banner { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 60; display: flex; align-items: center; gap: 10px; max-width: min(640px, calc(100vw - 32px)); padding: 8px 10px 8px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--text); font-size: 13px; box-shadow: 0 6px 24px rgb(0 0 0 / 12%); }
+.update-banner { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 110; display: flex; align-items: center; gap: 10px; max-width: min(640px, calc(100vw - 32px)); padding: 8px 10px 8px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--text); font-size: 13px; box-shadow: 0 6px 24px rgb(0 0 0 / 12%); }
 .update-banner .btn { padding: 4px 10px; font-size: 12px; }
 .update-error { border-color: color-mix(in srgb, var(--danger) 40%, var(--line)); }
 .update-restarting, .update-ready, .update-waiting { border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }

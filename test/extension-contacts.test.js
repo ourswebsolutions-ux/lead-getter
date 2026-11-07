@@ -179,7 +179,7 @@ test('ContactOut on each profile: its panel opened with its own button, what it 
   // The extension loads itself on every profile (the unrelated one too); Lead Finder reads it on the people it keeps.
   assert.deepEqual(coLoads.filter(Boolean), ['jane-doe-seo', 'omar-khan-1', 'lena-fischer', 'pat-lee', 'sam-roe']);
   // The export names the provider.
-  assert.match(leadsToCsv([by['Jane Doe']]), /,ContactOut,\r\n$/);
+  assert.match(leadsToCsv([by['Jane Doe']]), /,ContactOut,,,,\r\n$/);
 });
 
 test('ContactOut reveal buttons are clicked only with "Reveal with credits" on', { skip: !exe && 'Google Chrome not installed' }, async (t) => {

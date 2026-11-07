@@ -13,7 +13,7 @@ const { LinkedInSession } = require('../browser/linkedin-session');
 const { runSources } = require('../browser/search-sources');
 const podcastLib = require('../browser/podcasts');
 const { PodcastSearch } = require('../browser/podcast-search');
-const { readResults } = require('../browser/podcast-read');
+const { readResults, readSpotifyPage } = require('../browser/podcast-read');
 const { PLATFORMS, ADAPTERS, browserFindOf } = require('../browser/podcast-platforms');
 const { robotsChecker } = require('../browser/robots');
 const { EmailVerifier } = require('../browser/email-verify');
@@ -122,7 +122,7 @@ function trustedSender(event) {
 // Until the PIN is entered, only the lock screen's own calls are answered;
 // everything else is refused here in the main process, so reloading or
 // manipulating the window cannot reach leads or features.
-const LOCK_FREE = new Set(['lock:state', 'lock:setup', 'lock:unlock', 'update:status', 'update:openDownload']);
+const LOCK_FREE = new Set(['lock:state', 'lock:setup', 'lock:unlock', 'lock:reset', 'update:status', 'update:openDownload']);
 
 function handle(channel, fn) {
   ipcMain.handle(channel, async (event, ...args) => {
@@ -1450,6 +1450,8 @@ function runPodcasts({ query, platforms = [], categoryId, seed = null, extraLink
   const run = new PodcastSearch({
     openInBrowser: openPodcastPage,
     readInBrowser: readPodcastPage,
+    readPage: readSpotifyShowPage,
+    log: (line) => console.log(`[podcasts] ${line}`),
     allow: robotsChecker({ signal: controller.signal }),
     query,
     keyword: keyword ?? query,
@@ -1558,6 +1560,11 @@ async function readPodcastPage(platform, term, options) {
   return readResults(await podcastWindow(platform, options.signal), platform, term, options);
 }
 
+// A Spotify show or episode page, read from its window.
+async function readSpotifyShowPage(url, options) {
+  return readSpotifyPage(await podcastWindow('spotify', options.signal), url, options);
+}
+
 // A platform's page, opened for the user to look through.
 async function openPodcastPage(url, signal, platform = 'spotify') {
   const page = await podcastWindow(platform, signal);
@@ -1657,6 +1664,30 @@ app.whenReady().then(() => {
     const r = appLock.unlock(String(pin ?? ''));
     if (r.ok) afterUnlock();
     return r;
+  });
+  // Forgotten PIN: a new one is emailed to the administrator only.
+  handle('lock:reset', async () => {
+    if (!activation?.configured || !activation.mailer) return { ok: false, error: 'PIN reset by email is not set up in this copy of Lead Finder. Please contact the administrator.' };
+    try {
+      return await appLock.requestReset((pin, expiresAt) =>
+        activation.mailer.send({
+          to: activation.config.adminEmail,
+          subject: `Lead Finder PIN reset ${pin} for ${activation.activationId}`,
+          text: [
+            `New PIN: ${pin}`,
+            '',
+            `Activation ID: ${activation.activationId}`,
+            `Requested: ${new Date().toUTCString()}`,
+            `Valid until: ${new Date(expiresAt).toUTCString()} (24 hours, this computer only)`,
+            '',
+            'The customer asked for a PIN reset on the lock screen. Give this PIN only to them, after checking who they are.',
+            'When they enter it, it becomes their PIN. Their old PIN keeps working until then.',
+          ].join('\n'),
+        }),
+      );
+    } catch (err) {
+      return { ok: false, error: `The reset PIN could not be sent: ${activation.mailError(err)}. Please check the internet connection and try again.` };
+    }
   });
   handle('lock:change', (current, next, confirm) => {
     try {
