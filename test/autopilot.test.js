@@ -137,3 +137,13 @@ test('input checks', () => {
   assert.match(ap.add({ keyword: 'Shoes', category: '', countries: ['UK'] }).error, /category/);
   assert.match(ap.add({ keyword: 'Shoes', category: 'A', countries: [] }).error, /country/);
 });
+
+test("Chrome waiting for the user's Allow: asked again in 5 minutes, and the user is told once", async () => {
+  const { ap, at, notes } = setup(async () => ({ state: 'error', code: 'needs_allow', message: 'Chrome did not allow the connection.' }));
+  ap.add({ keyword: 'Shoes Shop', category: 'Shoes', countries: ['Pakistan'] });
+  ap.start();
+  await until(() => ap.tasks()[0].status === 'waiting');
+  assert.equal(ap.tasks()[0].nextRunAt - at(), 5 * 60_000);
+  assert.ok(notes.some((n) => n.title === 'Chrome needs you'));
+  await ap.stopEngine();
+});

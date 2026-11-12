@@ -703,6 +703,7 @@ function searchOutcome(stats) {
 
 // Chrome problems: retried, except those only the user can solve.
 function chromeErrorKind(code) {
+  if (code === 'allow_needed' || code === 'debugging_blocked') return 'needs_allow';
   return ['not_installed', 'chrome_too_old', 'wrong_profile', 'restart_declined'].includes(code) ? 'needs_user' : 'chrome';
 }
 

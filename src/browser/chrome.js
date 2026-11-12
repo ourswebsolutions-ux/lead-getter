@@ -87,9 +87,17 @@ function findChromeExecutable() {
   return candidates.find((p) => fs.existsSync(p)) || null;
 }
 
+// Windows PowerShell with its own module path (one inherited from
+// PowerShell 7 stops Get-CimInstance from loading).
+function cleanEnv() {
+  const env = { ...process.env };
+  for (const k of Object.keys(env)) if (k.toLowerCase() === 'psmodulepath') delete env[k];
+  return env;
+}
+
 function run(cmd, args, timeout = 8000) {
   return new Promise((resolve) => {
-    execFile(cmd, args, { timeout, windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+    execFile(cmd, args, { timeout, windowsHide: true, maxBuffer: 8 * 1024 * 1024, env: cleanEnv() }, (err, stdout) => {
       resolve({ ok: !err, stdout: String(stdout || '') });
     });
   });
@@ -120,6 +128,9 @@ function switchValue(args, name) {
     const hit = args.find((a) => a.startsWith(`--${name}=`));
     return hit ? hit.slice(name.length + 3).replace(/^"(.*)"$/, '$1') : null;
   }
+  // Windows quotes a whole argument that has a space: "--user-data-dir=C:\...\Lead Finder\x".
+  const quoted = String(args).match(new RegExp(`"--${name}=([^"]+)"`));
+  if (quoted) return quoted[1].trim();
   const m = String(args).match(new RegExp(`--${name}=(?:"([^"]+)"|(.+?))(?= --|"?$)`));
   return m ? (m[1] || m[2]).trim() : null;
 }
@@ -616,6 +627,14 @@ class ChromeConnection {
       ]);
     } catch (err) {
       if (err instanceof ConnectCancelled) throw err;
+      // Chrome's own answer when its "Allow remote debugging?" question was
+      // declined or not answered.
+      if (/\b403\b|Forbidden/i.test(String(err?.message))) {
+        throw new ChromeError(
+          'allow_needed',
+          'Chrome did not allow the connection: it asks "Allow remote debugging?" in the Chrome window, and Allow was not clicked. Click Allow when it asks, or choose the Lead Finder automation profile in Settings > Chrome, which never asks.',
+        );
+      }
       throw new ChromeError(
         'attach_failed',
         `Chrome refused the connection (${shortError(err)}). If Chrome asked whether to allow remote debugging, choose Allow.`,

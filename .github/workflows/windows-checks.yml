@@ -8,6 +8,7 @@ on:
     branches: [main]
     paths:
       - 'src/main/windows-autologon.js'
+      - 'src/browser/chrome.js'
       - 'test/windows/**'
       - '.github/workflows/windows-checks.yml'
 
@@ -25,3 +26,17 @@ jobs:
           node-version: 22
       - name: Automatic sign-in set and removed
         run: node test/windows/autologon.win.js
+
+  chrome:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-save --ignore-scripts playwright-core@$(node -p "require('./package.json').dependencies['playwright-core']")
+      - name: Automation profile in a folder with a space
+        run: node test/windows/chrome.win.js

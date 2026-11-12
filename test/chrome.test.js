@@ -113,3 +113,12 @@ test('a replaced connection disconnecting late does not clear the current one', 
   assert.equal(conn.browser, current);
   assert.ok(conn.connected);
 });
+
+test('Windows command line: a quoted --user-data-dir with a space is read without its quotes', () => {
+  const { switchValue } = require('../src/browser/chrome');
+  const line = '"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" "--user-data-dir=C:\\Users\\Ali\\AppData\\Roaming\\Lead Finder\\chrome-automation" --profile-directory=Default --remote-debugging-port=0';
+  assert.equal(switchValue(line, 'user-data-dir'), 'C:\\Users\\Ali\\AppData\\Roaming\\Lead Finder\\chrome-automation');
+  assert.equal(switchValue(line, 'profile-directory'), 'Default');
+  assert.equal(switchValue(line, 'remote-debugging-port'), '0');
+  assert.equal(switchValue('chrome --user-data-dir="C:\\a b\\c" --x', 'user-data-dir'), 'C:\\a b\\c');
+});

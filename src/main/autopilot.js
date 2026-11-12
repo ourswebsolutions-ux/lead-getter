@@ -41,6 +41,7 @@ const TIMINGS = {
   busyWait: 15_000, // a search the user started is running
   idle: 60_000, // nothing to do: look again
   captchaRetry: 15 * 60_000, // Google still blocking after the search waited
+  allowRetry: 5 * 60_000, // Chrome waiting for the user's Allow
 };
 
 // Errors that need the user: retried only when they say so.
@@ -297,6 +298,12 @@ class Autopilot {
     }
     if (code === 'quota') {
       this.update(t.id, { status: 'waiting', leads, nextRunAt: nextMidnight(now), reason: r.message || "Today's lead limit is reached. Continues tomorrow" });
+      return;
+    }
+    // Chrome waits for the user's Allow: asked again in 5 minutes, not sooner.
+    if (code === 'needs_allow') {
+      this.update(t.id, { status: 'waiting', leads, nextRunAt: now + this.t.allowRetry, reason: `${r.message} Trying again in ${fmtWait(this.t.allowRetry)}` });
+      this.notify('needs_user', 'Chrome needs you', 'Click Allow in Chrome, or choose the Lead Finder automation profile in Settings > Chrome, which never asks.');
       return;
     }
     if (code === 'busy') {
