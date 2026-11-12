@@ -203,6 +203,30 @@ There is no server, so the code is created and checked on the customer's own com
 
 What this protects against: ordinary users guessing codes, sharing codes between computers or plans, reusing them, editing the database, or changing the clock. Real protection would need a server that creates and checks codes, which this project deliberately doesn't have.
 
+## Automation (unattended computer)
+
+Open it from the lock icon in the header, then **Settings**. Four short sections; nothing else in the app changes.
+
+**Continuous search** (under Search Automation): a keyword, a category and countries, for example `Shoes Shop` in Pakistan, UAE, USA, UK, Oman, Qatar, Saudi Arabia, Canada, Australia, Germany and France. Each country is an ordinary Google Maps search, `Shoes Shop in Oman`, run by the same engine as the Search button. After a country it rests a minute and moves to the next; after the last it waits 30 minutes and starts again from the first, round after round, until you pause or stop it. Several continuous searches take turns, one country at a time. Leads are saved the moment they are found; a business already saved is skipped without being opened, so later rounds only add new ones. While one runs, the Search button says so (one search at a time).
+- **Status:** Pending, Running, Waiting (with the reason and time: next country, next round, network, Chrome, today's lead limit), Paused, Stopped, Needs attention (only you can fix it: no plan, Chrome not installed or not allowed).
+- **Saved state:** keyword, countries, current country, round and leads found are kept in the database before and after each country. After a crash, restart or power cut the country that was running is searched again (Google Maps has no result pages to continue from; what was already saved is skipped).
+- **Retries:** network or Chrome trouble waits 30 s, 1, 2, 4 … up to 30 minutes between tries; the daily lead limit waits until the next day.
+
+**Background engine** (Windows Automation, or Background on macOS and Linux): with it on, closing or minimising the window keeps searches and WhatsApp campaigns running; the tray icon reopens it, and **Quit** (tray or Settings) stops everything. **Start with Windows / the computer** starts Lead Finder hidden in the tray at sign-in (Windows and macOS login item, Linux autostart entry; installed app only). **Auto resume after restart** resumes continuous searches and campaigns at start before the PIN is entered; the window stays locked. A locked screen does not stop the work.
+- **Why not a Windows service:** services run in session 0, apart from the signed-in user, where they cannot use the user's Chrome, desktop or keychain. Lead Finder starts at sign-in instead; with automatic sign-in that needs nobody at the computer.
+
+**Windows Auto Login** (Windows only): signs the account in after a restart or power cut, the way Windows supports it (Microsoft's Sysinternals Autologon does the same): Winlogon's AutoAdminLogon with the password kept as the LSA secret DefaultPassword, encrypted by Windows. Lead Finder never stores the password: it is passed once to the administrator step (Windows' UAC prompt) as a blob only this Windows account can decrypt, never on a command line or in a log. A plain-text password left in the registry by another tool is removed. Turning it off removes the secret. Read the warning before turning it on: anyone who can switch the computer on gets into the account. It does not unlock a locked screen. For the PC to switch itself back on after a power cut, set "Restore on AC power loss" (or similar) in the BIOS/UEFI; no program can.
+
+**Chrome Automation:**
+- **Chrome profile:** your everyday Chrome (any of its profiles), or the **Lead Finder automation profile**, a separate Chrome folder in Lead Finder's data folder created only when you choose it. Chrome 136+ lets other programs use the everyday profile only through its "Allow remote debugging" switch and an Allow prompt on each new connection, so it cannot reconnect with nobody at the computer. The automation profile is a normal Chrome folder of its own (sign in there once; its cookies and sessions stay), which Chrome lets Lead Finder start, restart and reconnect without a prompt. Your everyday profile is never copied or changed.
+- **Auto launch**, **Automatic reconnection** (after Chrome closes or crashes), **Chrome recovery without asking** (restart the same profile when recovery needs it, instead of asking). One Chrome window is used; a second Chrome is never started for the same folder.
+
+**CAPTCHA:** detection and pause are always on. The search pauses, you get a notification, and it continues by itself once Google no longer asks, after you complete the check in Chrome. It is never solved or bypassed. If it stays, a fresh tab and then one Chrome restart are tried (Settings); a restart never counts as solved. A continuous search that Google keeps blocking is tried again after 15 minutes, never sooner.
+
+**Notifications:** engine started, search resumed, country changed, new leads (at most every 30 minutes, summed), Chrome disconnected or restarted, internet disconnected, CAPTCHA, manual action needed, search stopped. Each kind at most once every few minutes. Logged without any password in `automation.log` in the app's data folder.
+
+**WhatsApp campaigns** keep their existing restart handling: each message is recorded before it is sent, so a restart never sends it twice.
+
 ## How a search works
 
 1. Types your keyword into Google Maps' search box in a new tab and runs the search.

@@ -18,8 +18,16 @@
 //    gracefully and relaunch it with the same directory and profile plus
 //    debugging enabled, then reconnect automatically.
 //
-// Nothing here creates or copies a profile, reads cookies, or force-kills
-// Chrome.
+// Nothing here copies a profile, reads cookies, or force-kills Chrome.
+//
+// Unattended use (Settings, Chrome Automation): the user may choose a
+// separate "Lead Finder automation" folder instead of their everyday Chrome.
+// It is created only when they choose it, Chrome runs it like any other
+// folder of its own (sign in there once; its cookies and sessions stay
+// there), and because it is not the default folder Chrome allows the
+// debugging switch on it without a prompt, so it can be started, restarted
+// and reconnected after a reboot with nobody at the computer. The everyday
+// profile stays as it is: Chrome asks the user to Allow each new connection.
 
 const fs = require('node:fs');
 const os = require('node:os');
@@ -362,7 +370,11 @@ class ChromeConnection {
   // for the user).
   // confirmRestart({ profileName, reason }) must resolve true before Chrome is
   // closed and reopened; the app asks the user.
-  constructor({ onStatus, onNeedsToggle, confirmRestart, timings } = {}) {
+  // options(): { userDataDir, profileDir, autoLaunch } chosen in Settings
+  // (userDataDir: a folder other than the everyday one; profileDir: the
+  // profile Chrome is started with; autoLaunch false: never start Chrome).
+  constructor({ onStatus, onNeedsToggle, confirmRestart, timings, options = () => ({}) } = {}) {
+    this.options = options;
     this.browser = null;
     this.context = null;
     this.profile = null;
@@ -388,12 +400,16 @@ class ChromeConnection {
     const major = await chromeMajorVersion(exe);
 
     this.onStatus('Looking for your Chrome session');
+    const opts = this.options() || {};
     let session = await this.findSession();
-    const expectedDir = session?.userDataDir || process.env.LEAD_FINDER_CHROME_USER_DATA || defaultUserDataDir();
-    const profile = selectProfile(expectedDir, session);
+    const expectedDir = session?.userDataDir || opts.userDataDir || process.env.LEAD_FINDER_CHROME_USER_DATA || defaultUserDataDir();
+    const chosen = !session && opts.profileDir ? { ...describeProfile(expectedDir, opts.profileDir), reason: 'chosen in Settings' } : null;
+    const profile = chosen || selectProfile(expectedDir, session);
 
     let justLaunched = false;
+    if (!session && opts.autoLaunch === false) throw new ChromeError('not_running', 'Chrome is not open, and starting it is turned off in Settings. Open Chrome to continue.');
     if (!session) {
+      if (opts.userDataDir) fs.mkdirSync(opts.userDataDir, { recursive: true });
       // Chrome is closed: start it normally with the user's last profile. If
       // the debugging switch was turned on before, Chrome serves it at once.
       this.onStatus(`Starting Chrome with your profile "${profile.name}"`);
@@ -431,12 +447,14 @@ class ChromeConnection {
     if (debugFlag) args.push(`--user-data-dir=${userDataDir}`);
     args.push(`--profile-directory=${profile.dir}`);
     if (debugFlag) args.push('--remote-debugging-port=0');
+    // Lead Finder's own folder: no first-run or default-browser pages.
+    if (samePath(userDataDir, this.options()?.userDataDir)) args.push('--no-first-run', '--no-default-browser-check');
     return args;
   }
 
   async findSession() {
     const sessions = await listChromeSessions();
-    const wanted = process.env.LEAD_FINDER_CHROME_USER_DATA;
+    const wanted = this.options()?.userDataDir || process.env.LEAD_FINDER_CHROME_USER_DATA;
     if (wanted) return sessions.find((s) => samePath(s.userDataDir, wanted)) || null;
     // The user's everyday Chrome (default folder) first, then any other.
     return sessions.find((s) => s.isDefaultDir) || sessions[0] || null;
@@ -765,8 +783,15 @@ function shortError(err) {
   return String(err?.message || err).split('\n')[0].slice(0, 200);
 }
 
+// The profiles of a Chrome folder (for Settings): [{ dir, name, account }].
+function listProfiles(userDataDir = defaultUserDataDir()) {
+  const cache = readLocalState(userDataDir)?.profile?.info_cache || {};
+  return Object.keys(cache).map((dir) => describeProfile(userDataDir, dir));
+}
+
 module.exports = {
   ChromeConnection,
+  listProfiles,
   ChromeError,
   ConnectCancelled,
   SETUP_URL,

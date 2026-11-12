@@ -14,6 +14,7 @@ import Composer from './Composer.jsx';
 import { currentTheme, setTheme } from './theme.js';
 import Activation, { planNeeded, planPill, statusLine } from './Activation.jsx';
 import { ChangePin } from './LockScreen.jsx';
+import AutomationSettings from './AutomationSettings.jsx';
 
 const ROWS_PER_PAGE = 500;
 
@@ -496,7 +497,7 @@ function EmptyLeads({ view, active, filtered, onShowAll, onShowToday }) {
 
 const WEBSITE_LABELS = { without: 'Without website', with: 'With website', all: 'All businesses' };
 
-function LockMenu({ onLock, onChangePin }) {
+function LockMenu({ onLock, onChangePin, onSettings }) {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
   useEffect(() => {
@@ -512,6 +513,9 @@ function LockMenu({ onLock, onChangePin }) {
       </button>
       {open && (
         <div className="menu lock-menu" role="menu" aria-label="Security">
+          <button type="button" role="menuitem" onClick={() => (setOpen(false), onSettings())}>
+            <Icon name="sliders" /> Settings
+          </button>
           <button type="button" role="menuitem" onClick={() => (setOpen(false), onChangePin())}>
             <Icon name="edit" /> Change PIN
           </button>
@@ -567,6 +571,7 @@ export default function App({ onLock }) {
   const [plansOpen, setPlansOpen] = useState(null); // null | { notice }
   const [quota, setQuota] = useState(null); // { limit, used, remaining, reached } of today
   const [changePin, setChangePin] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   // Leads | Chats | Outreach. Views stay mounted once opened, so switching
   // keeps each one's place (scroll, open chat, unsaved templates).
   const [workspace, setWorkspaceState] = useState(() => {
@@ -997,7 +1002,7 @@ export default function App({ onLock }) {
         })()}
         <WhatsAppPanel wa={wa} />
         <ThemeToggle />
-        <LockMenu onLock={onLock} onChangePin={() => setChangePin(true)} />
+        <LockMenu onLock={onLock} onChangePin={() => setChangePin(true)} onSettings={() => setSettingsOpen(true)} />
       </header>
 
       {visited.has('podcasts') && <PodcastsView notify={notify} hidden={workspace !== 'podcasts'} categories={catData.categories} />}
@@ -1580,6 +1585,7 @@ export default function App({ onLock }) {
       {summary && !active && <Celebration summary={summary} onClose={() => setSummary(null)} />}
       {plansOpen && <Activation status={plan} notice={plansOpen.notice} upgrade={plansOpen.upgrade} notify={notify} onClose={() => setPlansOpen(null)} />}
       {changePin && <ChangePin notify={notify} onClose={() => setChangePin(false)} />}
+      {settingsOpen && <AutomationSettings notify={notify} categories={catData.categories} onClose={() => setSettingsOpen(false)} />}
       {composeLead && <Composer lead={composeLead} connected={wa?.state === 'open'} notify={notify} onClose={() => setComposeLead(null)} />}
 
       <div className="toasts" aria-live="polite">

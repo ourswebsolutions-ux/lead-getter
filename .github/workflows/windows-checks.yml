@@ -1,0 +1,27 @@
+name: Windows checks
+
+# Windows-only features checked on a real Windows machine: automatic
+# sign-in (registry and LSA secret, set and removed again).
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/main/windows-autologon.js'
+      - 'test/windows/**'
+      - '.github/workflows/windows-checks.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  autologon:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Automatic sign-in set and removed
+        run: node test/windows/autologon.win.js

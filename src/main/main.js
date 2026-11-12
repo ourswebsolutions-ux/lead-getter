@@ -2,11 +2,11 @@
 
 const path = require('node:path');
 const fs = require('node:fs/promises');
-const { app, BrowserWindow, clipboard, dialog, ipcMain, Notification, safeStorage, shell } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, Notification, safeStorage, shell, Tray } = require('electron');
 const { LeadStore, DATE_RE, formatCategory } = require('../database/db');
 const { E164, resolvePhoneCountry, phoneCountries } = require('../database/phone');
 const { leadsToCsv } = require('../export/csv');
-const { ChromeConnection, ChromeError, ConnectCancelled, defaultUserDataDir } = require('../browser/chrome');
+const { ChromeConnection, ChromeError, ConnectCancelled, defaultUserDataDir, listProfiles } = require('../browser/chrome');
 const { SearchSession, WEBSITE_FILTERS } = require('../browser/search-session');
 const { FacebookSession } = require('../browser/facebook-session');
 const { LinkedInSession } = require('../browser/linkedin-session');
@@ -27,6 +27,9 @@ require('node:net').setDefaultAutoSelectFamilyAttemptTimeout(2500);
 const { AppLock } = require('./applock');
 const { Activation } = require('./activation');
 const { Updater, fileLog } = require('./updater');
+const { Autopilot } = require('./autopilot');
+const automation = require('./automation');
+const autologon = require('./windows-autologon');
 
 const DEV_URL = process.env.VITE_DEV_SERVER_URL || '';
 const RENDERER_FILE = path.join(__dirname, '..', '..', 'dist', 'renderer', 'index.html');
@@ -40,11 +43,14 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
   process.exit(0);
 }
-app.on('second-instance', () => {
-  if (!win) return;
+app.on('second-instance', () => showWindow());
+
+function showWindow() {
+  if (!win || win.isDestroyed()) return;
   if (win.isMinimized()) win.restore();
+  win.show();
   win.focus();
-});
+}
 
 let win = null;
 let updater = null;
@@ -57,8 +63,21 @@ const chrome = new ChromeConnection({
   onStatus: (message) => sendStatus({ state: 'connecting', phase: 'connection', step: 'connecting', message }),
   // Chrome refuses chrome:// addresses from other programs, so the setup
   // address is put on the clipboard for the user to paste.
-  onNeedsToggle: ({ url }) => clipboard.writeText(url),
+  onNeedsToggle: ({ url }) => {
+    clipboard.writeText(url);
+    notice('needs_user', 'Chrome needs you', 'Chrome asks for permission to connect. Open Chrome and allow it, or choose the Lead Finder automation profile in Settings for unattended use.');
+  },
+  // Settings > Chrome Automation: which Chrome folder and profile, and
+  // whether Chrome may be started.
+  options: () => chromeOptions(),
   confirmRestart: async ({ profileName, reason }) => {
+    // Allowed in Settings: no question (nobody may be at the computer).
+    if (store && automationSettings().chrome.autoRestart) {
+      notice('chrome_restart', 'Chrome restarted', `Chrome is restarting with the profile "${profileName}"${reason ? ` ${reason}` : ''}.`);
+      return true;
+    }
+    // Nobody to answer: not restarted.
+    if (!win || win.isDestroyed() || !win.isVisible()) return false;
     const { response } = await dialog.showMessageBox(win, {
       type: 'question',
       buttons: ['Restart Chrome', 'Not now'],
@@ -77,18 +96,68 @@ const tabs = { main: null, check: null, detail: null, facebook: null, linkedin: 
 let lastStatus = { state: 'idle', message: 'Ready' };
 let interrupted = null; // last search, if the app ended while it was running
 
+// --- automation (Settings > Automation; see automation.js) ----------------------
+
+let autopilot = null; // continuous searches (autopilot.js)
+let tray = null;
+let notifier = null;
+const AUTOMATION_PROFILE_DIR = () => path.join(app.getPath('userData'), 'chrome-automation');
+
+function automationSettings() {
+  return automation.readSettings(store);
+}
+
+function chromeOptions() {
+  if (!store) return {};
+  const s = automationSettings().chrome;
+  return s.profile === 'automation' ? { userDataDir: AUTOMATION_PROFILE_DIR(), autoLaunch: s.autoLaunch } : { profileDir: s.profileDir || '', autoLaunch: s.autoLaunch };
+}
+
+const autoLog = (line) => {
+  try {
+    autoLogFile ||= fileLog(path.join(app.getPath('userData'), 'automation.log'));
+    autoLogFile({ msg: String(line) });
+  } catch {}
+};
+let autoLogFile = null;
+
+// A desktop notification (Settings: Notifications), never more than one of a
+// kind every few minutes.
+function notice(kind, title, body) {
+  if (!notifier) {
+    notifier = new automation.Notifier({
+      show: (t, b) => Notification.isSupported() && new Notification({ title: `Lead Finder: ${t}`, body: b, silent: false }).show(),
+      enabled: () => !store || automationSettings().notifications,
+      log: autoLog,
+    });
+  }
+  return notifier.notify(kind, title, body);
+}
+
+// Search status worth a notification (the search itself already waits).
+function noticeFromStatus(st) {
+  const m = String(st.message || '');
+  if (st.state === 'paused' && /CAPTCHA|unusual traffic/i.test(m)) notice('captcha', 'CAPTCHA detected', `${search?.auto ? `"${search.auto}": ` : ''}Google asks for verification. Complete it in Chrome; the search continues by itself.`);
+  else if (st.state === 'paused' && /consent page/i.test(m)) notice('captcha', 'Manual verification required', 'Google shows a consent page in Chrome. Make your choice there; the search continues by itself.');
+  else if (/Chrome closed unexpectedly/i.test(m)) notice('chrome', 'Chrome disconnected', 'Lead Finder is reopening Chrome and continues the search.');
+  else if (/Network problem/i.test(m)) notice('offline', 'Internet disconnected', 'Lead Finder retries by itself when the connection is back.');
+}
+
 function send(channel, payload) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
 }
 
 function sendStatus(status) {
+  if (status.state || status.message) noticeFromStatus(status);
   lastStatus = { ...lastStatus, ...status };
   if (status.state && !('errorCode' in status)) lastStatus.errorCode = null;
   send('search:status', lastStatus);
 }
 
-function createWindow() {
+let hiddenOnce = false;
+function createWindow({ show = true } = {}) {
   win = new BrowserWindow({
+    show,
     width: 1180,
     height: 760,
     minWidth: 760,
@@ -105,6 +174,16 @@ function createWindow() {
     },
   });
   win.setMenu(null);
+  // Background mode: closing hides the window; the work goes on (tray: Open, Quit).
+  win.on('close', (e) => {
+    if (quitting || !store || !automationSettings().background) return;
+    e.preventDefault();
+    win.hide();
+    if (!hiddenOnce) {
+      hiddenOnce = true;
+      notice('background', 'Still running', 'Lead Finder keeps working in the background. Open it again from its icon in the tray; Quit there stops it.');
+    }
+  });
   // The window only ever shows the bundled UI.
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.webContents.on('will-navigate', (e) => e.preventDefault());
@@ -448,7 +527,7 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn, raw
   }
   const websiteFilter = WEBSITE_FILTERS.has(rawWebsite) ? rawWebsite : 'without';
   const findEmails = rawFindEmails === true;
-  if (search) return { ok: false, error: 'A search is already running.' };
+  if (search) return { ok: false, error: search.auto ? `A continuous search is running ("${search.auto}"). Pause it in Settings first, or wait for it.` : 'A search is already running.' };
   const plan = requirePlan();
   if (!plan.ok) return plan;
   const allowance = requireLeadAllowance();
@@ -461,9 +540,20 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn, raw
     return { ok: false, error: `Could not save the category: ${err.message}` };
   }
 
+  const r = launchSearch({ keyword, category, websiteFilter, findEmails, withMaps, withFacebook, withLinkedIn, linkedinKeyword, linkedinLocation });
+  return { ok: r.ok, keyword: r.keyword, category: r.category };
+}
+
+// Runs one search with the existing engine: from the Search button, or one
+// country of a continuous search (auto: its query). search.promise resolves
+// to how it ended: { state: 'done' | 'stopped' | 'error', code, message,
+// newLeads, url }. limit: listings processed (end-to-end tests only).
+function launchSearch({ keyword, category, websiteFilter, findEmails, withMaps, withFacebook = false, withLinkedIn = false, linkedinKeyword = '', linkedinLocation = '', auto = null, signal = null, limit = 0 }) {
   const sources = [...(withMaps ? ['maps'] : []), ...(withFacebook ? ['facebook'] : []), ...(withLinkedIn ? ['linkedin'] : [])];
   const controller = new AbortController();
-  search = { controller };
+  signal?.addEventListener('abort', () => controller.abort(), { once: true });
+  search = { controller, auto };
+  let outcome = { state: 'error', code: 'unknown', message: '' };
   // Remembered so a search cut short by a crash can be resumed.
   store.setState('lastSearch', { keyword, category: category.name, linkedinKeyword, linkedinLocation, sources, state: 'running', startedAt: new Date().toISOString() });
   interrupted = null;
@@ -477,7 +567,8 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn, raw
       expectedProfilePath = (await connectChrome(controller.signal)).path;
       if (controller.signal.aborted) {
         sendStatus({ state: 'stopped', message: 'Search stopped' });
-        return;
+        outcome = { state: 'stopped' };
+        return outcome;
       }
       const pages = {
         main: () => tab('main'),
@@ -496,6 +587,7 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn, raw
         // Chrome or the tab closed during the search: reopen/reconnect the
         // same profile (Chrome may ask the user to Allow), never another one.
         reconnect: async () => {
+          if (!automationSettings().chrome.autoReconnect) throw Object.assign(new Error('automatic reconnection is turned off in Settings'), { code: 'restart_declined' });
           if (chromeTask) await chromeTask.catch(() => {});
           if (chrome.connected) {
             for (const k of own) tabs[k] = null; // only this worker's tab was closed
@@ -513,7 +605,7 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn, raw
             sendStatus({ profile: profileLabel(profile) });
           });
         },
-        canRestart: () => !chromeTask && chrome.canRestart(),
+        canRestart: () => !chromeTask && automationSettings().captcha.restartChrome && chrome.canRestart(),
         restart: () =>
           once(async () => {
             const profile = await chrome.restartAndAttach(controller.signal);
@@ -536,7 +628,7 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn, raw
           if (leadQuota) send('quota:state', leadQuota.status());
           verifier?.poke(); // check the new number on WhatsApp in the background
         },
-        createMaps: (emit) => new SearchSession({ keyword, categoryId: category.id, websiteFilter, findEmails, allow: findEmails ? robotsChecker({ signal: controller.signal }) : null, store, signal: controller.signal, pages, recovery: recoveryFor(MAPS_TABS), emit }),
+        createMaps: (emit) => new SearchSession({ keyword, categoryId: category.id, websiteFilter, findEmails, allow: findEmails ? robotsChecker({ signal: controller.signal }) : null, store, signal: controller.signal, pages, recovery: recoveryFor(MAPS_TABS), emit, limit }),
         createFacebook: (emit) =>
           new FacebookSession({
             keyword,
@@ -572,23 +664,46 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn, raw
             emit,
           }),
       });
+      outcome = searchOutcome(stats);
     } catch (err) {
       if (err instanceof ConnectCancelled) {
         sendStatus({ state: 'stopped', message: 'Search stopped' });
+        outcome = { state: 'stopped' };
       } else {
         const code = err instanceof ChromeError ? err.code : 'unknown';
         sendStatus({ state: 'error', phase: 'connection', errorCode: code, message: err.message || String(err) });
+        outcome = { state: 'error', code: chromeErrorKind(code), message: err.message || String(err) };
       }
     } finally {
       search = null;
       updater?.idle(); // an update waiting for the search can install now
       sendSummary({ keyword, category: category.name, startedAt, stats });
       try {
-        store.setState('lastSearch', { keyword, category: category.name, linkedinKeyword, linkedinLocation, sources, state: lastStatus.state, endedAt: new Date().toISOString() });
+        if (!auto) store.setState('lastSearch', { keyword, category: category.name, linkedinKeyword, linkedinLocation, sources, state: lastStatus.state, endedAt: new Date().toISOString() });
       } catch {}
     }
+    return outcome;
   })();
-  return { ok: true, keyword, category };
+  return { ok: true, keyword, category, promise: search.promise };
+}
+
+// How a finished search ended, for the continuous search.
+function searchOutcome(stats) {
+  const st = lastStatus;
+  const newLeads = stats?.newLeads || 0;
+  if (leadQuota && !leadQuota.check().ok) return { state: 'error', code: 'quota', message: leadQuota.check().error || "Today's lead limit is reached", newLeads };
+  if (st.state === 'done') return { state: 'done', newLeads };
+  if (st.state === 'stopped') return { state: 'stopped', newLeads };
+  const message = String(st.message || 'The search failed').replace(/^Google Maps: /, '');
+  if (/still blocking automated access|CAPTCHA|unusual traffic/i.test(message)) return { state: 'error', code: 'captcha', message, newLeads };
+  if (/net::ERR_|Network problem|internet|offline/i.test(message)) return { state: 'error', code: 'offline', message, newLeads };
+  if (st.phase === 'connection' || /Chrome/i.test(message)) return { state: 'error', code: chromeErrorKind(st.errorCode), message, newLeads };
+  return { state: 'error', code: 'unknown', message, newLeads };
+}
+
+// Chrome problems: retried, except those only the user can solve.
+function chromeErrorKind(code) {
+  return ['not_installed', 'chrome_too_old', 'wrong_profile', 'restart_declined'].includes(code) ? 'needs_user' : 'chrome';
 }
 
 // End-of-search summary, from the database: leads that first became leads
@@ -2013,7 +2128,40 @@ app.whenReady().then(() => {
   handle('activation:verify', (code, plan) => verifyActivation(code, plan));
   handle('activation:contact', (kind, text) => openContact(kind, text));
 
-  createWindow();
+  // Settings > Automation.
+  handle('automation:get', () => automationView());
+  handle('automation:set', (raw) => setAutomation(raw));
+  handle('autopilot:state', () => autopilot.state());
+  handle('autopilot:add', (raw) => autopilot.add(raw || {}));
+  handle('autopilot:remove', (id) => autopilot.remove(String(id)));
+  handle('autopilot:pause', (id) => autopilot.pause(String(id)));
+  handle('autopilot:resume', (id) => autopilot.resume(String(id)));
+  handle('autopilot:stop', (id) => autopilot.stop(String(id)));
+  handle('autopilot:engine', (action) => (action === 'start' ? autopilot.start() : action === 'pause' ? autopilot.pauseEngine() : action === 'stop' ? autopilot.stopEngine() : { ok: false }));
+  handle('automation:quit', () => {
+    setImmediate(() => app.quit());
+    return { ok: true };
+  });
+  handle('autologon:status', () => autologon.status());
+  handle('autologon:enable', async (user, password) => {
+    const r = await autologon.enable({ user: String(user || ''), password: typeof password === 'string' ? password : '' }, { base: app.getPath('userData') });
+    if (r.ok) store.setState('autologon.passwordLessBefore', r.passwordLessBefore ?? null);
+    autoLog(`automatic sign-in ${r.ok ? 'turned on' : `not turned on: ${r.error}`}`); // never the password
+    return { ok: r.ok, error: r.error || null, status: await autologon.status() };
+  });
+  handle('autologon:disable', async () => {
+    const r = await autologon.disable({ base: app.getPath('userData'), restorePasswordLess: store.getState('autologon.passwordLessBefore') ?? '' });
+    autoLog(`automatic sign-in ${r.ok ? 'turned off' : `not turned off: ${r.error}`}`);
+    return { ok: r.ok, error: r.error || null, status: await autologon.status() };
+  });
+
+  initAutopilot();
+  const hidden = automation.startedInBackground() && automationSettings().background;
+  createWindow({ show: !hidden });
+  updateTray();
+  if (hidden) autoLog('started in the background');
+  // Resume before the PIN when allowed (unattended computer).
+  if (automationSettings().autoResume) startBackgroundWork();
   if (process.env.LEAD_FINDER_SMOKE_TEST) return smokeTest(process.env.LEAD_FINDER_SMOKE_TEST);
 
   updater = new Updater({ app, shell, isBusy: () => Boolean(search) || Boolean(outreach?.busy), send: (st) => send('update:status', st), log: fileLog(process.env.LEAD_FINDER_UPDATE_LOG || path.join(app.getPath('userData'), 'update.log')) });
@@ -2055,9 +2203,128 @@ let unlockedOnce = false;
 function afterUnlock() {
   if (unlockedOnce) return;
   unlockedOnce = true;
+  startBackgroundWork();
+  initDialer();
+}
+
+// Searches and campaigns: after the PIN, or at start before it when "Auto
+// resume after restart" is on (the window stays locked; nothing is shown).
+let backgroundStarted = false;
+function startBackgroundWork() {
+  if (backgroundStarted) return;
+  backgroundStarted = true;
   watchActivation();
   initWhatsApp();
-  initDialer();
+  // Continuous searches running when the app ended carry on.
+  if (autopilot.engine().state === 'running' && automationSettings().search.resumeInterrupted) {
+    autopilot.start();
+    notice('engine', 'Background engine started', 'Lead Finder resumed its continuous searches.');
+  }
+}
+
+// The tray icon: reopen the window, pause or resume continuous searches, quit.
+function updateTray() {
+  const want = automationSettings().background;
+  if (!want) {
+    tray?.destroy();
+    tray = null;
+    return;
+  }
+  try {
+    if (!tray) {
+      const icon = nativeImage.createFromPath(path.join(__dirname, '..', '..', 'dist', 'renderer', 'icon.png'));
+      tray = new Tray(icon.isEmpty() ? icon : icon.resize({ width: 18, height: 18 }));
+      tray.setToolTip('Lead Finder');
+      tray.on('click', () => showWindow());
+    }
+    const engine = autopilot?.engine().state || 'stopped';
+    tray.setContextMenu(
+      Menu.buildFromTemplate([
+        { label: 'Open Lead Finder', click: () => showWindow() },
+        { type: 'separator' },
+        engine === 'running' ? { label: 'Pause continuous searches', click: () => autopilot.pauseEngine() } : { label: 'Resume continuous searches', enabled: autopilot?.tasks().length > 0, click: () => autopilot.start() },
+        { type: 'separator' },
+        { label: 'Quit Lead Finder (stops background work)', click: () => app.quit() },
+      ]),
+    );
+  } catch (err) {
+    autoLog(`tray unavailable: ${err.message}`);
+  }
+}
+
+// One country of a continuous search, with the existing search engine.
+const AUTO_LIMIT = !app.isPackaged && Number(process.env.LEAD_FINDER_TEST_MAX_LISTINGS) > 0 ? Number(process.env.LEAD_FINDER_TEST_MAX_LISTINGS) : 0;
+async function runAutoSearch({ task, query, signal }) {
+  if (search) return { state: 'error', code: 'busy' };
+  const plan = requirePlan();
+  if (!plan.ok) return { state: 'error', code: 'plan', message: plan.error };
+  const allowance = requireLeadAllowance();
+  if (!allowance.ok) return { state: 'error', code: 'quota', message: allowance.error };
+  if (!(await online())) return { state: 'error', code: 'offline', message: 'No internet connection' };
+  let category;
+  try {
+    category = store.ensureCategory(validateCategory(task.category).category || task.category);
+  } catch (err) {
+    return { state: 'error', code: 'needs_user', message: `The category could not be saved: ${err.message}` };
+  }
+  const r = launchSearch({ keyword: query, category, websiteFilter: task.websiteFilter, findEmails: task.findEmails, withMaps: true, auto: query, signal, limit: AUTO_LIMIT });
+  return r.promise;
+}
+
+// Whether the internet answers (Google's address resolves).
+function online() {
+  return new Promise((resolve) => {
+    require('node:dns').lookup('www.google.com', (err) => resolve(!err));
+  });
+}
+
+function initAutopilot() {
+  autopilot = new Autopilot({
+    store,
+    runSearch: runAutoSearch,
+    notify: notice,
+    log: autoLog,
+    onChange: (st) => {
+      send('autopilot:state', st);
+      if (tray) updateTray();
+    },
+    timings: !app.isPackaged && process.env.LEAD_FINDER_TEST_AUTOPILOT ? JSON.parse(process.env.LEAD_FINDER_TEST_AUTOPILOT) : {},
+  });
+}
+
+function setAutomation(raw) {
+  const before = automationSettings();
+  const next = automation.validateSettings(raw, before);
+  if (next.startWithOS !== before.startWithOS || (next.startWithOS && !automation.startsWithOS(app))) {
+    const r = automation.setStartWithOS(app, next.startWithOS);
+    if (!r.ok) {
+      next.startWithOS = before.startWithOS;
+      store.setState(automation.KEY, next);
+      updateTray();
+      return { ok: false, error: r.error, settings: automationView() };
+    }
+  }
+  store.setState(automation.KEY, next);
+  updateTray();
+  return { ok: true, settings: automationView() };
+}
+
+function automationView() {
+  const s = automationSettings();
+  return {
+    ...s,
+    platform: process.platform,
+    osUser: require('node:os').userInfo().username,
+    startsWithOS: automation.startsWithOS(app),
+    automationProfileDir: AUTOMATION_PROFILE_DIR(),
+    profiles: (() => {
+      try {
+        return listProfiles();
+      } catch {
+        return [];
+      }
+    })(),
+  };
 }
 
 // --- Dialer (calls through the user's Android phone; see src/dialer) ------------------
@@ -2245,7 +2512,10 @@ async function dialerDo(fn) {
   }
 }
 
-app.on('window-all-closed', () => app.quit());
+// Background mode keeps the engine running without a window.
+app.on('window-all-closed', () => {
+  if (!store || !automationSettings().background) app.quit();
+});
 
 let quitting = false;
 app.on('before-quit', (e) => {
@@ -2253,9 +2523,12 @@ app.on('before-quit', (e) => {
   quitting = true;
   e.preventDefault();
   // Stop automation and detach from Chrome without closing it.
+  tray?.destroy();
+  // Continuous searches keep their place: the next start resumes them.
+  const pilot = autopilot?.shutdown();
   search?.controller.abort();
   podcastRun?.controller.abort();
-  Promise.all([search?.promise, podcastRun?.promise].map((p) => Promise.resolve(p).catch(() => {})))
+  Promise.all([search?.promise, podcastRun?.promise, pilot].map((p) => Promise.resolve(p).catch(() => {})))
     .then(() => outreach?.dispose())
     .then(() => autoDialer?.stop())
     .then(() => sms?.disconnect())

@@ -70,8 +70,9 @@ function isNetworkError(err) {
 class SearchSession {
   // findEmails: also read each lead's website for its public emails; allow:
   // robots.txt check for those pages; contacts, fetchImpl: for tests.
-  constructor({ keyword, categoryId = null, websiteFilter = 'without', store, pages, emit, signal, recovery = null, maps = mapsDefault, webCheck = checkWebPresence, pacing = {}, random = Math.random, findEmails = false, allow = null, contacts = contactsDefault, fetchImpl }) {
+  constructor({ keyword, categoryId = null, websiteFilter = 'without', store, pages, emit, signal, recovery = null, maps = mapsDefault, webCheck = checkWebPresence, pacing = {}, random = Math.random, findEmails = false, allow = null, contacts = contactsDefault, fetchImpl, limit = 0 }) {
     this.keyword = keyword;
+    this.limit = limit; // listings processed before the search ends (0: all)
     this.categoryId = categoryId;
     this.websiteFilter = WEBSITE_FILTERS.has(websiteFilter) ? websiteFilter : 'without';
     this.store = store;
@@ -362,6 +363,7 @@ class SearchSession {
       for (const link of fresh) {
         this.seenUrls.add(link.url);
         await this.processListing(link, page);
+        if (this.limit && this.stats.processed >= this.limit) return;
         // Opening a listing can replace the result list with its details.
         if (!(await this.op(() => this.maps.returnToResults(page)))) {
           if (++researched > 3) throw new FatalSearchError('Google Maps did not return to the result list. The search was stopped; your saved leads are kept.');
