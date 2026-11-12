@@ -810,9 +810,25 @@ function listProfiles(userDataDir = defaultUserDataDir()) {
   return Object.keys(cache).map((dir) => describeProfile(userDataDir, dir));
 }
 
+// A plain Chrome window on a folder, with no debugging connection, for the
+// user to sign in to Google (Google refuses sign-in in a Chrome another
+// program controls). Closes Lead Finder's own Chrome on that folder first.
+async function openPlain(userDataDir, url, { timeout = 30_000 } = {}) {
+  const exe = findChromeExecutable();
+  if (!exe) throw new ChromeError('not_installed', 'Google Chrome is not installed or could not be located.');
+  const running = (await listChromeSessions()).filter((x) => samePath(x.userDataDir, userDataDir));
+  for (const x of running) await requestGracefulQuit(x).catch(() => {});
+  const end = Date.now() + timeout;
+  while (running.some((x) => pidAlive(x.pid)) && Date.now() < end) await wait(500);
+  if (running.some((x) => pidAlive(x.pid))) throw new ChromeError('restart_blocked', 'Lead Finder’s Chrome did not close. Close it yourself and try again.');
+  fs.mkdirSync(userDataDir, { recursive: true });
+  launchChrome(exe, [`--user-data-dir=${userDataDir}`, '--profile-directory=Default', '--no-first-run', '--no-default-browser-check', url]);
+}
+
 module.exports = {
   ChromeConnection,
   listProfiles,
+  openPlain,
   ChromeError,
   ConnectCancelled,
   SETUP_URL,

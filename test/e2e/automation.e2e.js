@@ -37,13 +37,13 @@ test('Settings: automation switches, continuous searches, background close', asy
   const panel = win.getByRole('region', { name: 'Settings' });
   await panel.waitFor();
   assert.equal(await win.getByRole('button', { name: 'Settings', pressed: true }).count(), 1, 'the Settings tab is selected');
-  // One section at a time, chosen in the section menu.
+  // One section at a time, chosen in the sub-tabs.
   const nav = panel.getByRole('navigation', { name: 'Settings sections' });
-  for (const name of ['Chrome', 'Continuous search', 'New search', 'CAPTCHA', 'Background']) {
+  for (const name of ['Chrome', 'Continuous search', 'CAPTCHA', 'Background']) {
     await nav.getByRole('button', { name }).click();
-    await panel.getByRole('region', { name: name === 'New search' ? 'New continuous search' : name }).waitFor();
+    await panel.getByRole('region', { name }).waitFor();
   }
-  assert.equal(await panel.getByText('Windows sign-in').count(), 0, 'Windows only');
+  assert.equal(await nav.getByRole('button', { name: 'New search' }).count(), 0, 'no separate search form');
   if (shots) await win.screenshot({ path: path.join(shots, 'settings-top.png') });
 
   // Start with the computer: written as an autostart entry, and it turns the
@@ -54,43 +54,37 @@ test('Settings: automation switches, continuous searches, background close', asy
   assert.equal(await panel.getByRole('switch', { name: 'Background engine' }).getAttribute('aria-checked'), 'true');
   await panel.getByRole('switch', { name: 'Auto resume after restart' }).click();
   await nav.getByRole('button', { name: 'Chrome' }).click();
-  await panel.getByText(/Why Chrome asks/).waitFor();
-  if (shots) await win.screenshot({ path: path.join(shots, 'settings-chrome-allow.png') });
+  await panel.getByText(/Chrome asks “Allow” for this profile/).waitFor();
   await panel.getByRole('radio', { name: /Lead Finder automation profile/ }).click();
-  await win.waitForFunction(() => document.querySelector('[role="radio"][aria-checked="true"]')?.textContent.includes('automation profile'));
   await panel.getByText(/chrome-automation/).waitFor();
   await panel.getByText('Ready for unattended use').waitFor();
 
-  // A continuous search: Chrome is not installed here, which only the user
-  // can fix, so it stops with the reason instead of retrying.
-  if (shots) await win.screenshot({ path: path.join(shots, 'settings-chrome.png') });
-  await nav.getByRole('button', { name: 'New search' }).click();
-  await panel.getByRole('textbox', { name: 'Continuous search keyword' }).fill('Shoes Shop');
-  await panel.getByLabel('Continuous search category').fill('Shoes');
-  const start = panel.getByRole('button', { name: 'Start continuous search' });
-  assert.equal(await start.isDisabled(), true, 'needs a country');
+  // Continuous search: only a switch and the countries; the search is the Leads tab's.
+  await nav.getByRole('button', { name: 'Continuous search' }).click();
+  await panel.getByRole('switch', { name: 'Continuous search' }).click();
   await panel.getByRole('button', { name: 'Pakistan' }).click();
   await panel.getByRole('button', { name: 'UAE' }).click();
-  if (shots) await win.screenshot({ path: path.join(shots, 'settings-new.png') });
-  await start.click();
-  await panel.getByText('Shoes Shop', { exact: true }).waitFor(); // back on the list of searches
+  await panel.getByText('Pakistan → UAE → again').waitFor();
+  if (shots) await win.screenshot({ path: path.join(shots, 'settings-search.png') });
+  const saved = await win.evaluate(() => window.leadFinder.automationGet());
+  assert.deepEqual([saved.search.continuous, saved.search.countries], [true, ['Pakistan', 'UAE']]);
+
+  // The Leads tab's Start Search now goes country after country. Chrome is
+  // not installed here, which only the user can fix: it says so.
+  await win.getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: 'Leads' }).click();
+  await win.getByPlaceholder(/Software House in Lahore/).fill('Shoes Shop');
+  await win.locator('#cat').fill('Shoes');
+  await win.getByRole('button', { name: /Start Search/ }).click();
   let t1 = null;
   for (let i = 0; i < 60 && t1?.status !== 'failed'; i++) {
     await new Promise((r) => setTimeout(r, 1000));
-    t1 = (await win.evaluate(() => window.leadFinder.autopilotState())).tasks[0];
+    t1 = (await win.evaluate(() => window.leadFinder.autopilotState())).tasks.find((x) => x.origin === 'leads');
   }
-  assert.equal(t1.status, 'failed');
+  assert.deepEqual([t1.keyword, t1.countries, t1.status], ['Shoes Shop', ['Pakistan', 'UAE'], 'failed']);
   assert.match(t1.reason, /Chrome is not installed/);
-  await panel.getByText('Needs attention').waitFor();
-  if (shots) {
-    await win.screenshot({ path: path.join(shots, 'settings-search.png') });
-    await win.evaluate(() => document.documentElement.setAttribute('data-theme', 'dark'));
-    await new Promise((r) => setTimeout(r, 700)); // colours fade in
-    await win.screenshot({ path: path.join(shots, 'settings-search-dark.png') });
-    await win.evaluate(() => document.documentElement.removeAttribute('data-theme'));
-  }
-  await panel.getByRole('button', { name: 'Stop Shoes Shop' }).click();
-  await panel.getByText('Stopped', { exact: true }).first().waitFor();
+  await win.waitForFunction(() => /Continuous search stopped: .*Chrome/.test(document.body.innerText));
+  const shoes = await win.evaluate(() => window.leadFinder.autopilotState());
+  assert.equal(shoes.tasks.filter((x) => x.origin === 'leads').length, 1);
 
   // Closing the window keeps the app running.
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close()); // the window's X button
@@ -103,8 +97,8 @@ test('Settings: automation switches, continuous searches, background close', asy
   win = await app.firstWindow();
   await unlock(win, '1357', { plan: null });
   const s = await win.evaluate(() => window.leadFinder.automationGet());
-  assert.deepEqual([s.startWithOS, s.background, s.autoResume, s.chrome.profile], [true, true, true, 'automation']);
-  assert.equal((await win.evaluate(() => window.leadFinder.autopilotState())).tasks[0].status, 'completed', 'a stopped search stays stopped');
+  assert.deepEqual([s.startWithOS, s.background, s.autoResume, s.chrome.profile, s.search.continuous], [true, true, true, 'automation', true]);
+  assert.equal((await win.evaluate(() => window.leadFinder.autopilotState())).tasks[0].status, 'failed', 'kept as it was');
   await win.evaluate(() => window.leadFinder.automationSet({ startWithOS: false, background: false }));
   assert.equal(fs.existsSync(autostart), false, 'autostart entry removed');
   const closed = new Promise((r) => app.process().once('exit', r));

@@ -36,6 +36,8 @@ const DEFAULTS = {
   },
   search: {
     resumeInterrupted: true, // continuous searches resume after a restart
+    continuous: false, // the Leads tab's search goes through the countries below, again and again, until Stop
+    countries: [], // in search order
   },
   captcha: {
     restartChrome: true, // one Chrome restart while blocked (never counts as solved)
@@ -60,7 +62,11 @@ function validateSettings(raw, current) {
     if (typeof raw.chrome.profileDir === 'string' && /^(|Default|Profile \d{1,3}|Guest Profile|[\w .-]{1,60})$/.test(raw.chrome.profileDir)) out.chrome.profileDir = raw.chrome.profileDir;
     for (const k of ['autoLaunch', 'autoReconnect', 'autoRestart']) bool(out.chrome, k, raw.chrome);
   }
-  if (raw.search) bool(out.search, 'resumeInterrupted', raw.search);
+  if (raw.search) {
+    bool(out.search, 'resumeInterrupted', raw.search);
+    bool(out.search, 'continuous', raw.search);
+    if (Array.isArray(raw.search.countries)) out.search.countries = [...new Set(raw.search.countries.map((c) => String(c).replace(/\s+/g, ' ').trim()).filter((c) => /^[\p{L}][\p{L} .'()-]{1,55}$/u.test(c)))].slice(0, 60);
+  }
   if (raw.captcha) bool(out.captcha, 'restartChrome', raw.captcha);
   // Starting with the computer only makes sense if the work keeps running.
   if (out.startWithOS) out.background = true;
@@ -93,7 +99,7 @@ function setStartWithOS(app, on, { platform = process.platform, env = process.en
       fs.writeFileSync(file, ['[Desktop Entry]', 'Type=Application', 'Name=Lead Finder', `Exec="${exe}" ${BACKGROUND_ARG}`, 'X-GNOME-Autostart-enabled=true', 'NoDisplay=false', 'Comment=Lead Finder background work', ''].join('\n'));
       return { ok: true, supported: true };
     }
-    app.setLoginItemSettings({ openAtLogin: on, openAsHidden: on, args: on ? [BACKGROUND_ARG] : [] });
+    app.setLoginItemSettings({ openAtLogin: on, args: on ? [BACKGROUND_ARG] : [] });
     return { ok: true, supported: true };
   } catch (err) {
     return { ok: false, supported: true, error: err.message };

@@ -88,7 +88,9 @@ class Autopilot {
 
   // --- tasks -----------------------------------------------------------------------
 
-  add({ keyword, category, countries, websiteFilter = 'without', findEmails = false }) {
+  // search: the Leads tab's sources ({ withMaps, withFacebook, withLinkedIn,
+  // linkedinKeyword }); origin: 'leads' (the Leads tab) or 'assistant'.
+  add({ keyword, category, countries, websiteFilter = 'without', findEmails = false, search = null, origin = 'settings' }) {
     const k = clean(keyword, 120);
     const c = clean(category, 60);
     const list = [...new Set((Array.isArray(countries) ? countries : []).map((x) => clean(x, 56)).filter((x) => /^[\p{L}][\p{L} .'()-]*$/u.test(x)))].slice(0, MAX_COUNTRIES);
@@ -104,6 +106,8 @@ class Autopilot {
       countries: list,
       websiteFilter: ['without', 'with', 'all'].includes(websiteFilter) ? websiteFilter : 'without',
       findEmails: findEmails === true,
+      search: search && typeof search === 'object' ? { withMaps: search.withMaps !== false, withFacebook: Boolean(search.withFacebook), withLinkedIn: Boolean(search.withLinkedIn), linkedinKeyword: clean(search.linkedinKeyword, 120) } : null,
+      origin: ['leads', 'assistant'].includes(origin) ? origin : 'settings',
       status: 'pending',
       reason: '',
       round: 1,

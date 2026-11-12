@@ -345,12 +345,12 @@ const LeadRow = memo(function LeadRow({ lead: l, fresh, selected, pastView, onTo
         )}
       </td>
       <td className="row-actions">
-        {l.phone && (
+        {l.phone && onCall && (
           <button type="button" className="icon-btn call" aria-label={`Call ${l.name}`} title={`Call ${l.phone} from your phone`} onClick={() => onCall(l)}>
             <Icon name="phone" />
           </button>
         )}
-        {l.phone && (
+        {l.phone && onText && (
           <button type="button" className="icon-btn" aria-label={`Text ${l.name}`} title={`Send an SMS to ${l.phone} from your phone`} onClick={() => onText(l)}>
             <Icon name="chat" />
           </button>
@@ -575,7 +575,7 @@ export default function App({ onLock }) {
   // keeps each one's place (scroll, open chat, unsaved templates).
   const [workspace, setWorkspaceState] = useState(() => {
     try {
-      return ['leads', 'podcasts', 'outreach', 'dialer', 'numbers', 'messages', 'settings'].includes(localStorage.getItem('workspace')) ? localStorage.getItem('workspace') : 'leads';
+      return ['leads', 'podcasts', 'outreach', 'settings'].includes(localStorage.getItem('workspace')) ? localStorage.getItem('workspace') : 'leads';
     } catch {
       return 'leads';
     }
@@ -977,9 +977,10 @@ export default function App({ onLock }) {
             ['leads', 'Leads', 'inbox'],
             ['podcasts', 'Podcasts', 'mic'],
             ['outreach', 'Outreach', 'send'],
-            ['dialer', 'Dialer', 'phone'],
-            ['numbers', 'Numbers', 'users'],
-            ['messages', 'Messages', 'chat'],
+            // Dialer, Numbers and Messages are hidden for now (their code stays).
+            // ['dialer', 'Dialer', 'phone'],
+            // ['numbers', 'Numbers', 'users'],
+            // ['messages', 'Messages', 'chat'],
             ['settings', 'Settings', 'gear'],
           ].map(([id, label, icon]) => (
             <button key={id} type="button" className={workspace === id ? 'on' : ''} aria-pressed={workspace === id} aria-label={label} title={label} onClick={() => setWorkspace(id)}>
@@ -1544,8 +1545,9 @@ export default function App({ onLock }) {
                         onDelete={deleteIds}
                         onWhatsApp={onWhatsAppChanged}
                         onCompose={setComposeLead}
-                        onCall={callLead}
-                        onText={textLead}
+                        // Call and Text open the Dialer and Messages, hidden for now.
+                        onCall={null}
+                        onText={null}
                         waOpen={wa?.state === 'open'}
                         notify={notify}
                       />

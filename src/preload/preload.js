@@ -36,6 +36,7 @@ contextBridge.exposeInMainWorld('leadFinder', {
   automationGet: () => ipcRenderer.invoke('automation:get'),
   automationSet: (settings) => ipcRenderer.invoke('automation:set', settings),
   automationQuit: () => ipcRenderer.invoke('automation:quit'),
+  automationOpenSignIn: () => ipcRenderer.invoke('automation:openSignIn'),
   autopilotState: () => ipcRenderer.invoke('autopilot:state'),
   autopilotAdd: (task) => ipcRenderer.invoke('autopilot:add', task),
   autopilotRemove: (id) => ipcRenderer.invoke('autopilot:remove', String(id ?? '')),

@@ -6,7 +6,7 @@ const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, Notif
 const { LeadStore, DATE_RE, formatCategory } = require('../database/db');
 const { E164, resolvePhoneCountry, phoneCountries } = require('../database/phone');
 const { leadsToCsv } = require('../export/csv');
-const { ChromeConnection, ChromeError, ConnectCancelled, defaultUserDataDir, listProfiles } = require('../browser/chrome');
+const { ChromeConnection, ChromeError, ConnectCancelled, defaultUserDataDir, listProfiles, describeProfile, openPlain } = require('../browser/chrome');
 const { SearchSession, WEBSITE_FILTERS } = require('../browser/search-session');
 const { FacebookSession } = require('../browser/facebook-session');
 const { LinkedInSession } = require('../browser/linkedin-session');
@@ -30,6 +30,7 @@ const { Updater, fileLog } = require('./updater');
 const { Autopilot } = require('./autopilot');
 const automation = require('./automation');
 const autologon = require('./windows-autologon');
+const { Assistant } = require('./wa-assistant');
 
 const DEV_URL = process.env.VITE_DEV_SERVER_URL || '';
 const RENDERER_FILE = path.join(__dirname, '..', '..', 'dist', 'renderer', 'index.html');
@@ -527,11 +528,12 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn, raw
   }
   const websiteFilter = WEBSITE_FILTERS.has(rawWebsite) ? rawWebsite : 'without';
   const findEmails = rawFindEmails === true;
-  if (search) return { ok: false, error: search.auto ? `A continuous search is running ("${search.auto}"). Pause it in Settings first, or wait for it.` : 'A search is already running.' };
+  if (search) return { ok: false, error: 'A search is already running. Click Stop Search first.' };
   const plan = requirePlan();
   if (!plan.ok) return plan;
   const allowance = requireLeadAllowance();
   if (!allowance.ok) return allowance;
+  const sources = [...(withMaps ? ['maps'] : []), ...(withFacebook ? ['facebook'] : []), ...(withLinkedIn ? ['linkedin'] : [])];
   // Saved (or matched to an existing spelling) before the search starts.
   let category;
   try {
@@ -540,6 +542,23 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn, raw
     return { ok: false, error: `Could not save the category: ${err.message}` };
   }
 
+  // Settings > Continuous search on: the same search, country after country
+  // (Settings' countries), round after round, until Stop.
+  const cont = automationSettings().search;
+  if (cont.continuous && cont.countries.length && (withMaps || withFacebook)) {
+    // One continuous search from the Leads tab: a new one replaces it.
+    for (const t of autopilot.tasks()) {
+      if (t.origin !== 'leads') continue;
+      autopilot.stop(t.id);
+      autopilot.remove(t.id);
+    }
+    const r = autopilot.add({ keyword, category: category.name, countries: cont.countries, websiteFilter, findEmails, origin: 'leads', search: { withMaps, withFacebook, withLinkedIn, linkedinKeyword } });
+    if (!r.ok) return { ok: false, error: r.error };
+    store.setState('lastSearch', { keyword, category: category.name, linkedinKeyword, linkedinLocation, sources, state: 'running', continuous: true, startedAt: new Date().toISOString() });
+    autopilot.start();
+    sendStatus({ state: 'connecting', phase: 'connection', step: 'connecting', keyword: `${keyword} in ${cont.countries[0]}`, category: category.name, sources, message: `Continuous search: ${cont.countries.join(' → ')}, then again` });
+    return { ok: true, keyword, category, continuous: true };
+  }
   const r = launchSearch({ keyword, category, websiteFilter, findEmails, withMaps, withFacebook, withLinkedIn, linkedinKeyword, linkedinLocation });
   return { ok: r.ok, keyword: r.keyword, category: r.category };
 }
@@ -897,6 +916,13 @@ function searchDiagnostics(keyword) {
 }
 
 function stopSearch() {
+  // A continuous search from the Leads tab ends here too, between countries or during one.
+  const cont = autopilot?.tasks().filter((t) => t.origin === 'leads' && !['completed', 'failed'].includes(t.status)) || [];
+  for (const t of cont) autopilot.stop(t.id);
+  if (!search && cont.length) {
+    sendStatus({ state: 'stopped', message: 'Continuous search stopped' });
+    return { ok: true };
+  }
   if (!search) return { ok: false };
   sendStatus({ state: 'stopping', message: 'Stopping after the current step' });
   search.controller.abort();
@@ -998,17 +1024,20 @@ function initChatsAndOutreach(cipher) {
     canSend: async () => activation.active,
     nameFor: (lead) => require('../whatsapp/templates').pickName({ contactName: chatStore.chat(jidOfPhone(lead.phone))?.name, businessName: lead.name }).name,
   });
-  chats.on('incoming', (m) => outreach.onIncoming({ phone: m.phone, text: m.text }));
+  // The admin's messages are commands for the assistant, not campaign replies.
+  chats.on('incoming', (m) => assistant.onMessage({ accountId: 'primary', phone: m.phone, text: m.text }) || outreach.onIncoming({ phone: m.phone, text: m.text }));
   chats.on('manual', ({ phone }) => phone && outreach.onManualMessage(phone));
   chats.on('status', (st) => outreach.onStatus(st.id, st.status));
   // Replies and receipts on the added accounts (the first account's come through Chats).
-  waAccounts.on('incoming', (m) => m.accountId !== 'primary' && outreach.onIncoming({ phone: m.phone, text: m.text }));
+  waAccounts.on('incoming', (m) => m.accountId !== 'primary' && !assistant.onMessage({ accountId: m.accountId, phone: m.phone, text: m.text }) && outreach.onIncoming({ phone: m.phone, text: m.text }));
   waAccounts.on('status', (st) => st.accountId !== 'primary' && outreach.onStatus(st.id, st.status));
   outreach.on('change', (e) => send('outreach:state', { id: e?.id ?? null }));
   outreach.on('replied', (e) => send('outreach:event', { type: e.optOut ? 'opted_out' : 'replied', phone: e.phone }));
   outreach.on('sent', (e) => send('outreach:event', { type: 'sent', campaignId: e.campaignId, phone: e.phone, stage: e.stage, test: e.test }));
   outreach.on('failed', (e) => send('outreach:event', { type: 'failed', campaignId: e.campaignId, phone: e.phone, stage: e.stage, error: e.error, paused: e.paused }));
   outreach.init();
+  resumeAfterShutdown();
+  initAssistant();
   // Voice files that no campaign uses any more.
   try {
     audioLibrary.prune(outreach.store.campaigns().flatMap((c) => (outreach.load(c.id).config.voices || []).map((v) => v.id)));
@@ -2139,6 +2168,7 @@ app.whenReady().then(() => {
   handle('autopilot:resume', (id) => autopilot.resume(String(id)));
   handle('autopilot:stop', (id) => autopilot.stop(String(id)));
   handle('autopilot:engine', (action) => (action === 'start' ? autopilot.start() : action === 'pause' ? autopilot.pauseEngine() : action === 'stop' ? autopilot.stopEngine() : { ok: false }));
+  handle('automation:openSignIn', () => openAutomationSignIn());
   handle('automation:quit', () => {
     setImmediate(() => app.quit());
     return { ok: true };
@@ -2157,10 +2187,16 @@ app.whenReady().then(() => {
   });
 
   initAutopilot();
-  const hidden = automation.startedInBackground() && automationSettings().background;
-  createWindow({ show: !hidden });
+  // Started at sign-in: the window opens (the work is resumed in the
+  // background either way), and comes to the front when the PC is unlocked.
+  createWindow({ show: true });
   updateTray();
-  if (hidden) autoLog('started in the background');
+  if (automation.startedInBackground()) autoLog('started in the background');
+  try {
+    require('electron').powerMonitor.on('unlock-screen', () => {
+      if (automationSettings().startWithOS) showWindow();
+    });
+  } catch {}
   // Resume before the PIN when allowed (unattended computer).
   if (automationSettings().autoResume) startBackgroundWork();
   if (process.env.LEAD_FINDER_SMOKE_TEST) return smokeTest(process.env.LEAD_FINDER_SMOKE_TEST);
@@ -2255,8 +2291,9 @@ function updateTray() {
 
 // One country of a continuous search, with the existing search engine.
 const AUTO_LIMIT = !app.isPackaged && Number(process.env.LEAD_FINDER_TEST_MAX_LISTINGS) > 0 ? Number(process.env.LEAD_FINDER_TEST_MAX_LISTINGS) : 0;
-async function runAutoSearch({ task, query, signal }) {
+async function runAutoSearch({ task, country, query, signal }) {
   if (search) return { state: 'error', code: 'busy' };
+  checkAutomationSignIn();
   const plan = requirePlan();
   if (!plan.ok) return { state: 'error', code: 'plan', message: plan.error };
   const allowance = requireLeadAllowance();
@@ -2268,7 +2305,8 @@ async function runAutoSearch({ task, query, signal }) {
   } catch (err) {
     return { state: 'error', code: 'needs_user', message: `The category could not be saved: ${err.message}` };
   }
-  const r = launchSearch({ keyword: query, category, websiteFilter: task.websiteFilter, findEmails: task.findEmails, withMaps: true, auto: query, signal, limit: AUTO_LIMIT });
+  const src = task.search || { withMaps: true };
+  const r = launchSearch({ keyword: query, category, websiteFilter: task.websiteFilter, findEmails: task.findEmails, withMaps: src.withMaps !== false, withFacebook: Boolean(src.withFacebook), withLinkedIn: Boolean(src.withLinkedIn && src.linkedinKeyword), linkedinKeyword: src.linkedinKeyword || '', linkedinLocation: country, auto: query, signal, limit: AUTO_LIMIT });
   return r.promise;
 }
 
@@ -2277,6 +2315,137 @@ function online() {
   return new Promise((resolve) => {
     require('node:dns').lookup('www.google.com', (err) => resolve(!err));
   });
+}
+
+// --- WhatsApp assistant (wa-assistant.js): no screen, everything by WhatsApp ---
+
+let assistant = null;
+const ASSISTANT_KEY = 'assistant.settings';
+// "power off" shuts the computer down too, unless the admin sent "computer shutdown off".
+const assistantSettings = () => ({ admins: [], suggestions: true, shutdownComputer: true, ...(store.getState(ASSISTANT_KEY) || {}) });
+
+function liveCampaigns() {
+  if (!outreach) return [];
+  const day = new Date().toISOString().slice(0, 10);
+  return outreach.store.campaigns().map((c) => {
+    const st = outreach.load(c.id);
+    const contacts = outreach.store.contacts(c.id);
+    return { id: c.id, name: st.name, status: st.status, pauseReason: st.pauseReason, accountId: st.config.accountId || 'primary', live: !st.config.test, category: st.category, sentToday: outreach.store.recipientsOn(day, false, [c.id]), queued: contacts.filter((x) => x.state === 'queued').length };
+  });
+}
+
+function assistantStatus() {
+  const accs = waAccounts ? waAccounts.list() : [];
+  const camps = liveCampaigns().filter((c) => c.live && ['running', 'paused'].includes(c.status));
+  const busy = new Set(camps.map((c) => c.accountId));
+  const ready = accs.filter((a) => a.state === 'open');
+  const pilot = autopilot.tasks().filter((t) => !['completed', 'failed'].includes(t.status));
+  return [
+    'Lead Finder status',
+    `• WhatsApp: ${ready.length} of ${accs.length} connected, ${ready.filter((a) => !busy.has(a.id)).length} idle`,
+    `• Campaigns: ${camps.filter((c) => c.status === 'running').length} running, ${camps.filter((c) => c.status === 'paused').length} paused`,
+    `• Searches: ${search ? `running "${search.auto || lastStatus.keyword || ''}"` : 'none running now'}${pilot.length ? `; ${pilot.length} continuous` : ''}`,
+    `• Plan: ${activation.status().state === 'active' ? 'active' : activation.status().state}`,
+  ].join('\n');
+}
+
+// Campaigns paused for a shutdown start again with the app.
+function resumeAfterShutdown() {
+  for (const c of liveCampaigns()) if (c.status === 'paused' && c.pauseReason === 'shutdown') outreach.resume(c.id);
+}
+
+function initAssistant() {
+  assistant = new Assistant({
+    store,
+    log: autoLog,
+    settings: assistantSettings,
+    setSettings: (patch) => store.setState(ASSISTANT_KEY, { ...assistantSettings(), ...patch }),
+    send: (accountId, phone, text) => waAccounts.send(accountId, phone, text),
+    accounts: () => (waAccounts ? waAccounts.list().map((a) => ({ id: a.id, label: a.label, number: a.number, ready: a.state === 'open' })) : []),
+    campaigns: liveCampaigns,
+    // Categories with leads that can be messaged and no campaign ever started.
+    unusedCategories: () => {
+      if (!outreach) return [];
+      const stats = outreach.categoryStats();
+      return store
+        .listCategories()
+        .categories.map((c) => {
+          const key = String(c.id);
+          const camp = outreach.store.campaignForCategory(key);
+          const st = camp && outreach.load(camp.id);
+          const used = Boolean(camp && (outreach.store.sends({ campaignId: camp.id, test: false, limit: 1 }).length || (!st.config.test && ['running', 'paused'].includes(st.status))));
+          return { key, name: c.name, ready: stats[key]?.unseenVerified || 0, used };
+        })
+        .filter((c) => !c.used)
+        .sort((a, b) => b.ready - a.ready);
+    },
+    categoryMessage: (key) => {
+      const camp = outreach?.store.campaignForCategory(key);
+      const text = camp ? outreach.load(camp.id).config.templates?.[0]?.variations?.[0]?.text || '' : '';
+      const { DEFAULT_TEMPLATES } = require('../whatsapp/templates');
+      return text && text !== DEFAULT_TEMPLATES[0].text ? text : '';
+    },
+    startSearch: async ({ keyword, countries }) => {
+      const plan = requirePlan();
+      if (!plan.ok) return plan;
+      const cat = validateCategory(formatCategory(keyword));
+      if (cat.error) return { ok: false, error: cat.error };
+      const category = store.ensureCategory(cat.category);
+      const r = autopilot.add({ keyword, category: category.name, countries, origin: 'assistant', search: { withMaps: true } });
+      if (!r.ok) return r;
+      autopilot.start();
+      return { ok: true, category: { key: String(category.id), name: category.name } };
+    },
+    startCampaign: async ({ category, accountId, message }) => {
+      const plan = requirePlan();
+      if (!plan.ok) return plan;
+      if (!waAccounts.ready(accountId)) return { ok: false, error: 'That WhatsApp account is not connected now.' };
+      const fallback = message.replace(/\s*\{(name|business name)\}/gi, '').replace(/\s+([.,!?])/g, '$1').trim();
+      const id = outreach.categoryCampaign(category.key, category.name);
+      const cfg = outreach.configure(id, { templates: [{ text: message, fallback: /\{(name|business name)\}/i.test(message) ? fallback : '' }], test: false, accountId });
+      if (!cfg.ok) return cfg;
+      return outreach.setCategoryEnabled(category.key, category.name, true, { acknowledge: true, accountId });
+    },
+    pauseAll: async () => {
+      let count = 0;
+      for (const c of liveCampaigns()) if (c.live && c.status === 'running' && outreach.pause(c.id, 'user').ok) count++;
+      return { count };
+    },
+    resumeAll: async () => {
+      const plan = requirePlan();
+      if (!plan.ok) return { count: 0, error: plan.error };
+      let count = 0;
+      for (const c of liveCampaigns()) if (c.live && c.status === 'paused' && outreach.resume(c.id).ok) count++;
+      return { count };
+    },
+    status: assistantStatus,
+    powerOff: async () => {
+      for (const c of liveCampaigns()) if (c.live && c.status === 'running') outreach.pause(c.id, 'shutdown');
+      autoLog('power off by WhatsApp');
+      const computer = assistantSettings().shutdownComputer;
+      setTimeout(() => {
+        if (computer) shutdownComputer();
+        app.quit();
+      }, 3000);
+    },
+  });
+  // Offers for idle accounts: a few minutes after start, then every 5 minutes.
+  const tick = () => assistant.suggest().catch((err) => autoLog(`assistant: ${err.message}`));
+  setTimeout(tick, 3 * 60_000).unref();
+  setInterval(tick, 5 * 60_000).unref();
+}
+
+// The computer itself, only when the admin turned it on ("computer shutdown on").
+function shutdownComputer() {
+  // Run from source (development, tests): logged, never done.
+  if (!app.isPackaged) return autoLog('computer shutdown requested (not done: not the installed app)');
+  const { spawn } = require('node:child_process');
+  const cmd = process.platform === 'win32' ? ['shutdown', ['/s', '/t', '30', '/c', 'Lead Finder: shutdown requested by WhatsApp']] : process.platform === 'darwin' ? ['osascript', ['-e', 'tell app "System Events" to shut down']] : ['systemctl', ['poweroff']];
+  try {
+    spawn(cmd[0], cmd[1], { detached: true, stdio: 'ignore' }).unref();
+  } catch (err) {
+    autoLog(`computer shutdown failed: ${err.message}`);
+  }
 }
 
 function initAutopilot() {
@@ -2288,12 +2457,74 @@ function initAutopilot() {
     onChange: (st) => {
       send('autopilot:state', st);
       if (tray) updateTray();
+      continuousStatus(st);
     },
     timings: !app.isPackaged && process.env.LEAD_FINDER_TEST_AUTOPILOT ? JSON.parse(process.env.LEAD_FINDER_TEST_AUTOPILOT) : {},
   });
 }
 
+// The Leads tab's status line while its continuous search rests between
+// countries (during a country the search itself reports).
+let lastContinuous = '';
+function continuousStatus(st) {
+  const t = st.tasks.find((x) => x.origin === 'leads');
+  if (!t || search) return;
+  let msg = '';
+  let state = 'running';
+  if (t.status === 'waiting' || t.status === 'pending') msg = `Continuous search: ${t.reason || 'next country'}${t.nextRunAt > Date.now() ? ` at ${new Date(t.nextRunAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}. ${t.leads} new lead${t.leads === 1 ? '' : 's'} so far`;
+  else if (t.status === 'failed') {
+    state = 'error';
+    msg = `Continuous search stopped: ${t.reason}`;
+  } else return;
+  if (msg === lastContinuous) return;
+  lastContinuous = msg;
+  sendStatus({ state, phase: state === 'error' ? 'connection' : 'search', message: msg });
+}
+
+// The Google account signed in to the Lead Finder automation profile ('' if none).
+function automationAccount() {
+  try {
+    return describeProfile(AUTOMATION_PROFILE_DIR(), 'Default').account || '';
+  } catch {
+    return '';
+  }
+}
+
+// Sign-in lost in the automation profile (Google signed it out): said once.
+function checkAutomationSignIn() {
+  if (automationSettings().chrome.profile !== 'automation') return;
+  const now = automationAccount();
+  const was = store.getState('automation.account') || '';
+  if (now !== was) store.setState('automation.account', now);
+  if (was && !now) notice('needs_user', 'Sign in again', `The Lead Finder Chrome profile is no longer signed in to ${was}. Open Settings > Chrome and click "Open Chrome to sign in".`);
+}
+
+// Opens the automation profile as a plain Chrome (no debugging connection,
+// so Google allows signing in) on Google's sign-in page. The user signs in
+// and closes it; the next search reopens the same profile, signed in.
+// Lead Finder never types or stores the password.
+async function openAutomationSignIn() {
+  if (automationSettings().chrome.profile !== 'automation') return { ok: false, error: 'Choose the Lead Finder automation profile first.' };
+  if (search) return { ok: false, error: 'Stop the current search first.' };
+  try {
+    await chrome.disconnect();
+    await openPlain(AUTOMATION_PROFILE_DIR(), 'https://accounts.google.com/ServiceLogin?continue=https://www.google.com/maps');
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
 function setAutomation(raw) {
+  // The WhatsApp admin: the number the assistant talks to (digits with country code).
+  if (raw && typeof raw.adminNumber === 'string') {
+    const n = raw.adminNumber.replace(/\D/g, '');
+    if (n && (n.length < 8 || n.length > 15)) return { ok: false, error: 'Enter the WhatsApp number with its country code, for example 923001234567.', settings: automationView() };
+    store.setState(ASSISTANT_KEY, { ...assistantSettings(), admins: n ? [n] : [] });
+    autoLog(`assistant: admin number ${n ? 'set' : 'removed'}`);
+    if (n && assistant) setTimeout(() => assistant.suggest().catch(() => {}), 5000);
+    return { ok: true, settings: automationView() };
+  }
   const before = automationSettings();
   const next = automation.validateSettings(raw, before);
   if (next.startWithOS !== before.startWithOS || (next.startWithOS && !automation.startsWithOS(app))) {
@@ -2316,6 +2547,8 @@ function automationView() {
     ...s,
     platform: process.platform,
     osUser: require('node:os').userInfo().username,
+    adminNumber: (assistantSettings().admins || [])[0] || '',
+    automationAccount: automationAccount(),
     startsWithOS: automation.startsWithOS(app),
     automationProfileDir: AUTOMATION_PROFILE_DIR(),
     profiles: (() => {

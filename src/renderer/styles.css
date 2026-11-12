@@ -2317,3 +2317,9 @@ button.or-badge { cursor: pointer; }
   .st-tabs button { flex: none; }
   .st-tabs button span:not(.st-count) { display: inline; }
 }
+.st-inline { display: flex; gap: 6px; align-items: center; }
+.st-inline input { width: 170px; height: 32px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: var(--r); background: var(--surface); color: var(--text); font: 500 13px var(--mono); }
+.st-inline input:focus { outline: none; border-color: var(--accent); box-shadow: var(--focus); }
+.st-countries-card { margin-top: 12px; }
+.st-countries-card .st-countries-head { margin-top: 0; }
+.st-countries-card + .st-group { margin-top: 12px; }

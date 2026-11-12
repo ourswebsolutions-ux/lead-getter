@@ -118,6 +118,20 @@ class AppLock {
     return { ok: false, error: 'Incorrect PIN.', retryAfterMs: Math.max(0, lockedUntil - this.now()), attemptsLeft: Math.max(0, FREE_ATTEMPTS - failures) };
   }
 
+  // The PIN checked for something other than unlocking (the WhatsApp admin),
+  // under the same limiter; the app's lock state does not change.
+  checkPin(pin) {
+    const a = this.attempts();
+    if (a.lockedUntil > this.now()) return { ok: false, error: 'Too many wrong PINs. Please wait and try again.' };
+    if (!PIN_RE.test(String(pin))) return { ok: false, error: 'Send "admin" and your four-digit Lead Finder PIN.' };
+    if (this.verify(pin)) {
+      this.store.setState('app_lock_attempts', { failures: 0, lockedUntil: 0 });
+      return { ok: true };
+    }
+    this.recordFailure();
+    return { ok: false, error: 'That is not the Lead Finder PIN.' };
+  }
+
   // 5 free tries, then 30 s, 60 s, 2 min … up to 15 min between tries.
   recordFailure() {
     const failures = this.attempts().failures + 1;

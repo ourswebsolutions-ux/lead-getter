@@ -227,6 +227,20 @@ Open it from the lock icon in the header, then **Settings**. Four short sections
 
 **WhatsApp campaigns** keep their existing restart handling: each message is recorded before it is sent, so a restart never sends it twice.
 
+## WhatsApp assistant (manage Lead Finder by WhatsApp)
+
+No screen of its own. Enter the admin's WhatsApp number (with country code) in **Settings > Background > Admin WhatsApp number**. Only that number's messages are commands; everyone else's are ordinary messages.
+- **Free accounts:** every 5 minutes it looks for connected WhatsApp accounts without a campaign and messages the admin: first a lead category that has never had a campaign ("I found 12 leads in Shoes Shops… run this campaign?"), then a new search ("WhatsApp 3 is available… start a new lead generation campaign?"). It asks only what is missing: the account (suggested when only one is free), keyword, countries, the message (a category's saved message is offered). Nothing is sent to leads until the admin confirms the summary, which includes WhatsApp's rules on automated messages. No moves on to the next unused category; the same question is not asked again for a day (a free account: six hours).
+- **What it starts:** a continuous search (country after country) and the category's campaign, live, on the chosen account. Sending follows the campaign engine's rules: one contact at a time, the interval and daily limit, quiet hours, nobody messaged twice by any campaign, opt-outs never messaged.
+- **Commands:** `status`, `campaigns`, `accounts`, `pause`, `resume`, `power off` (asks first; campaigns are paused and continue at the next start; the computer shuts down too, unless `computer shutdown off`), `suggestions on/off`, `admin off`, `help`, `cancel`. Replies: yes/no in English or Roman Urdu (haan, nahi, ji, theek hai…); anything unclear is asked again, never guessed. A question expires after 30 minutes. The conversation is saved, so a restart does not lose it. Every command is logged in `automation.log`.
+- It understands replies by rules, not by a paid AI service.
+
+**Chrome sign-in (automation profile):** Google refuses to sign in a Chrome that another program controls ("This browser or app may not be secure"). **Settings > Chrome > Open Chrome to sign in** closes Lead Finder's connection and opens the same profile as a normal Chrome on Google's sign-in page: sign in, close it, and every later search uses that sign-in. Lead Finder never types or stores the password, and says so if Google signs the profile out.
+
+**Continuous search** is the Leads tab's search: turn it on in **Settings > Continuous search** and choose the countries; Start Search then goes country after country, round after round, until Stop Search.
+
+Dialer, Numbers and Messages are hidden for now.
+
 ## How a search works
 
 1. Types your keyword into Google Maps' search box in a new tab and runs the search.
