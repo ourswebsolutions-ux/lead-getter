@@ -106,7 +106,8 @@ jobs:
           app="/tmp/lf/Lead Finder.app/Contents/MacOS/Lead Finder"
           LEAD_FINDER_USER_DATA="$RUNNER_TEMP/ud1" LEAD_FINDER_SMOKE_TEST="$RUNNER_TEMP/s1.json" "$app" || true
           node scripts/ci-check-smoke.js "$RUNNER_TEMP/s1.json"
-          hdiutil detach /tmp/lf
+          # The app's last processes may still hold the image for a moment.
+          hdiutil detach /tmp/lf || { sleep 5; hdiutil detach -force /tmp/lf; }
 
       - uses: actions/upload-artifact@v4
         with:
