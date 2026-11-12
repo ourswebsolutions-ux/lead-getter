@@ -54,6 +54,8 @@ test('Settings: automation switches, continuous searches, background close', asy
   assert.equal(await panel.getByRole('switch', { name: 'Background engine' }).getAttribute('aria-checked'), 'true');
   await panel.getByRole('switch', { name: 'Auto resume after restart' }).click();
   await nav.getByRole('button', { name: 'Chrome' }).click();
+  await panel.getByText(/Why Chrome asks/).waitFor();
+  if (shots) await win.screenshot({ path: path.join(shots, 'settings-chrome-allow.png') });
   await panel.getByRole('radio', { name: /Lead Finder automation profile/ }).click();
   await win.waitForFunction(() => document.querySelector('[role="radio"][aria-checked="true"]')?.textContent.includes('automation profile'));
   await panel.getByText(/chrome-automation/).waitFor();

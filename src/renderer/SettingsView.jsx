@@ -152,25 +152,29 @@ export default function SettingsView({ hidden, notify, categories = [] }) {
 
   return (
     <section className="settings-page" hidden={hidden} aria-label="Settings">
-      <nav className="st-nav" aria-label="Settings sections">
-        <div className="st-nav-title">
-          <Icon name="gear" size={16} /> Settings
+      <header className="st-hero">
+        <span className="st-hero-mark" aria-hidden="true">
+          <Icon name="gear" size={20} />
+        </span>
+        <div className="st-hero-text">
+          <h1>Settings</h1>
+          <p>Automation, background work and recovery</p>
         </div>
+        {s && (
+          <div className={`st-readiness ${unattended ? 'ok' : ''}`} title={unattended ? 'Keeps working after restarts, with nobody at the computer.' : 'For unattended use: Background engine and Auto resume on, and the Lead Finder automation profile in Chrome.'}>
+            <span className="st-dot" />
+            <span>{unattended ? 'Ready for unattended use' : 'Attended use'}</span>
+          </div>
+        )}
+      </header>
+
+      <nav className="st-tabs" aria-label="Settings sections">
         {sections.map(([id, icon, label]) => (
           <button key={id} type="button" className={active === id ? 'on' : ''} aria-current={active === id ? 'true' : undefined} onClick={() => go(id)}>
             <Icon name={icon} size={15} /> <span>{label}</span>
             {id === 'searches' && pilot.tasks.length > 0 && <span className={`st-count ${pilot.engine === 'running' ? 'live' : ''}`}>{pilot.tasks.length}</span>}
           </button>
         ))}
-        {s && (
-          <div className={`st-readiness ${unattended ? 'ok' : ''}`}>
-            <span className="st-dot" />
-            <div>
-              <strong>{unattended ? 'Ready for unattended use' : 'Attended use'}</strong>
-              <span>{unattended ? 'Keeps working after restarts, with nobody at the computer.' : 'Turn on Background engine and Auto resume, and choose the automation profile in Chrome, to run unattended.'}</span>
-            </div>
-          </div>
-        )}
       </nav>
 
       <div className="st-main" ref={scroller}>
@@ -272,6 +276,17 @@ export default function SettingsView({ hidden, notify, categories = [] }) {
                   <span>A separate Chrome folder that Lead Finder can start and reconnect on its own. Sign in there once if needed. Your everyday Chrome is not touched.</span>
                 </button>
               </div>
+              {s.chrome.profile !== 'automation' && (
+                <div className="st-callout info">
+                  <Icon name="shield" size={15} />
+                  <p>
+                    <strong>Why Chrome asks “Allow remote debugging”.</strong> Chrome asks this itself whenever a program connects to your everyday profile, to protect it from malware, and it does not let any program answer for you. The Lead Finder automation profile never asks, so searches can start and recover on their own.
+                  </p>
+                  <button type="button" className="btn btn-primary btn-sm" onClick={() => chrome({ profile: 'automation' })}>
+                    Use automation profile
+                  </button>
+                </div>
+              )}
               <div className="st-group">
                 {s.chrome.profile !== 'automation' && (
                   <Row icon="users" label="Profile" help="Used when Lead Finder starts Chrome">

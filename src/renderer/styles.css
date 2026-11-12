@@ -2287,3 +2287,33 @@ button.or-badge { cursor: pointer; }
 .st-countries { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 6px; }
 .st-country { height: 30px; justify-content: flex-start; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .st-countries-head { margin-top: 14px; }
+
+
+/* Settings: page header and sub-tabs */
+.settings-page { display: flex; flex-direction: column; gap: 0; max-width: 980px; padding: 26px 32px 0; }
+.st-hero { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
+.st-hero-mark { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 12px; background: linear-gradient(145deg, var(--accent), color-mix(in srgb, var(--accent) 70%, #000)); color: var(--accent-text); box-shadow: 0 6px 18px -8px color-mix(in srgb, var(--accent) 70%, transparent), inset 0 1px 0 rgb(255 255 255 / 0.18); }
+.st-hero-text { flex: 1; min-width: 0; }
+.st-hero h1 { margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -0.02em; }
+.st-hero p { margin: 2px 0 0; font-size: 13px; color: var(--muted); }
+.st-readiness { display: inline-flex; align-items: center; gap: 8px; margin: 0; padding: 7px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); box-shadow: var(--shadow-sm); font-size: 12.5px; font-weight: 500; color: var(--text-2); }
+.st-readiness.ok { border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent); }
+.st-dot { margin: 0; }
+.st-tabs { display: flex; gap: 2px; padding: 4px; border: 1px solid var(--line); border-radius: 12px; background: var(--sunken); overflow-x: auto; scrollbar-width: none; }
+.st-tabs::-webkit-scrollbar { display: none; }
+.st-tabs button { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 36px; padding: 0 14px; border: 0; border-radius: 9px; background: none; color: var(--text-2); font: inherit; font-size: 13px; white-space: nowrap; cursor: pointer; transition: background var(--fast), color var(--fast), box-shadow var(--fast); }
+.st-tabs button:hover { color: var(--text); background: color-mix(in srgb, var(--surface) 55%, transparent); }
+.st-tabs button.on { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: var(--shadow-sm), 0 0 0 1px var(--line); }
+.st-tabs button.on .icon { color: var(--accent); }
+.st-tabs button:focus-visible { outline: none; box-shadow: var(--focus); }
+.st-tabs .st-count { margin-left: 2px; }
+.st-main { flex: 1; padding: 22px 2px 28px; }
+.st-callout.info { align-items: center; margin: 12px 0 0; background: color-mix(in srgb, var(--accent-soft) 70%, var(--surface)); border: 1px solid var(--accent-line); color: var(--accent); }
+.st-callout.info p { flex: 1; }
+.st-callout.info .btn { flex: none; }
+.st-callout.info + .st-group { margin-top: 12px; }
+@media (max-width: 900px) {
+  .settings-page { padding: 16px 16px 0; }
+  .st-tabs button { flex: none; }
+  .st-tabs button span:not(.st-count) { display: inline; }
+}
