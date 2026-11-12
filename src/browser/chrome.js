@@ -618,7 +618,9 @@ class ChromeConnection {
   }
 
   async attach(endpoint, expectedUserDataDir, signal) {
-    if (endpoint.via === 'port-file') this.onStatus('Connecting to Chrome. If Chrome asks to allow remote debugging, click Allow');
+    // Only the everyday Chrome folder asks; a folder of its own never does.
+    if (endpoint.via === 'port-file' && samePath(expectedUserDataDir, defaultUserDataDir())) this.onStatus('Connecting to Chrome. If Chrome asks to allow remote debugging, click Allow');
+    else this.onStatus('Connecting to Chrome');
     let browser;
     try {
       browser = await Promise.race([
