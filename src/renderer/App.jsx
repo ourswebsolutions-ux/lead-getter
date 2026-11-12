@@ -14,7 +14,7 @@ import Composer from './Composer.jsx';
 import { currentTheme, setTheme } from './theme.js';
 import Activation, { planNeeded, planPill, statusLine } from './Activation.jsx';
 import { ChangePin } from './LockScreen.jsx';
-import AutomationSettings from './AutomationSettings.jsx';
+import SettingsView from './SettingsView.jsx';
 
 const ROWS_PER_PAGE = 500;
 
@@ -571,12 +571,11 @@ export default function App({ onLock }) {
   const [plansOpen, setPlansOpen] = useState(null); // null | { notice }
   const [quota, setQuota] = useState(null); // { limit, used, remaining, reached } of today
   const [changePin, setChangePin] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   // Leads | Chats | Outreach. Views stay mounted once opened, so switching
   // keeps each one's place (scroll, open chat, unsaved templates).
   const [workspace, setWorkspaceState] = useState(() => {
     try {
-      return ['leads', 'podcasts', 'outreach', 'dialer', 'numbers', 'messages'].includes(localStorage.getItem('workspace')) ? localStorage.getItem('workspace') : 'leads';
+      return ['leads', 'podcasts', 'outreach', 'dialer', 'numbers', 'messages', 'settings'].includes(localStorage.getItem('workspace')) ? localStorage.getItem('workspace') : 'leads';
     } catch {
       return 'leads';
     }
@@ -981,6 +980,7 @@ export default function App({ onLock }) {
             ['dialer', 'Dialer', 'phone'],
             ['numbers', 'Numbers', 'users'],
             ['messages', 'Messages', 'chat'],
+            ['settings', 'Settings', 'gear'],
           ].map(([id, label, icon]) => (
             <button key={id} type="button" className={workspace === id ? 'on' : ''} aria-pressed={workspace === id} aria-label={label} title={label} onClick={() => setWorkspace(id)}>
               <Icon name={icon} size={14} /> <span className="ws-label">{label}</span>
@@ -1002,13 +1002,14 @@ export default function App({ onLock }) {
         })()}
         <WhatsAppPanel wa={wa} />
         <ThemeToggle />
-        <LockMenu onLock={onLock} onChangePin={() => setChangePin(true)} onSettings={() => setSettingsOpen(true)} />
+        <LockMenu onLock={onLock} onChangePin={() => setChangePin(true)} onSettings={() => setWorkspace('settings')} />
       </header>
 
       {visited.has('podcasts') && <PodcastsView notify={notify} hidden={workspace !== 'podcasts'} categories={catData.categories} />}
       {visited.has('outreach') && <OutreachView wa={wa} notify={notify} hidden={workspace !== 'outreach'} />}
       {visited.has('dialer') && <DialerView notify={notify} hidden={workspace !== 'dialer'} prefill={dialFill} />}
       {visited.has('numbers') && <NumbersView notify={notify} hidden={workspace !== 'numbers'} onCall={callLead} onMessage={openMessages} />}
+      {visited.has('settings') && <SettingsView notify={notify} hidden={workspace !== 'settings'} categories={catData.categories} />}
       {visited.has('messages') && <MessagesView notify={notify} hidden={workspace !== 'messages'} prefill={smsFill} onCall={callContact} />}
       <main className="content" hidden={workspace !== 'leads'}>
         <section className="panel search-panel">
@@ -1585,7 +1586,6 @@ export default function App({ onLock }) {
       {summary && !active && <Celebration summary={summary} onClose={() => setSummary(null)} />}
       {plansOpen && <Activation status={plan} notice={plansOpen.notice} upgrade={plansOpen.upgrade} notify={notify} onClose={() => setPlansOpen(null)} />}
       {changePin && <ChangePin notify={notify} onClose={() => setChangePin(false)} />}
-      {settingsOpen && <AutomationSettings notify={notify} categories={catData.categories} onClose={() => setSettingsOpen(false)} />}
       {composeLead && <Composer lead={composeLead} connected={wa?.state === 'open'} notify={notify} onClose={() => setComposeLead(null)} />}
 
       <div className="toasts" aria-live="polite">

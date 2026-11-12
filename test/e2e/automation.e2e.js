@@ -31,12 +31,20 @@ test('Settings: automation switches, continuous searches, background close', asy
   win.on('pageerror', (e) => errors.push(e.message));
   await unlock(win, '1357');
 
+  // Its own page in the top bar (also reachable from the lock menu).
   await win.getByRole('button', { name: 'Security' }).click();
   await win.getByRole('menuitem', { name: 'Settings' }).click();
-  const panel = win.getByRole('dialog', { name: 'Settings' });
+  const panel = win.getByRole('region', { name: 'Settings' });
   await panel.waitFor();
-  for (const name of ['Background', 'Chrome Automation', 'Search Automation', 'CAPTCHA Handling']) assert.equal(await panel.getByRole('region', { name }).count(), 1, name);
-  assert.equal(await panel.getByText('Windows Auto Login').count(), 0, 'Windows only');
+  assert.equal(await win.getByRole('button', { name: 'Settings', pressed: true }).count(), 1, 'the Settings tab is selected');
+  // One section at a time, chosen in the section menu.
+  const nav = panel.getByRole('navigation', { name: 'Settings sections' });
+  for (const name of ['Chrome', 'Continuous search', 'New search', 'CAPTCHA', 'Background']) {
+    await nav.getByRole('button', { name }).click();
+    await panel.getByRole('region', { name: name === 'New search' ? 'New continuous search' : name }).waitFor();
+  }
+  assert.equal(await panel.getByText('Windows sign-in').count(), 0, 'Windows only');
+  if (shots) await win.screenshot({ path: path.join(shots, 'settings-top.png') });
 
   // Start with the computer: written as an autostart entry, and it turns the
   // background engine on.
@@ -45,19 +53,25 @@ test('Settings: automation switches, continuous searches, background close', asy
   assert.match(fs.readFileSync(autostart, 'utf8'), /Exec=".*" --background/);
   assert.equal(await panel.getByRole('switch', { name: 'Background engine' }).getAttribute('aria-checked'), 'true');
   await panel.getByRole('switch', { name: 'Auto resume after restart' }).click();
-  await panel.getByRole('combobox', { name: 'Chrome profile' }).selectOption('automation');
-  await win.getByText(/Lead Finder’s own Chrome folder/).waitFor();
+  await nav.getByRole('button', { name: 'Chrome' }).click();
+  await panel.getByRole('radio', { name: /Lead Finder automation profile/ }).click();
+  await win.waitForFunction(() => document.querySelector('[role="radio"][aria-checked="true"]')?.textContent.includes('automation profile'));
+  await panel.getByText(/chrome-automation/).waitFor();
+  await panel.getByText('Ready for unattended use').waitFor();
 
   // A continuous search: Chrome is not installed here, which only the user
   // can fix, so it stops with the reason instead of retrying.
+  if (shots) await win.screenshot({ path: path.join(shots, 'settings-chrome.png') });
+  await nav.getByRole('button', { name: 'New search' }).click();
   await panel.getByRole('textbox', { name: 'Continuous search keyword' }).fill('Shoes Shop');
   await panel.getByLabel('Continuous search category').fill('Shoes');
   const start = panel.getByRole('button', { name: 'Start continuous search' });
   assert.equal(await start.isDisabled(), true, 'needs a country');
   await panel.getByRole('button', { name: 'Pakistan' }).click();
   await panel.getByRole('button', { name: 'UAE' }).click();
+  if (shots) await win.screenshot({ path: path.join(shots, 'settings-new.png') });
   await start.click();
-  await panel.getByText('Shoes Shop', { exact: true }).waitFor();
+  await panel.getByText('Shoes Shop', { exact: true }).waitFor(); // back on the list of searches
   let t1 = null;
   for (let i = 0; i < 60 && t1?.status !== 'failed'; i++) {
     await new Promise((r) => setTimeout(r, 1000));
@@ -66,10 +80,15 @@ test('Settings: automation switches, continuous searches, background close', asy
   assert.equal(t1.status, 'failed');
   assert.match(t1.reason, /Chrome is not installed/);
   await panel.getByText('Needs attention').waitFor();
-  if (shots) await win.screenshot({ path: path.join(shots, 'settings-automation.png') });
+  if (shots) {
+    await win.screenshot({ path: path.join(shots, 'settings-search.png') });
+    await win.evaluate(() => document.documentElement.setAttribute('data-theme', 'dark'));
+    await new Promise((r) => setTimeout(r, 700)); // colours fade in
+    await win.screenshot({ path: path.join(shots, 'settings-search-dark.png') });
+    await win.evaluate(() => document.documentElement.removeAttribute('data-theme'));
+  }
   await panel.getByRole('button', { name: 'Stop Shoes Shop' }).click();
   await panel.getByText('Stopped', { exact: true }).first().waitFor();
-  await panel.getByRole('button', { name: 'Done' }).click();
 
   // Closing the window keeps the app running.
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close()); // the window's X button
