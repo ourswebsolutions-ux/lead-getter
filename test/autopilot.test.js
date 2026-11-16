@@ -21,33 +21,79 @@ const until = async (fn, ms = 3000) => {
   }
 };
 
-test('countries one after another, then a new round; leads counted; progress saved', async () => {
+test('countries one after another, then the search is complete: never started again by itself', async () => {
   const queries = [];
-  const { ap, advance, notes, store } = setup(async ({ query }) => (queries.push(query), { state: 'done', newLeads: 2 }));
+  const done = [];
+  const store = new LeadStore(':memory:');
+  let t = 1_000_000;
+  const notes = [];
+  const ap = new Autopilot({ store, now: () => t, timings, notify: (kind) => notes.push(kind), onDone: (task) => done.push(task), runSearch: async ({ query }) => (queries.push(query), { state: 'done', newLeads: 2, processed: 10, listed: 12, exhausted: true }) });
   assert.equal(ap.add({ keyword: ' Shoes  Shop ', category: 'Shoes', countries: ['Pakistan', 'UAE', 'Pakistan', 'x<script>'] }).ok, true);
   ap.start();
-  await until(() => queries.length === 1);
-  await until(() => ap.tasks()[0].status === 'waiting');
+  await until(() => queries.length === 1 && ap.tasks()[0].status === 'waiting');
   assert.deepEqual(ap.tasks()[0].countries, ['Pakistan', 'UAE'], 'duplicates and invalid names left out');
-  assert.equal(ap.tasks()[0].index, 1);
-  advance(1000);
+  t += 1000;
   ap.kick();
-  await until(() => queries.length === 2 && ap.tasks()[0].status === 'waiting');
-  const t = ap.tasks()[0];
+  await until(() => ap.tasks()[0].status === 'completed');
+  const task = ap.tasks()[0];
   assert.deepEqual(queries, ['Shoes Shop in Pakistan', 'Shoes Shop in UAE']);
-  assert.deepEqual([t.round, t.index, t.leads], [2, 0, 4], 'a new round; a country is never "finished for good"');
-  assert.match(t.reason, /Round 1 finished/);
-  advance(4999);
+  assert.deepEqual([task.leads, task.processed, task.listed, task.exhausted], [4, 20, 24, true]);
+  assert.equal(done.length, 1, 'the admin is told once');
+  t += 10 * 3600_000;
   ap.kick();
-  await new Promise((r) => setTimeout(r, 30));
-  assert.equal(queries.length, 2, 'the next round waits');
-  advance(1);
-  ap.kick();
-  await until(() => queries.length === 3);
-  assert.equal(queries[2], 'Shoes Shop in Pakistan');
-  assert.ok(notes.some((n) => n.kind === 'country') && notes.some((n) => n.kind === 'leads'));
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(queries.length, 2, 'nothing starts again by itself');
+  assert.ok(notes.includes('done'));
   await ap.stopEngine();
-  assert.equal(store.getState('autopilot.engine').state, 'stopped');
+});
+
+test('Stop: the running search ends now and nothing else starts; the pool waits until a search is chosen', async () => {
+  const runs = [];
+  const { ap } = setup(({ query, signal }) => {
+    runs.push(query);
+    return new Promise((resolve) => signal.addEventListener('abort', () => resolve({ state: 'stopped' })));
+  });
+  const a = ap.add({ keyword: 'Shoes Shop', category: 'Shoes', countries: ['Pakistan', 'UAE'] }).task;
+  ap.add({ keyword: 'Bakery', category: 'Food', countries: ['Qatar'] });
+  const pooled = ap.add({ keyword: 'Fit Out Companies', category: 'Construction', countries: ['UAE'], queued: true }).task;
+  ap.start();
+  await until(() => runs.length === 1);
+  assert.equal(ap.active().id, a.id);
+  assert.match(ap.activate(pooled.id).error, /is running\. Stop it first/, 'one search at a time');
+  assert.equal(ap.stopAll().count, 2);
+  await until(() => !ap.current);
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(runs.length, 1, 'no other search started after Stop');
+  assert.ok(ap.tasks().filter((x) => x.id !== pooled.id).every((x) => x.status === 'completed'));
+  assert.equal(ap.tasks().find((x) => x.id === pooled.id).status, 'queued', 'the pool is kept');
+  assert.equal(ap.active(), null);
+  assert.equal(ap.activate(pooled.id).ok, true);
+  await until(() => runs.length === 2);
+  assert.equal(runs[1], 'Fit Out Companies in UAE');
+  await ap.stopEngine();
+});
+
+test('Pool order, hold, and each business counted once across a stop', async () => {
+  let call = 0;
+  const { ap } = setup(async () => (++call === 1 ? { state: 'stopped', processed: 30, listed: 50 } : { state: 'done', processed: 45, listed: 60, newLeads: 5, exhausted: true }));
+  const x = ap.add({ keyword: 'Alpha', category: 'Cat', countries: ['UAE'], queued: true }).task;
+  const y = ap.add({ keyword: 'Beta', category: 'Cat', countries: ['UAE'], queued: true }).task;
+  const z = ap.add({ keyword: 'Delta', category: 'Cat', countries: ['UAE'], queued: true }).task;
+  ap.move(z.id, 1);
+  assert.deepEqual(ap.pool().map((t) => t.keyword), ['Delta', 'Alpha', 'Beta']);
+  ap.hold(y.id);
+  assert.equal(ap.pool().length, 3, 'held searches stay in the pool');
+  ap.start();
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(call, 0, 'queued searches never start by themselves');
+  // Interrupted after 30 checked, searched again (45 checked, the same 30
+  // among them), then done: each business counted once.
+  ap.activate(x.id);
+  await until(() => ap.tasks().find((t) => t.id === x.id).status === 'completed');
+  assert.equal(call, 2);
+  const t = ap.tasks().find((t2) => t2.id === x.id);
+  assert.deepEqual([t.processed, t.listed, t.leads], [45, 60, 5]);
+  await ap.stopEngine();
 });
 
 test('a crash during a country: the next start searches that country again, from the saved place', async () => {

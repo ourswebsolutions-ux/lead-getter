@@ -80,8 +80,8 @@ test('WhatsApp assistant: admin from Settings, unused category on WhatsApp, comm
   // Commands.
   assert.match(await admin('campaigns', /Campaigns:/), /Shoes Shops.*running/);
   assert.match(await admin('accounts', /WhatsApp accounts:/), /running a campaign/);
-  assert.match(await admin('pause', /Paused 1 campaign/), /resume/);
-  assert.match(await admin('resume', /Resumed 1 campaign/), /Resumed/);
+  assert.match(await admin('pause campaigns', /Paused 1 campaign/), /resume campaigns/);
+  assert.match(await admin('resume campaigns', /Resumed 1 campaign/), /Resumed/);
   assert.match(await admin('status', /Lead Finder status/), /Campaigns: 1 running/);
   // Another number: ignored.
   const before = toAdmin().length;

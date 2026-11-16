@@ -150,6 +150,7 @@ function send(channel, payload) {
 
 function sendStatus(status) {
   if (status.state || status.message) noticeFromStatus(status);
+  sendLiveCounts();
   lastStatus = { ...lastStatus, ...status };
   if (status.state && !('errorCode' in status)) lastStatus.errorCode = null;
   send('search:status', lastStatus);
@@ -528,7 +529,7 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn, raw
   }
   const websiteFilter = WEBSITE_FILTERS.has(rawWebsite) ? rawWebsite : 'without';
   const findEmails = rawFindEmails === true;
-  if (search) return { ok: false, error: 'A search is already running. Click Stop Search first.' };
+  if (search || autopilot?.active()) return { ok: false, error: `A search is already running${autopilot?.active() ? ` ("${autopilot.active().keyword}")` : ''}. Click Stop Search first.` };
   const plan = requirePlan();
   if (!plan.ok) return plan;
   const allowance = requireLeadAllowance();
@@ -546,12 +547,6 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn, raw
   // (Settings' countries), round after round, until Stop.
   const cont = automationSettings().search;
   if (cont.continuous && cont.countries.length && (withMaps || withFacebook)) {
-    // One continuous search from the Leads tab: a new one replaces it.
-    for (const t of autopilot.tasks()) {
-      if (t.origin !== 'leads') continue;
-      autopilot.stop(t.id);
-      autopilot.remove(t.id);
-    }
     const r = autopilot.add({ keyword, category: category.name, countries: cont.countries, websiteFilter, findEmails, origin: 'leads', search: { withMaps, withFacebook, withLinkedIn, linkedinKeyword } });
     if (!r.ok) return { ok: false, error: r.error };
     store.setState('lastSearch', { keyword, category: category.name, linkedinKeyword, linkedinLocation, sources, state: 'running', continuous: true, startedAt: new Date().toISOString() });
@@ -573,6 +568,7 @@ function launchSearch({ keyword, category, websiteFilter, findEmails, withMaps, 
   signal?.addEventListener('abort', () => controller.abort(), { once: true });
   search = { controller, auto };
   let outcome = { state: 'error', code: 'unknown', message: '' };
+  let mapsSession = null; // its listed results and whether it reached their end
   // Remembered so a search cut short by a crash can be resumed.
   store.setState('lastSearch', { keyword, category: category.name, linkedinKeyword, linkedinLocation, sources, state: 'running', startedAt: new Date().toISOString() });
   interrupted = null;
@@ -647,7 +643,7 @@ function launchSearch({ keyword, category, websiteFilter, findEmails, withMaps, 
           if (leadQuota) send('quota:state', leadQuota.status());
           verifier?.poke(); // check the new number on WhatsApp in the background
         },
-        createMaps: (emit) => new SearchSession({ keyword, categoryId: category.id, websiteFilter, findEmails, allow: findEmails ? robotsChecker({ signal: controller.signal }) : null, store, signal: controller.signal, pages, recovery: recoveryFor(MAPS_TABS), emit, limit }),
+        createMaps: (emit) => (mapsSession = search.maps = new SearchSession({ keyword, categoryId: category.id, websiteFilter, findEmails, allow: findEmails ? robotsChecker({ signal: controller.signal }) : null, store, signal: controller.signal, pages, recovery: recoveryFor(MAPS_TABS), emit, limit })),
         createFacebook: (emit) =>
           new FacebookSession({
             keyword,
@@ -683,7 +679,7 @@ function launchSearch({ keyword, category, websiteFilter, findEmails, withMaps, 
             emit,
           }),
       });
-      outcome = searchOutcome(stats);
+      outcome = { ...searchOutcome(stats), processed: stats?.processed || 0, listed: mapsSession?.listed || 0, exhausted: Boolean(mapsSession?.exhausted || mapsSession?.noResults) };
     } catch (err) {
       if (err instanceof ConnectCancelled) {
         sendStatus({ state: 'stopped', message: 'Search stopped' });
@@ -915,16 +911,18 @@ function searchDiagnostics(keyword) {
   return (record) => diagLog({ keyword, ...record });
 }
 
+// Stop, from the Leads tab or WhatsApp: the running search is cancelled now,
+// and no other search starts after it (searches waiting their turn are
+// stopped too; the pool keeps its searches until they are chosen).
 function stopSearch() {
-  // A continuous search from the Leads tab ends here too, between countries or during one.
-  const cont = autopilot?.tasks().filter((t) => t.origin === 'leads' && !['completed', 'failed'].includes(t.status)) || [];
-  for (const t of cont) autopilot.stop(t.id);
-  if (!search && cont.length) {
-    sendStatus({ state: 'stopped', message: 'Continuous search stopped' });
+  const r = autopilot ? autopilot.stopAll() : { count: 0 };
+  lastContinuous = '';
+  if (!search) {
+    if (!r.count) return { ok: false };
+    sendStatus({ state: 'stopped', message: 'Search stopped' });
     return { ok: true };
   }
-  if (!search) return { ok: false };
-  sendStatus({ state: 'stopping', message: 'Stopping after the current step' });
+  sendStatus({ state: 'stopping', message: 'Stopping now' });
   search.controller.abort();
   return { ok: true };
 }
@@ -2161,7 +2159,13 @@ app.whenReady().then(() => {
   // Settings > Automation.
   handle('automation:get', () => automationView());
   handle('automation:set', (raw) => setAutomation(raw));
-  handle('autopilot:state', () => autopilot.state());
+  handle('autopilot:state', () => autopilotView());
+  handle('autopilot:activate', (id) => {
+    if (search && !autopilot.active()) return { ok: false, error: 'A search is running. Click Stop Search first.' };
+    const plan = requirePlan();
+    return plan.ok ? autopilot.activate(String(id)) : plan;
+  });
+  handle('autopilot:move', (id, to) => autopilot.move(String(id), Number(to) || 1));
   handle('autopilot:add', (raw) => autopilot.add(raw || {}));
   handle('autopilot:remove', (id) => autopilot.remove(String(id)));
   handle('autopilot:pause', (id) => autopilot.pause(String(id)));
@@ -2322,7 +2326,29 @@ function online() {
 let assistant = null;
 const ASSISTANT_KEY = 'assistant.settings';
 // "power off" shuts the computer down too, unless the admin sent "computer shutdown off".
-const assistantSettings = () => ({ admins: [], suggestions: true, shutdownComputer: true, ...(store.getState(ASSISTANT_KEY) || {}) });
+// poolAuto: when a search completes, the pool's next one starts by itself (off: the admin is asked).
+const assistantSettings = () => ({ admins: [], suggestions: true, shutdownComputer: true, poolAuto: false, ...(store.getState(ASSISTANT_KEY) || {}) });
+
+// A search set up by WhatsApp: started now (when nothing else runs) or put in the pool.
+function addAssistantSearch({ country, category, business, start }) {
+  const plan = requirePlan();
+  if (!plan.ok) return plan;
+  const cat = validateCategory(category);
+  if (cat.error) return { ok: false, error: cat.error };
+  const kw = validateKeyword(business);
+  if (kw.error) return { ok: false, error: kw.error };
+  const busy = autopilot.active() || (search ? { keyword: search.auto || lastStatus.keyword || 'a search', countries: [], category: '' } : null);
+  if (start && busy) return { ok: false, busy };
+  const c = store.ensureCategory(cat.category);
+  const r = autopilot.add({ keyword: kw.keyword, category: c.name, countries: [country], origin: 'assistant', search: { withMaps: true }, queued: true });
+  if (!r.ok) return r;
+  if (start) {
+    const a = autopilot.activate(r.task.id);
+    if (!a.ok) return a;
+    return { ok: true, started: true, task: a.task };
+  }
+  return { ok: true, started: false, position: autopilot.pool().length };
+}
 
 function liveCampaigns() {
   if (!outreach) return [];
@@ -2391,10 +2417,11 @@ function initAssistant() {
       const cat = validateCategory(formatCategory(keyword));
       if (cat.error) return { ok: false, error: cat.error };
       const category = store.ensureCategory(cat.category);
-      const r = autopilot.add({ keyword, category: category.name, countries, origin: 'assistant', search: { withMaps: true } });
+      const busy = Boolean(autopilot.active() || search);
+      const r = autopilot.add({ keyword, category: category.name, countries, origin: 'assistant', search: { withMaps: true }, queued: true });
       if (!r.ok) return r;
-      autopilot.start();
-      return { ok: true, category: { key: String(category.id), name: category.name } };
+      if (!busy) autopilot.activate(r.task.id);
+      return { ok: true, queued: busy, category: { key: String(category.id), name: category.name } };
     },
     startCampaign: async ({ category, accountId, message }) => {
       const plan = requirePlan();
@@ -2419,6 +2446,26 @@ function initAssistant() {
       return { count };
     },
     status: assistantStatus,
+    searches: () => autopilot.tasks(),
+    categories: () => store.listCategories().categories.map((c) => c.name),
+    // The running search's live counts (its own task's totals add to them).
+    live: () => {
+      const t = autopilot.tasks().find((x) => x.status === 'running');
+      const m = search?.maps;
+      return t && m ? { id: t.id, processed: m.stats.processed, listed: m.listed, newLeads: m.stats.newLeads } : null;
+    },
+    addSearch: async (x) => addAssistantSearch(x),
+    startPooled: (id) => {
+      if (search && !autopilot.active()) return { ok: false, error: 'A search from the Leads tab is running. Stop it first.' };
+      const plan = requirePlan();
+      return plan.ok ? autopilot.activate(id) : plan;
+    },
+    stopSearch: () => stopSearch(),
+    pauseSearch: () => autopilot.pauseActive(),
+    resumeSearch: () => autopilot.resumeActive(),
+    poolRemove: (id) => autopilot.remove(id),
+    poolMove: (id, to) => autopilot.move(id, to),
+    poolHold: (id, held) => autopilot.update(id, { held: Boolean(held) }),
     powerOff: async () => {
       for (const c of liveCampaigns()) if (c.live && c.status === 'running') outreach.pause(c.id, 'shutdown');
       autoLog('power off by WhatsApp');
@@ -2448,26 +2495,68 @@ function shutdownComputer() {
   }
 }
 
+// Once, after updating to 1.20: searches no longer repeat by themselves and
+// only one runs at a time. Earlier versions could leave several searches
+// waiting their turn; the first is kept, the others are stopped (kept in
+// the list).
+function migrateSearches() {
+  if (store.getState('autopilot.oneAtATime')) return;
+  const list = autopilot.tasks();
+  let kept = false;
+  for (const t of list) {
+    if (!['running', 'pending', 'waiting', 'paused'].includes(t.status)) continue;
+    if (!kept) {
+      kept = true;
+      continue;
+    }
+    autopilot.update(t.id, { status: 'completed', reason: 'Stopped: one search runs at a time' });
+  }
+  store.setState('autopilot.oneAtATime', 1);
+}
+
+// The searches with the running one's live counts (Settings' inventory).
+function autopilotView() {
+  const t = autopilot.tasks().find((x) => x.status === 'running');
+  const m = search?.maps;
+  return { ...autopilot.state(), live: t && m ? { id: t.id, processed: m.stats.processed, listed: m.listed, newLeads: m.stats.newLeads } : null };
+}
+
+// While a search runs, the inventory's counts follow it (every 3 seconds at most).
+let liveSentAt = 0;
+function sendLiveCounts() {
+  if (!search?.auto || Date.now() - liveSentAt < 3000) return;
+  liveSentAt = Date.now();
+  send('autopilot:state', autopilotView());
+}
+
 function initAutopilot() {
   autopilot = new Autopilot({
     store,
     runSearch: runAutoSearch,
     notify: notice,
     log: autoLog,
-    onChange: (st) => {
+    onChange: () => {
+      const st = autopilotView();
       send('autopilot:state', st);
       if (tray) updateTray();
       continuousStatus(st);
     },
+    // A search used up its results: the admin is asked what is next (or the
+    // pool's next search starts, if the admin turned that on).
+    onDone: (task) => {
+      sendStatus({ state: 'done', phase: 'search', message: `Search completed: ${task.keyword} in ${task.countries.join(', ')}. ${task.leads} new lead${task.leads === 1 ? '' : 's'}.` });
+      setTimeout(() => assistant?.searchDone(task).catch((err) => autoLog(`assistant: ${err.message}`)), 500);
+    },
     timings: !app.isPackaged && process.env.LEAD_FINDER_TEST_AUTOPILOT ? JSON.parse(process.env.LEAD_FINDER_TEST_AUTOPILOT) : {},
   });
+  migrateSearches();
 }
 
 // The Leads tab's status line while its continuous search rests between
 // countries (during a country the search itself reports).
 let lastContinuous = '';
 function continuousStatus(st) {
-  const t = st.tasks.find((x) => x.origin === 'leads');
+  const t = st.tasks.find((x) => ['pending', 'waiting'].includes(x.status)) || st.tasks.find((x) => x.status === 'failed' && Date.now() - x.updatedAt < 5000) || null;
   if (!t || search) return;
   let msg = '';
   let state = 'running';

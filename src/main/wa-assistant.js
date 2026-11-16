@@ -61,8 +61,18 @@ const COMMANDS = [
   ['status', /^(status|haal|hal)$/i],
   ['campaigns', /^(campaigns?)$/i],
   ['accounts', /^(accounts?|whatsapp accounts?)$/i],
-  ['pause', /^(pause|pause all|ruko|roko)$/i],
-  ['resume', /^(resume|resume all|continue|chalao)$/i],
+  ['search', /^(search|new search|naya search|search karo|search kro)$/i],
+  ['next', /^(next|next search|agla search)$/i],
+  ['leads', /^(leads|lead count|inventory)$/i],
+  ['pool', /^(pool|queue|search pool)$/i],
+  ['pool-add', /^(pool add|add to pool|add searches)$/i],
+  ['pool-auto-on', /^pool auto on$/i],
+  ['pool-auto-off', /^pool auto off$/i],
+  ['stop', /^(stop|stop search|ruko|roko|band karo search)$/i],
+  ['pause-campaigns', /^(pause campaigns?|campaigns? pause)$/i],
+  ['resume-campaigns', /^(resume campaigns?|campaigns? resume)$/i],
+  ['pause', /^(pause|pause search)$/i],
+  ['resume', /^(resume|resume search|continue)$/i],
   ['power', /^(power ?off|shut ?down|turn off|band|close lead finder)$/i],
   ['suggest-on', /^suggestions? on$/i],
   ['suggest-off', /^suggestions? off$/i],
@@ -71,12 +81,26 @@ const COMMANDS = [
   ['admin-off', /^admin off$/i],
 ];
 
+// Pool commands with a number: "pool remove 2", "pool move 3 to 1", "pool pause 2".
+const POOL_ITEM = /^pool (remove|delete|pause|hold|resume|unpause|start) (\d{1,2})$/i;
+const POOL_MOVE = /^pool move (\d{1,2}) (?:to )?(\d{1,2})$/i;
+// Commands that work even in the middle of a question.
+const ANYTIME = new Set(['help', 'status', 'campaigns', 'accounts', 'leads', 'pool', 'stop', 'power']);
+
 const HELP = [
   'Lead Finder commands:',
-  '• status: what is running',
-  '• campaigns: running campaigns',
-  '• accounts: WhatsApp accounts',
-  '• pause / resume: all campaigns',
+  '• search: set up a new search (country, category, business)',
+  '• next: choose the next search from the pool',
+  '• status: the current search and its progress',
+  '• leads: lead counts of every search',
+  '• pool: searches waiting in the pool',
+  '• pool add: add several searches at once',
+  '• pool remove 2 / pool move 3 to 1 / pool pause 2 / pool resume 2',
+  '• pool auto on / off: start the pool’s next search by itself',
+  '• stop: stop the running search now',
+  '• pause / resume: the running search',
+  '• campaigns, accounts',
+  '• pause campaigns / resume campaigns',
   '• power off: close Lead Finder (asks first)',
   '• cancel: stop the current question',
   '• suggestions on / off: offers for idle accounts',
@@ -86,6 +110,8 @@ const HELP = [
 
 const digits = (s) => String(s || '').replace(/\D/g, '');
 const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+// Spaces tidied, line breaks kept (several searches in one message).
+const cleanLines = (s) => String(s || '').split(/\r?\n/).map(clean).filter(Boolean).join('\n');
 
 // Countries named in a reply ("Pakistan, Qatar and UAE"), in order; null if a
 // part is not a known country.
@@ -162,7 +188,7 @@ class Assistant {
   onMessage({ accountId, phone, text }) {
     if (typeof text !== 'string' || !text.trim()) return false;
     if (!this.isAdmin(phone)) return false;
-    this.busy = this.busy.then(() => this.handle({ accountId, phone: digits(phone), text: clean(text) })).catch((err) => this.log(`assistant: ${err.message}`));
+    this.busy = this.busy.then(() => this.handle({ accountId, phone: digits(phone), text: cleanLines(text) })).catch((err) => this.log(`assistant: ${err.message}`));
     return true;
   }
 
@@ -188,10 +214,20 @@ class Assistant {
       this.save(s);
       return this.say(phone, 'There is nothing to cancel. Send "help" for the commands.', accountId);
     }
-    // A command, unless a step is waiting for free text that happens to be one.
-    if (cmd && !(c && ['keyword', 'message'].includes(c.step))) {
+    // A command; in the middle of a question only the ones that cannot be an
+    // answer (a step waiting for text, or "next" meaning skip).
+    const free = c && ['keyword', 'message', 'country', 'category', 'business', 'lines', 'choose'].includes(c.step);
+    // "pool" answering "start it or add it to the pool?" is an answer.
+    const answer = c && c.flow === 'search' && ['confirm', 'busy'].includes(c.step) && cmd === 'pool';
+    if (cmd && !answer && (!c || (ANYTIME.has(cmd) && !free))) {
       this.save(s);
       return this.command(cmd, phone, accountId);
+    }
+    const poolItem = POOL_ITEM.exec(text);
+    const poolMove = POOL_MOVE.exec(text);
+    if (!c && (poolItem || poolMove)) {
+      this.save(s);
+      return this.poolEdit(phone, accountId, poolItem, poolMove);
     }
     if (!c) {
       this.save(s);
@@ -242,13 +278,39 @@ class Assistant {
       const acc = Object.fromEntries(this.d.accounts().map((a) => [a.id, a.label]));
       return this.say(phone, live.length ? `Campaigns:\n${live.map((c) => `• ${c.name} (${acc[c.accountId] || c.accountId}): ${c.status}, ${c.sentToday} sent today, ${c.queued} waiting`).join('\n')}` : 'No campaigns are running.', accountId);
     }
-    if (cmd === 'pause') {
+    if (cmd === 'pause-campaigns') {
       const r = await this.d.pauseAll();
-      return this.say(phone, r.count ? `Paused ${r.count} campaign${r.count === 1 ? '' : 's'}. Send "resume" to continue.` : 'No campaign was running.', accountId);
+      return this.say(phone, r.count ? `Paused ${r.count} campaign${r.count === 1 ? '' : 's'}. Send "resume campaigns" to continue.` : 'No campaign was running.', accountId);
     }
-    if (cmd === 'resume') {
+    if (cmd === 'resume-campaigns') {
       const r = await this.d.resumeAll();
       return this.say(phone, r.count ? `Resumed ${r.count} campaign${r.count === 1 ? '' : 's'}.` : r.error || 'No paused campaign to resume.', accountId);
+    }
+    // Searches.
+    if (cmd === 'stop') {
+      const r = this.d.stopSearch();
+      return this.say(phone, r.ok ? 'Search stopped. Nothing else starts until you choose: send "next" or "search".' : 'No search is running.', accountId);
+    }
+    if (cmd === 'pause') {
+      const r = this.d.pauseSearch();
+      return this.say(phone, r.ok ? `Paused "${r.task.keyword}". Send "resume" to continue.` : r.error, accountId);
+    }
+    if (cmd === 'resume') {
+      const r = this.d.resumeSearch();
+      return this.say(phone, r.ok ? `Resumed "${r.task.keyword}".` : r.error, accountId);
+    }
+    if (cmd === 'leads') return this.say(phone, this.inventory(), accountId);
+    if (cmd === 'pool') return this.say(phone, this.poolText(), accountId);
+    if (cmd === 'pool-auto-on' || cmd === 'pool-auto-off') {
+      this.d.setSettings({ poolAuto: cmd === 'pool-auto-on' });
+      return this.say(phone, cmd === 'pool-auto-on' ? 'When a search completes, the pool’s next search starts by itself.' : 'When a search completes, I will ask you what to search next.', accountId);
+    }
+    if (cmd === 'search') return this.ask(phone, { flow: 'search', step: 'country', data: {}, accountId }, 'Which country do you want to search? (for example: UAE)');
+    if (cmd === 'pool-add') return this.ask(phone, { flow: 'pooladd', step: 'lines', data: {}, accountId }, 'Send the searches, one per line:\nCountry, Category, Business type\n\nFor example:\nUAE, Construction, Fit Out Companies\nQatar, Real Estate, Property Developers');
+    if (cmd === 'next') {
+      const pool = this.d.searches().filter((t) => t.status === 'queued' && !t.held);
+      if (!pool.length) return this.say(phone, 'The search pool is empty. Send "search" to set up a new search, or "pool add" to add several.', accountId);
+      return this.ask(phone, { flow: 'next', step: 'choose', data: { ids: pool.map((t) => t.id) }, accountId }, `Which search should I start next?\n${pool.map((t, i) => `${i + 1}. ${label(t)}`).join('\n')}\n\nReply with the number.`);
     }
     if (cmd === 'power') {
       const shutdown = this.d.settings().shutdownComputer;
@@ -263,6 +325,87 @@ class Assistant {
     const yes = YES.test(text);
     const no = NO.test(text);
     const unclear = (q) => this.say(phone, `Please reply YES or NO.${q ? `\n\n${q}` : ''}`, c.accountId);
+
+    // "search": country, category, business type, then confirm.
+    if (c.flow === 'search') {
+      if (c.step === 'country') {
+        const { countries, unknown } = parseCountries(text);
+        if (countries.length !== 1 || unknown.length) return this.say(phone, `${unknown.length ? `I don't know "${unknown[0]}". ` : ''}Please send one country, for example: UAE`, c.accountId);
+        const cats = this.d.categories().slice(0, 9);
+        return this.ask(phone, { ...c, step: 'category', data: { ...c.data, country: countries[0], cats } }, `Country: ${countries[0]}\n\nSelect a category${cats.length ? ` (a number, or type a new one):\n${cats.map((n, i) => `${i + 1}. ${n}`).join('\n')}` : ', for example: Construction'}`);
+      }
+      if (c.step === 'category') {
+        const n = Number(text);
+        const category = Number.isInteger(n) && n >= 1 && n <= (c.data.cats || []).length ? c.data.cats[n - 1] : text;
+        if (category.length < 2 || category.length > 60) return this.say(phone, 'Please send a category name of 2 to 60 characters, or its number.', c.accountId);
+        return this.ask(phone, { ...c, step: 'business', data: { ...c.data, category } }, `Category: ${category}\n\nWhich business type do you want to find? (for example: Fit Out Companies)`);
+      }
+      if (c.step === 'business') {
+        if (text.length < 2 || text.length > 120) return this.say(phone, 'Please send a business type of 2 to 120 characters.', c.accountId);
+        const data = { ...c.data, business: text };
+        return this.ask(phone, { ...c, step: 'confirm', data }, `Your search:\n• Country: ${data.country}\n• Category: ${data.category}\n• Business: ${data.business}\n\nShould I start this search? Reply YES to start, POOL to add it to the search pool, or NO.`);
+      }
+      if (c.step === 'confirm' || c.step === 'busy') {
+        const pool = /^(pool|add to pool|queue|later)$/i.test(text);
+        if (no) {
+          this.setConvo(phone, null);
+          return this.say(phone, 'Cancelled. Nothing was started.', c.accountId);
+        }
+        if (!yes && !pool) return this.say(phone, c.step === 'busy' ? 'Reply POOL to add it to the pool, or NO to cancel.' : 'Reply YES to start, POOL to add it to the pool, or NO.', c.accountId);
+        const r = await this.d.addSearch({ ...c.data, start: yes && c.step === 'confirm' });
+        if (r.busy) return this.ask(phone, { ...c, step: 'busy' }, `A search is running: ${label(r.busy)}. Reply POOL to add this one to the pool (it waits its turn), or NO to cancel.`);
+        this.setConvo(phone, null);
+        if (!r.ok) return this.say(phone, `The search could not be set up: ${r.error}`, c.accountId);
+        return this.say(phone, r.started ? 'Search started successfully. Send "status" for progress, "stop" to stop it.' : `Added to the search pool (number ${r.position}). Send "pool" to see it, "next" to choose what to start.`, c.accountId);
+      }
+    }
+
+    // "next": a search from the pool, chosen by number.
+    if (c.flow === 'next') {
+      if (c.step === 'choose') {
+        const n = Number(text);
+        if (!Number.isInteger(n) || n < 1 || n > c.data.ids.length) return this.say(phone, `Please reply with a number from 1 to ${c.data.ids.length}.`, c.accountId);
+        const t = this.d.searches().find((x) => x.id === c.data.ids[n - 1]);
+        if (!t) return this.say(phone, 'That search is no longer in the pool. Send "next" again.', c.accountId);
+        return this.ask(phone, { ...c, step: 'confirm', data: { id: t.id } }, `Start ${label(t)}? Reply YES or NO.`);
+      }
+      if (c.step === 'confirm') {
+        if (no) {
+          this.setConvo(phone, null);
+          return this.say(phone, 'OK, nothing was started.', c.accountId);
+        }
+        if (!yes) return unclear();
+        this.setConvo(phone, null);
+        const r = this.d.startPooled(c.data.id);
+        return this.say(phone, r.ok ? 'Search started successfully. Send "status" for progress, "stop" to stop it.' : r.error, c.accountId);
+      }
+    }
+
+    // "pool add": several searches at once.
+    if (c.flow === 'pooladd') {
+      if (c.step === 'lines') {
+        const items = [];
+        const bad = [];
+        for (const line of text.split(/\n+/).map((l) => l.trim()).filter(Boolean)) {
+          const parts = line.replace(/^\d+[.)]\s*/, '').split(/\s*(?:,|→|->|\|)\s*/).filter(Boolean);
+          const country = parts.length === 3 ? parseCountries(parts[0]).countries : [];
+          if (country.length === 1 && parts[1].length >= 2 && parts[2].length >= 2) items.push({ country: country[0], category: parts[1].slice(0, 60), business: parts[2].slice(0, 120) });
+          else bad.push(line);
+        }
+        if (!items.length || bad.length) return this.say(phone, `I could not read${bad.length ? `: ${bad.slice(0, 3).join(' / ')}` : ' that'}.\nOne search per line: Country, Category, Business type`, c.accountId);
+        return this.ask(phone, { ...c, step: 'confirm', data: { items } }, `Add ${items.length} search${items.length === 1 ? '' : 'es'} to the pool?\n${items.map((x, i) => `${i + 1}. ${x.country} → ${x.category} → ${x.business}`).join('\n')}\n\nReply YES or NO.`);
+      }
+      if (c.step === 'confirm') {
+        if (no) {
+          this.setConvo(phone, null);
+          return this.say(phone, 'Cancelled. Nothing was added.', c.accountId);
+        }
+        if (!yes) return unclear();
+        this.setConvo(phone, null);
+        for (const item of c.data.items) await this.d.addSearch({ ...item, start: false });
+        return this.say(phone, `Added ${c.data.items.length} to the search pool. Send "next" to choose which to start.\n\n${this.poolText()}`, c.accountId);
+      }
+    }
 
     if (c.flow === 'power') {
       if (yes) {
@@ -394,6 +537,74 @@ class Assistant {
     return this.say(phone, d.category ? `Started. "${category.name}" is being messaged from the chosen account. Send "campaigns" for progress.` : `Started. Lead Finder is searching "${d.keyword}" in ${d.countries.join(', ')}; new leads confirmed on WhatsApp join the campaign as they are found. Send "status" for progress.`, c.accountId);
   }
 
+  // --- searches: pool and inventory ---------------------------------------------------
+
+  poolText() {
+    const pool = this.d.searches().filter((t) => t.status === 'queued');
+    const running = this.d.searches().find((t) => ['running', 'pending', 'waiting', 'paused'].includes(t.status));
+    return [
+      running ? `Running: ${label(running)}${running.status === 'paused' ? ' (paused)' : ''}` : 'No search is running.',
+      '',
+      pool.length ? `Search pool (${pool.length}):\n${pool.map((t, i) => `${i + 1}. ${label(t)}${t.held ? ' (paused)' : ''}`).join('\n')}` : 'The search pool is empty.',
+      '',
+      `Pool auto: ${this.d.settings().poolAuto ? 'on (the next one starts by itself)' : 'off (I ask you)'}`,
+    ].join('\n');
+  }
+
+  inventory() {
+    const list = this.d.searches().filter((t) => t.status !== 'queued').slice(-12).reverse();
+    if (!list.length) return 'No searches yet. Send "search" to start one.';
+    const live = this.d.live();
+    return `Lead counts:\n\n${list
+      .map((t) => {
+        const run = live && live.id === t.id ? live : null;
+        const found = (t.listed || 0) + (run ? Math.max(0, run.listed - (t.curListed || 0)) : 0);
+        const checked = (t.processed || 0) + (run ? Math.max(0, run.processed - (t.curProcessed || 0)) : 0);
+        const remaining = Math.max(0, found - checked);
+        const leads = (t.leads || 0) + (run ? run.newLeads : 0);
+        return [`${label(t)}`, `Found: ${found} · Checked: ${checked} · Remaining: ${remaining} · New leads: ${leads}`, `Status: ${stateOf(t, remaining, found)}`].join('\n');
+      })
+      .join('\n\n')}`;
+  }
+
+  async poolEdit(phone, accountId, item, move) {
+    const pool = this.d.searches().filter((t) => t.status === 'queued');
+    const at = (n) => pool[Number(n) - 1];
+    if (move) {
+      const t = at(move[1]);
+      if (!t) return this.say(phone, `There is no search number ${move[1]} in the pool.`, accountId);
+      this.d.poolMove(t.id, Number(move[2]));
+      return this.say(phone, `Moved.\n\n${this.poolText()}`, accountId);
+    }
+    const t = at(item[2]);
+    if (!t) return this.say(phone, `There is no search number ${item[2]} in the pool.`, accountId);
+    const verb = item[1].toLowerCase();
+    if (verb === 'remove' || verb === 'delete') this.d.poolRemove(t.id);
+    else if (verb === 'pause' || verb === 'hold') this.d.poolHold(t.id, true);
+    else if (verb === 'resume' || verb === 'unpause') this.d.poolHold(t.id, false);
+    else if (verb === 'start') {
+      const r = this.d.startPooled(t.id);
+      return this.say(phone, r.ok ? `Started ${label(t)}.` : r.error, accountId);
+    }
+    return this.say(phone, `Done.\n\n${this.poolText()}`, accountId);
+  }
+
+  // A search used up its results: the admin decides what comes next (or the
+  // pool's next search starts, if "pool auto on").
+  async searchDone(task) {
+    const admin = (this.d.settings().admins || [])[0];
+    const pool = this.d.searches().filter((t) => t.status === 'queued' && !t.held);
+    let started = null;
+    if (this.d.settings().poolAuto && pool.length) {
+      const r = this.d.startPooled(pool[0].id);
+      if (r.ok) started = pool[0];
+    }
+    if (!admin) return null;
+    const head = `Current search completed: ${label(task)}.\n${task.processed || 0} businesses checked, ${task.leads || 0} new leads.`;
+    if (started) return this.say(digits(admin), `${head}\n\nStarted the pool’s next search: ${label(started)}. Send "stop" to stop it.`);
+    return this.say(digits(admin), `${head}\n\nWhat would you like to search next?\n• next: choose from the pool (${pool.length} waiting)\n• search: set up a new search\n\nNothing starts until you choose.`);
+  }
+
   // --- suggestions ---------------------------------------------------------------
 
   markAsked(key) {
@@ -431,4 +642,18 @@ class Assistant {
   }
 }
 
-module.exports = { Assistant, parseCountries, YES, NO, TIMEOUT };
+// "UAE → Construction → Fit Out Companies".
+function label(t) {
+  return `${(t.countries || []).join(', ')} → ${t.category} → ${t.keyword}`;
+}
+
+// How much a search has left.
+function stateOf(t, remaining, found) {
+  if (t.status === 'completed') return t.exhausted ? 'Completed (all results checked)' : 'Stopped';
+  if (t.status === 'failed') return 'Needs attention';
+  if (t.status === 'paused') return 'Paused';
+  if (!found) return 'Active, starting';
+  return remaining <= Math.max(5, found * 0.1) ? 'Active, nearly exhausted' : 'Active, plenty left';
+}
+
+module.exports = { Assistant, parseCountries, YES, NO, TIMEOUT, label };

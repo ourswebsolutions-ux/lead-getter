@@ -43,6 +43,8 @@ contextBridge.exposeInMainWorld('leadFinder', {
   autopilotPause: (id) => ipcRenderer.invoke('autopilot:pause', String(id ?? '')),
   autopilotResume: (id) => ipcRenderer.invoke('autopilot:resume', String(id ?? '')),
   autopilotStop: (id) => ipcRenderer.invoke('autopilot:stop', String(id ?? '')),
+  autopilotActivate: (id) => ipcRenderer.invoke('autopilot:activate', String(id ?? '')),
+  autopilotMove: (id, to) => ipcRenderer.invoke('autopilot:move', String(id ?? ''), Number(to) || 1),
   autopilotEngine: (action) => ipcRenderer.invoke('autopilot:engine', String(action ?? '')),
   onAutopilot: (cb) => subscribe('autopilot:state', cb),
   autologonStatus: () => ipcRenderer.invoke('autologon:status'),

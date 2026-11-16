@@ -50,8 +50,9 @@ const NEEDS_USER = new Set(['plan', 'needs_user']);
 const clean = (s, max) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
 
 class Autopilot {
-  constructor({ store, runSearch, notify = () => {}, log = () => {}, now = () => Date.now(), timings = {}, onChange = () => {} }) {
-    Object.assign(this, { store, runSearch, notify, log, now, onChange });
+  // onDone(task): a search finished all its countries (it is not started again).
+  constructor({ store, runSearch, notify = () => {}, log = () => {}, now = () => Date.now(), timings = {}, onChange = () => {}, onDone = () => {} }) {
+    Object.assign(this, { store, runSearch, notify, log, now, onChange, onDone });
     this.t = { ...TIMINGS, ...timings };
     this.current = null; // { id, controller, promise }
     this.loopPromise = null;
@@ -90,7 +91,8 @@ class Autopilot {
 
   // search: the Leads tab's sources ({ withMaps, withFacebook, withLinkedIn,
   // linkedinKeyword }); origin: 'leads' (the Leads tab) or 'assistant'.
-  add({ keyword, category, countries, websiteFilter = 'without', findEmails = false, search = null, origin = 'settings' }) {
+  // queued: kept in the search pool until it is started (activate).
+  add({ keyword, category, countries, websiteFilter = 'without', findEmails = false, search = null, origin = 'settings', queued = false }) {
     const k = clean(keyword, 120);
     const c = clean(category, 60);
     const list = [...new Set((Array.isArray(countries) ? countries : []).map((x) => clean(x, 56)).filter((x) => /^[\p{L}][\p{L} .'()-]*$/u.test(x)))].slice(0, MAX_COUNTRIES);
@@ -108,9 +110,12 @@ class Autopilot {
       findEmails: findEmails === true,
       search: search && typeof search === 'object' ? { withMaps: search.withMaps !== false, withFacebook: Boolean(search.withFacebook), withLinkedIn: Boolean(search.withLinkedIn), linkedinKeyword: clean(search.linkedinKeyword, 120) } : null,
       origin: ['leads', 'assistant'].includes(origin) ? origin : 'settings',
-      status: 'pending',
-      reason: '',
+      status: queued ? 'queued' : 'pending',
+      reason: queued ? 'In the search pool' : '',
       round: 1,
+      processed: 0, // businesses checked
+      listed: 0, // results Google Maps listed (the most seen in one country)
+      exhausted: false, // Google Maps showed the end of its results
       index: 0, // the country being searched (or next)
       nextRunAt: 0,
       retries: 0,
@@ -150,6 +155,82 @@ class Autopilot {
     if (!this.update(id, { status: 'completed', reason: 'Stopped by you' })) return { ok: false, error: 'Not found.' };
     if (this.current?.id === id) this.current.controller.abort();
     return { ok: true };
+  }
+
+  // --- one search at a time, and the pool ---------------------------------------------
+
+  // The search being worked on (running, between countries or retrying).
+  active() {
+    return this.tasks().find((t) => ['running', 'pending', 'waiting', 'paused'].includes(t.status)) || null;
+  }
+
+  // Starts a search from the pool (or a stopped one again).
+  activate(id) {
+    const t = this.tasks().find((x) => x.id === id);
+    if (!t) return { ok: false, error: 'That search is not in the list.' };
+    const other = this.active();
+    if (other && other.id !== id) return { ok: false, error: `"${other.keyword}" is running. Stop it first.`, busy: other };
+    this.update(id, { status: 'pending', reason: '', nextRunAt: 0, retries: 0, ...(t.status === 'completed' && t.exhausted ? { index: 0, exhausted: false, doneProcessed: 0, doneListed: 0, curProcessed: 0, curListed: 0, processed: 0, listed: 0 } : {}) });
+    if (this.engine().state !== 'running') this.start();
+    else this.kick();
+    return { ok: true, task: this.tasks().find((x) => x.id === id) };
+  }
+
+  // Stop: the running search ends now, and every search that was waiting its
+  // turn stops too. The pool (queued) stays as it is.
+  stopAll(reason = 'Stopped by you') {
+    const list = this.tasks();
+    let n = 0;
+    for (const t of list) {
+      if (['running', 'pending', 'waiting', 'paused'].includes(t.status)) {
+        t.status = 'completed';
+        t.reason = reason;
+        t.stoppedAt = this.now();
+        n++;
+      }
+    }
+    this.saveTasks(list);
+    this.current?.controller.abort();
+    this.kick();
+    return { ok: true, count: n };
+  }
+
+  pauseActive() {
+    const t = this.active();
+    if (!t || t.status === 'paused') return { ok: false, error: t ? 'The search is already paused.' : 'No search is running.' };
+    return { ...this.pause(t.id), task: t };
+  }
+
+  resumeActive() {
+    const t = this.tasks().find((x) => x.status === 'paused');
+    if (!t) return { ok: false, error: 'No search is paused.' };
+    return { ...this.resume(t.id), task: t };
+  }
+
+  // Pool order: moves a queued search to position `to` (1 = next).
+  move(id, to) {
+    const list = this.tasks();
+    const i = list.findIndex((t) => t.id === id);
+    if (i < 0) return { ok: false, error: 'That search is not in the list.' };
+    const [t] = list.splice(i, 1);
+    const queued = list.filter((x) => x.status === 'queued');
+    const anchor = queued[Math.max(0, Math.min(queued.length, to - 1))];
+    list.splice(anchor ? list.indexOf(anchor) : list.length, 0, t);
+    this.saveTasks(list);
+    return { ok: true };
+  }
+
+  // Back to the pool (not started until it is chosen again).
+  hold(id) {
+    const t = this.tasks().find((x) => x.id === id);
+    if (!t) return { ok: false, error: 'That search is not in the list.' };
+    if (this.current?.id === id) this.current.controller.abort();
+    this.update(id, { status: 'queued', reason: 'In the search pool' });
+    return { ok: true };
+  }
+
+  pool() {
+    return this.tasks().filter((t) => t.status === 'queued');
   }
 
   // --- the engine ------------------------------------------------------------------
@@ -263,27 +344,33 @@ class Autopilot {
     const t = this.tasks().find((x) => x.id === task.id);
     if (!t) return; // deleted meanwhile
     const leads = (t.leads || 0) + (r.newLeads || 0);
+    // Counted once per business: a country searched again after a stop or a
+    // restart re-reads what it already checked, so its own count is the
+    // larger of the two runs, added to the countries already finished.
+    const cur = { processed: Math.max(t.curProcessed || 0, r.processed || 0), listed: Math.max(t.curListed || 0, r.listed || 0) };
+    const base = { processed: t.doneProcessed || 0, listed: t.doneListed || 0 };
+    const progress = { curProcessed: cur.processed, curListed: cur.listed, processed: base.processed + cur.processed, listed: base.listed + cur.listed, exhausted: Boolean(r.exhausted) };
     if (r.newLeads) this.notify('leads', 'New leads', `${r.newLeads} new lead${r.newLeads === 1 ? '' : 's'} for "${query}".`);
 
     // Paused, stopped or quitting: the country is searched again later.
     if (r.state === 'stopped' || controller.signal.aborted) {
-      if (t.status === 'running') this.update(t.id, { status: 'pending', leads, reason: '' });
-      else this.update(t.id, { leads });
+      if (t.status === 'running') this.update(t.id, { status: 'pending', leads, ...progress, reason: '' });
+      else this.update(t.id, { leads, ...progress });
       return;
     }
+    // A country's results are used up: the next country, or the search is
+    // complete. Nothing is started again by itself.
     if (r.state === 'done') {
       const last = t.index + 1 >= t.countries.length;
-      const nextCountry = t.countries[(t.index + 1) % t.countries.length];
-      this.update(t.id, {
-        status: 'waiting',
-        leads,
-        retries: 0,
-        index: last ? 0 : t.index + 1,
-        round: last ? t.round + 1 : t.round,
-        nextRunAt: now + (last ? this.t.betweenRounds : this.t.betweenCountries),
-        reason: last ? `Round ${t.round} finished. Next round starts with ${nextCountry}` : `Next: ${nextCountry}`,
-      });
-      if (t.countries.length > 1 || last) this.notify('country', last ? 'Round finished' : 'Country changed', last ? `"${t.keyword}": all ${t.countries.length} countries searched. The next round starts in ${Math.round(this.t.betweenRounds / 60_000)} minutes.` : `"${t.keyword}": ${country} done, next ${nextCountry}.`);
+      if (last) {
+        const done = this.update(t.id, { status: 'completed', leads, ...progress, doneProcessed: progress.processed, doneListed: progress.listed, curProcessed: 0, curListed: 0, exhausted: true, retries: 0, completedAt: now, reason: 'Completed: all results checked' });
+        this.notify('done', 'Search completed', `"${query}": ${done.processed} businesses checked, ${done.leads} new leads.`);
+        this.onDone(done);
+        return;
+      }
+      const nextCountry = t.countries[t.index + 1];
+      this.update(t.id, { status: 'waiting', leads, ...progress, doneProcessed: progress.processed, doneListed: progress.listed, curProcessed: 0, curListed: 0, exhausted: false, retries: 0, index: t.index + 1, nextRunAt: now + this.t.betweenCountries, reason: `Next: ${nextCountry}` });
+      this.notify('country', 'Country changed', `"${t.keyword}": ${country} done, next ${nextCountry}.`);
       return;
     }
     // Errors.

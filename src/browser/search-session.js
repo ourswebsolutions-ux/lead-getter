@@ -94,6 +94,8 @@ class SearchSession {
     this.seenUrls = new Set();
     this.seenKeys = new Set();
     this.stats = { processed: 0, leads: 0, newLeads: 0, skipped: 0 };
+    this.listed = 0; // the most results Google Maps listed
+    this.exhausted = false; // Google Maps showed the end of its results
     this.recoveryUsed = new Set(); // block-recovery steps already used in this search
   }
 
@@ -359,6 +361,7 @@ class SearchSession {
     for (;;) {
       await this.guard(page);
       const links = await this.op(() => this.maps.collectLinks(page));
+      this.listed = Math.max(this.listed, links.length);
       const fresh = links.filter((l) => !this.seenUrls.has(l.url));
       for (const link of fresh) {
         this.seenUrls.add(link.url);
@@ -375,7 +378,10 @@ class SearchSession {
       }
       // Progress = new listings to process, or the list grew while scrolling.
       if (fresh.length || links.length > lastCount) idle = 0;
-      else if (endSeen || ++idle >= 6) return;
+      else if (endSeen || ++idle >= 6) {
+        this.exhausted = true;
+        return;
+      }
       lastCount = links.length;
       this.status('running', `Loading more listings (${links.length} loaded so far)`);
       const scroll = await this.op(() => this.maps.scrollFeed(page));

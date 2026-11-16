@@ -74,6 +74,117 @@ function when(ms) {
   return today ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : d.toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 }
 
+// Counts of one search, with the running one's live progress added.
+function countsOf(t, live) {
+  const run = live && live.id === t.id ? live : null;
+  const found = (t.listed || 0) + (run ? Math.max(0, run.listed - (t.curListed || 0)) : 0);
+  const checked = (t.processed || 0) + (run ? Math.max(0, run.processed - (t.curProcessed || 0)) : 0);
+  return { found, checked, remaining: Math.max(0, found - checked), leads: (t.leads || 0) + (run ? run.newLeads : 0) };
+}
+
+function stateOf(t, c) {
+  if (t.status === 'completed') return t.exhausted ? ['Completed', 'off'] : ['Stopped', 'off'];
+  if (t.status === 'failed') return ['Needs attention', 'bad'];
+  if (t.status === 'paused') return ['Paused', 'warn'];
+  if (!c.found) return ['Starting', 'live'];
+  return c.remaining <= Math.max(5, c.found * 0.1) ? ['Nearly exhausted', 'warn'] : ['Plenty left', 'live'];
+}
+
+// Every search (country, category, business; found, checked, remaining,
+// new leads) and the pool, in order.
+function Inventory({ searches, pool, live, onError }) {
+  const act = async (fn) => {
+    const r = await fn();
+    onError(r?.ok === false ? r.error : '');
+  };
+  if (!searches.length && !pool.length) return null;
+  return (
+    <div className="st-inv" role="table" aria-label="Searches">
+      {searches.length > 0 && (
+        <>
+          <div className="st-inv-head" role="row">
+            <span>Searches</span>
+            <span>Found</span>
+            <span>Checked</span>
+            <span>Remaining</span>
+            <span>New leads</span>
+            <span />
+          </div>
+          {searches.map((t) => {
+            const c = countsOf(t, live);
+            const [label, tone] = stateOf(t, c);
+            const on = ['running', 'pending', 'waiting', 'paused'].includes(t.status);
+            return (
+              <div key={t.id} className={`st-inv-row ${on ? 'on' : ''}`} role="row" aria-label={`${t.countries.join(', ')} ${t.keyword}`}>
+                <div className="st-inv-name">
+                  <strong>{t.keyword}</strong>
+                  <span>
+                    {t.countries.join(', ')} · {t.category}
+                  </span>
+                </div>
+                <span className="st-num">{c.found}</span>
+                <span className="st-num">{c.checked}</span>
+                <span className="st-num">{c.remaining}</span>
+                <span className="st-num strong">{c.leads}</span>
+                <div className="st-inv-end">
+                  <span className={`st-pill ${tone}`}>{label}</span>
+                  {on && t.status !== 'paused' && (
+                    <button type="button" className="icon-btn" aria-label={`Pause ${t.keyword}`} title="Pause" onClick={() => act(() => api.autopilotPause(t.id))}>
+                      <Icon name="pause" size={13} />
+                    </button>
+                  )}
+                  {t.status === 'paused' && (
+                    <button type="button" className="icon-btn" aria-label={`Resume ${t.keyword}`} title="Resume" onClick={() => act(() => api.autopilotResume(t.id))}>
+                      <Icon name="play" size={13} />
+                    </button>
+                  )}
+                  {on && (
+                    <button type="button" className="icon-btn" aria-label={`Stop ${t.keyword}`} title="Stop" onClick={() => act(() => api.stopSearch())}>
+                      <Icon name="stop" size={13} />
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </>
+      )}
+      {pool.length > 0 && (
+        <>
+          <div className="st-inv-head pool">
+            <span>Search pool · starts only when you choose</span>
+          </div>
+          {pool.map((t, i) => (
+            <div key={t.id} className={`st-inv-row pool ${t.held ? 'held' : ''}`}>
+              <span className="st-cc">{i + 1}</span>
+              <div className="st-inv-name">
+                <strong>{t.keyword}</strong>
+                <span>
+                  {t.countries.join(', ')} · {t.category}
+                  {t.held ? ' · paused' : ''}
+                </span>
+              </div>
+              <div className="st-inv-end">
+                <button type="button" className="btn btn-ghost btn-sm" aria-label={`Start ${t.keyword}`} onClick={() => act(() => api.autopilotActivate(t.id))}>
+                  <Icon name="play" size={12} /> Start
+                </button>
+                {i > 0 && (
+                  <button type="button" className="icon-btn" aria-label={`Move ${t.keyword} up`} title="Move up" onClick={() => act(() => api.autopilotMove(t.id, i))}>
+                    <Icon name="chevron" size={13} className="up" />
+                  </button>
+                )}
+                <button type="button" className="icon-btn" aria-label={`Remove ${t.keyword}`} title="Remove" onClick={() => act(() => api.autopilotRemove(t.id))}>
+                  <Icon name="trash" size={13} />
+                </button>
+              </div>
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
 function AdminNumber({ value, onSave }) {
   const [v, setV] = useState(value || '');
   useEffect(() => setV(value || ''), [value]);
@@ -157,7 +268,9 @@ export default function SettingsView({ hidden, notify, categories = [] }) {
   }
 
   const engine = pilot.engine;
-  const leadsTask = pilot.tasks.find((t) => t.origin === 'leads') || null;
+  const searches = pilot.tasks.filter((t) => t.status !== 'queued').slice(-8).reverse();
+  const pool = pilot.tasks.filter((t) => t.status === 'queued');
+  const live = pilot.live;
   const unattended = s && s.background && s.autoResume && s.chrome.profile === 'automation';
 
   return (
@@ -340,9 +453,9 @@ export default function SettingsView({ hidden, notify, categories = [] }) {
             )}
 
             {active === 'search' && (
-            <Section id="search" icon="repeat" title="Continuous search" lead="Leads tab search, country by country.">
+            <Section id="search" icon="repeat" title="Continuous search" lead="You choose every search.">
               <div className="st-group">
-                <Row icon="repeat" label="Continuous search" help="Keeps searching until Stop Search">
+                <Row icon="repeat" label="Continuous search" help="Each country once, then it stops">
                   <Switch label="Continuous search" on={s.search.continuous} onChange={(v) => change({ search: { continuous: v } })} />
                 </Row>
               </div>
@@ -368,14 +481,10 @@ export default function SettingsView({ hidden, notify, categories = [] }) {
                   })}
                 </div>
                 <div className="st-new-foot">
-                  <span>{s.search.countries.length ? `${s.search.countries.join(' → ')} → again` : 'Choose one or more countries'}</span>
-                  {leadsTask && (
-                    <span className={`st-pill ${leadsTask.status === 'running' ? 'live' : leadsTask.status === 'failed' ? 'bad' : 'idle'}`}>
-                      {leadsTask.status === 'running' ? `Searching ${leadsTask.countries[leadsTask.index % leadsTask.countries.length]}` : leadsTask.status === 'completed' ? 'Stopped' : leadsTask.status === 'failed' ? 'Needs attention' : 'Between countries'} · round {leadsTask.round} · {leadsTask.leads} new
-                    </span>
-                  )}
+                  <span>{s.search.countries.length ? `${s.search.countries.join(' → ')}, then stops` : 'Choose one or more countries'}</span>
                 </div>
               </div>
+              <Inventory searches={searches} pool={pool} live={live} onError={setError} />
               <div className="st-group">
                 <Row icon="refresh" label="Resume interrupted searches" help="Continues after a crash or restart">
                   <Switch label="Resume interrupted searches" on={s.search.resumeInterrupted} onChange={(v) => change({ search: { resumeInterrupted: v } })} />

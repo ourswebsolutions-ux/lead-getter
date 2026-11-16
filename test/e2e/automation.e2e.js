@@ -64,7 +64,7 @@ test('Settings: automation switches, continuous searches, background close', asy
   await panel.getByRole('switch', { name: 'Continuous search' }).click();
   await panel.getByRole('button', { name: 'Pakistan' }).click();
   await panel.getByRole('button', { name: 'UAE' }).click();
-  await panel.getByText('Pakistan → UAE → again').waitFor();
+  await panel.getByText('Pakistan → UAE, then stops').waitFor();
   if (shots) await win.screenshot({ path: path.join(shots, 'settings-search.png') });
   const saved = await win.evaluate(() => window.leadFinder.automationGet());
   assert.deepEqual([saved.search.continuous, saved.search.countries], [true, ['Pakistan', 'UAE']]);
