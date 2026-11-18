@@ -260,7 +260,15 @@ class LinkedInSession extends SearchSession {
       for (const p of fresh) {
         this.seenProfiles.add(p.profileUrl);
         s.connections++;
-        await this.processConnection(page, p);
+        try {
+          await this.processConnection(page, p);
+        } catch (err) {
+          // Stop, Chrome closing, a lost connection: the run ends as usual.
+          if (err instanceof StopRequested || err instanceof FatalSearchError || err?.name === 'PageReplaced') throw err;
+          // Anything else with one connection: skipped, the next one follows.
+          s.failures++;
+          this.connProgress(`${p.name}: skipped (${String(err?.message || err).split('\n')[0].slice(0, 120)})`);
+        }
         if (this.blocked) return;
       }
       // Back to the list for more (profiles were opened in the same tab).
@@ -288,7 +296,10 @@ class LinkedInSession extends SearchSession {
     const s = this.stats.linkedin;
     this.stats.processed++;
     const profileUrl = this.li.cleanProfileUrl(card.profileUrl) || card.profileUrl;
-    if (this.store.hasPersonLead(profileUrl)) {
+    // Saved before with its Contact info read: not opened again. Saved by an
+    // earlier version without it: opened once more for it.
+    const known = this.store.personLeadDetails ? this.store.personLeadDetails(profileUrl) : this.store.hasPersonLead(profileUrl) ? { discovery: 'Contact info read' } : null;
+    if (known && (/Contact info read/.test(known.discovery || '') || !/LinkedIn connection/.test(known.discovery || ''))) {
       s.duplicates++;
       return this.connProgress(`${card.name} is already a lead`);
     }
@@ -314,7 +325,7 @@ class LinkedInSession extends SearchSession {
     const emails = (info.emails || []).map((e) => ({ email: e, kind: 'person', status: 'unverified', source: 'LinkedIn contact info' }));
     const website = (info.websites || []).map((h) => this.li.cleanWebsite(h)).find(Boolean) || '';
     const other = (info.other || []).map((o) => `${o.label}: ${o.value}`);
-    const discovery = [`LinkedIn connection; contact info: ${ci?.mode === 'ok' ? `${emails.length} email${emails.length === 1 ? '' : 's'}, ${phones.length} phone${phones.length === 1 ? '' : 's'}, ${website ? 'a website' : 'no website'}` : `not read (${ci?.mode || this.blocked || 'closed'})`}`, ...other].join('; ');
+    const discovery = [`LinkedIn connection; ${ci?.mode === 'ok' ? `Contact info read: ${emails.length} email${emails.length === 1 ? '' : 's'}, ${phones.length} phone${phones.length === 1 ? '' : 's'}, ${website ? 'a website' : 'no website'}` : `contact info not read (${ci?.detail || ci?.mode || this.blocked || 'closed'})`}`, ...other].join('; ');
     let saved;
     try {
       saved = this.store.savePersonLead({

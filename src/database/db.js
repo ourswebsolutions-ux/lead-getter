@@ -1439,6 +1439,15 @@ class LeadStore {
   }
 
   // A LinkedIn profile already saved as a person lead (or deleted): not opened again.
+  // A saved person's discovery note ({ discovery }), or null.
+  personLeadDetails(profileUrl) {
+    const row = this.withRetry(() => this.stmt.get.get(personKey(String(profileUrl || '').replace(/\/$/, ''))));
+    if (!row) return null;
+    // Deleted by the user: stays deleted, never opened again.
+    if (!row.qualified) return { discovery: 'Contact info read (deleted lead)' };
+    return { discovery: this.db.prepare('SELECT discovery FROM businesses WHERE id = ?').get(row.id)?.discovery || '' };
+  }
+
   hasPersonLead(profileUrl) {
     return Boolean(this.withRetry(() => this.stmt.get.get(personKey(String(profileUrl || '').replace(/\/$/, '')))));
   }

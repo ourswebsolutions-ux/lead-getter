@@ -123,13 +123,21 @@ async function open(page, url, ready, { timeout = 25_000 } = {}) {
 }
 
 // page.goto, once more when an earlier navigation was still finishing.
+// It waits only for the navigation to start: LinkedIn's pages keep loading
+// for a long time, and whether the content is there is checked by open()
+// (a page that never shows it is reported as not loaded, not as an error).
 async function goto(page, url) {
+  const go = () => page.goto(url, { waitUntil: 'commit', timeout: NAV_TIMEOUT });
   try {
-    return await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+    return await go();
   } catch (err) {
+    if (/Timeout \d+ms exceeded/i.test(String(err?.message))) return null;
     if (!/interrupted by another navigation/i.test(String(err?.message))) throw err;
     await page.waitForTimeout(1000);
-    return page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+    return go().catch((e) => {
+      if (/Timeout \d+ms exceeded/i.test(String(e?.message))) return null;
+      throw e;
+    });
   }
 }
 

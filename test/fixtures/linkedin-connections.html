@@ -11,7 +11,9 @@ const PEOPLE = {
   'nina-shah': { name: 'Nina Shah', headline: 'Sales Lead', location: 'Karachi, Pakistan', company: 'SellWell', phone: '0300 1234567' },
   'zain-ali': { name: 'Zain Ali', headline: 'Architect', location: 'Riyadh, Saudi Arabia', company: 'Arc Studio', website: 'https://arcstudio.example', sdui: true },
 };
-const ORDER = Object.keys(PEOPLE);
+// A profile that never shows its content (LinkedIn sometimes hangs).
+PEOPLE['stuck-sam'] = { name: 'Stuck Sam', headline: 'Never loads', location: 'Lahore, Pakistan', company: 'Hang Co', stuck: true };
+const ORDER = ['ali-raza', 'stuck-sam', 'sara-khan', 'omar-farooq', 'nina-shah', 'zain-ali'];
 const card = (id) => `<li class="mn-connection-card"><a href="/in/${id}/"><span class="mn-connection-card__name">${PEOPLE[id].name}</span></a><span class="mn-connection-card__occupation">${PEOPLE[id].headline}</span><time>Connected 1 week ago</time><button>Message</button></li>`;
 const main = document.getElementById('main');
 const p = location.pathname;
@@ -30,6 +32,7 @@ if (p.startsWith('/mynetwork/invite-connect/connections')) {
   // profile only, as LinkedIn's current site does. "More" opens a menu.
   const id = m[1];
   const x = PEOPLE[id];
+  if (x.stuck) throw new Error('stuck'); // the page stays empty
   document.title = `${x.name} | LinkedIn`;
   const link = x.sdui ? `<button type="button" class="ci-link">Contact info</button>` : `<a id="top-card-text-details-contact-info" href="/in/${id}/overlay/contact-info/">Contact info</a>`;
   main.innerHTML = `<section class="artdeco-card pv-top-card"><div><h1 class="text-heading-xlarge">${x.name}</h1><span>· 1st</span></div>
