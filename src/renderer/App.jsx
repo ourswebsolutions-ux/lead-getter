@@ -238,6 +238,63 @@ function CallStatus({ lead: l, notify }) {
   );
 }
 
+// Every email of a lead: the main one, then "+N" (all listed on hover).
+function EmailCell({ lead: l }) {
+  const all = [...new Set([l.email, ...(l.emails || []).map((e) => e.email)].filter(Boolean))];
+  if (!all.length) return <span className="muted">–</span>;
+  const open = (e, addr) => {
+    e.preventDefault(); // the window never navigates: the mail app opens
+    api.openPodcastLink(`mailto:${addr}`);
+  };
+  return (
+    <span className="email-list">
+      <a href={`mailto:${all[0]}`} title={l.kind === 'person' ? personEmailTitle(l) : 'Business email'} onClick={(e) => open(e, all[0])}>
+        {all[0]}
+      </a>
+      {l.kind === 'person' && l.email && <EmailBadge status={l.emailStatus} />}
+      {all.length > 1 && (
+        <span className="more" title={all.join('\n')}>
+          +{all.length - 1}
+        </span>
+      )}
+    </span>
+  );
+}
+
+// What else is known about a person: the other fields of LinkedIn's Contact
+// info (Birthday, Connected, Address...), more phones, the profile.
+const DETAIL_FIELD = /^(birthday|connected|address|twitter|x \(twitter\)|im|instant messenger|wechat|whatsapp|skype|[a-z ]{2,30}):\s*(.+)$/i;
+function DetailsCell({ lead: l }) {
+  if (l.kind !== 'person') return <span className="muted">–</span>;
+  const parts = String(l.discovery || '').split(/;\s*/).slice(1);
+  const fields = parts
+    .map((p) => DETAIL_FIELD.exec(p.trim()))
+    .filter((m) => m && !/^(email|rss|website|also could not check|could not check)/i.test(m[1]))
+    .slice(0, 5)
+    .map((m) => [m[1].replace(/^./, (c) => c.toUpperCase()), m[2]]);
+  const morePhones = [...new Set((l.phones || []).map((p) => p.phone).filter((p) => p && p !== l.phone))];
+  return (
+    <span className="detail-list">
+      {fields.map(([k, v]) => (
+        <span key={k} title={`${k}: ${v}`}>
+          <b>{k}</b> {v}
+        </span>
+      ))}
+      {morePhones.length > 0 && (
+        <span title={morePhones.join('\n')}>
+          <b>Phones</b> {morePhones.join(', ')}
+        </span>
+      )}
+      {l.profileUrl && (
+        <button type="button" className="link-btn" onClick={() => api.openListing(l.profileUrl)} title={l.profileUrl}>
+          LinkedIn profile
+        </button>
+      )}
+      {!fields.length && !morePhones.length && !l.profileUrl && <span className="muted">–</span>}
+    </span>
+  );
+}
+
 const LeadRow = memo(function LeadRow({ lead: l, fresh, selected, pastView, onToggle, onDelete, onWhatsApp, onCompose, onCall, onText, waOpen, notify }) {
   return (
     <tr className={`${fresh ? 'fresh' : ''} ${selected ? 'selected' : ''}`}>
@@ -251,21 +308,8 @@ const LeadRow = memo(function LeadRow({ lead: l, fresh, selected, pastView, onTo
             {[l.personTitle, l.companyName].filter(Boolean).join(' · ')}
           </span>
         )}
-        {(l.email || l.jobTitle || l.podcastHost) && (
+        {(l.jobTitle || l.podcastHost) && (
           <span className="name-extra">
-            {l.email && (
-              <a
-                href={`mailto:${l.email}`}
-                title={l.kind === 'person' ? personEmailTitle(l) : 'Business email'}
-                onClick={(e) => {
-                  e.preventDefault(); // the window never navigates: the mail app opens
-                  api.openPodcastLink(`mailto:${l.email}`);
-                }}
-              >
-                {l.email}
-              </a>
-            )}
-            {l.kind === 'person' && l.email && <EmailBadge status={l.emailStatus} />}
             {l.jobTitle && <span title="LinkedIn job">{l.jobTitle}</span>}
             {l.podcastHost && <span title="Podcast host">{l.podcastHost}</span>}
           </span>
@@ -274,10 +318,16 @@ const LeadRow = memo(function LeadRow({ lead: l, fresh, selected, pastView, onTo
       <td className="phone-cell">
         <PhoneCell lead={l} waOpen={waOpen} onCompose={onCompose} onChanged={onWhatsApp} notify={notify} />
       </td>
+      <td className="email-cell">
+        <EmailCell lead={l} />
+      </td>
       <td className="address" dir="auto" title={l.address}>
         {l.address ? <span className="address-text">{l.address}</span> : <span className="muted">Not listed</span>}
       </td>
       <td>{websiteChip(l)}</td>
+      <td className="details-cell">
+        <DetailsCell lead={l} />
+      </td>
       <td>{l.category ? <span className="cat">{l.category}</span> : <span className="muted">Uncategorized</span>}</td>
       <td className="sources">
         {(l.sources || ['maps']).includes('maps') && <span className="chip src-maps">Maps</span>}
@@ -1524,8 +1574,10 @@ export default function App({ onLock }) {
                       </th>
                       <th>Business</th>
                       <th>Phone</th>
+                      <th>Email</th>
                       <th>Address</th>
                       <th>Website</th>
+                      <th>Details</th>
                       <th>Category</th>
                       <th>Source</th>
                       <th>Campaign</th>

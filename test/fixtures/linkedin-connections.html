@@ -6,9 +6,9 @@
 // "Show more results" button), profiles, and the Contact info overlay.
 const PEOPLE = {
   'ali-raza': { name: 'Ali Raza', headline: 'CEO at Fit Out Pro', location: 'Dubai, United Arab Emirates', company: 'Fit Out Pro', email: 'ali@fitoutpro.example', phone: '+971 50 123 4567', website: 'https://fitoutpro.example', address: 'Business Bay, Dubai', birthday: 'March 3' },
-  'sara-khan': { name: 'Sara Khan', headline: 'Marketing Manager', location: 'Lahore, Pakistan', company: 'Bright Media' },
+  'sara-khan': { name: 'Sara Khan', headline: 'Marketing Manager', location: 'Lahore, Pakistan', company: 'Bright Media', native: true, email: 'sara@brightmedia.example' },
   'omar-farooq': { name: 'Omar Farooq', headline: 'Founder, BuildCo', location: 'Doha, Qatar', company: 'BuildCo', email: 'omar@buildco.example', website: 'https://buildco.example', phone: '+974 5555 1234', birthday: 'June 5', sdui: true },
-  'nina-shah': { name: 'Nina Shah', headline: 'Sales Lead', location: 'Karachi, Pakistan', company: 'SellWell', phone: '0300 1234567' },
+  'nina-shah': { name: 'Nina Shah', headline: 'Sales Lead', location: 'Karachi, Pakistan', company: 'SellWell', phone: '0300 1234567', plain: true },
   'zain-ali': { name: 'Zain Ali', headline: 'Architect', location: 'Riyadh, Saudi Arabia', company: 'Arc Studio', website: 'https://arcstudio.example', sdui: true },
 };
 // A profile that never shows its content (LinkedIn sometimes hangs).
@@ -54,8 +54,13 @@ if (p.startsWith('/mynetwork/invite-connect/connections')) {
 }
 function openPopup(id) {
   const x = PEOPLE[id];
-  main.insertAdjacentHTML('beforeend', `<div role="dialog" class="artdeco-modal" aria-labelledby="ci"><h2 id="ci">Contact info</h2><div id="body"></div><button aria-label="Dismiss" id="dismiss">Dismiss</button></div>`);
-  document.getElementById('dismiss').onclick = () => document.querySelector('.artdeco-modal')?.remove();
+  // Popups as LinkedIn has drawn them: a dialog; a native <dialog> (Sara);
+  // a plain box with only a heading (Nina).
+  const shell = x.native ? `<dialog open class="ci-popup"><h2>Contact info</h2><div id="body"></div><button aria-label="Dismiss" id="dismiss">Dismiss</button></dialog>`
+    : x.plain ? `<div class="ci-popup"><div><h2>Contact info</h2></div><div id="body"></div><button aria-label="Dismiss" id="dismiss">Dismiss</button></div>`
+    : `<div role="dialog" class="artdeco-modal ci-popup" aria-labelledby="ci"><h2 id="ci">Contact info</h2><div id="body"></div><button aria-label="Dismiss" id="dismiss">Dismiss</button></div>`;
+  main.insertAdjacentHTML('beforeend', shell);
+  document.getElementById('dismiss').onclick = () => document.querySelector('.ci-popup')?.remove();
   const body = document.getElementById('body');
   const row = (label, inner) => `<div class="ci-row"><p class="ci-label"><svg></svg>${label}</p><div>${inner}</div></div>`;
   setTimeout(() => {

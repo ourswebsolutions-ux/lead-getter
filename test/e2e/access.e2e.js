@@ -131,7 +131,7 @@ test('app lock, website filter, WhatsApp-only export', async (t) => {
   await win.getByLabel('Show websites').selectOption('with');
   await win.waitForFunction(() => document.querySelectorAll('tbody tr').length === 1);
   assert.deepEqual(await names(), ['Has Site WA']);
-  assert.match(await win.locator('tbody tr td').nth(4).innerText(), /Website\s*example\.pk/);
+  assert.match(await win.locator('tbody tr td').nth(5).innerText(), /Website\s*example\.pk/);
   await win.getByLabel('Show websites').selectOption('without');
   await win.waitForFunction(() => document.querySelectorAll('tbody tr').length === 2);
   await win.getByLabel('Show websites').selectOption('all');

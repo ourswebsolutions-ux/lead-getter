@@ -172,7 +172,7 @@ class LinkedInSession extends SearchSession {
     const s = this.stats.linkedin;
     const n = (v, one, many = `${one}s`) => `${v} ${v === 1 ? one : many}`;
     const parts = [];
-    if (this.modes.connections) parts.push(`${n(s.connections || 0, 'connection')} read`);
+    if (this.modes.connections) parts.push(`${n(s.connections || 0, 'connection')} read`, ...(s.updated ? [`${s.updated} saved earlier now updated with their Contact info`] : []));
     if (this.modes.people) parts.push(`${n(s.profiles, 'profile')} opened from ${n(this.peoplePage, 'people results page')}`, ...(this.extension ? [`${s.fromExtension} with contacts from ${this.extension.provider.label}`] : []), `${s.verified} verified email${s.verified === 1 ? '' : 's'}`, `${s.directPhones} direct phone${s.directPhones === 1 ? '' : 's'}`);
     if (this.modes.jobs) parts.push(`${n(s.jobs, 'job')} on ${n(s.pages, 'results page')}`);
     if (this.modes.posts) parts.push(n(s.posts, 'post'));
@@ -287,7 +287,7 @@ class LinkedInSession extends SearchSession {
 
   connProgress(note = '') {
     const s = this.stats.linkedin;
-    this.status('running', `LinkedIn connections: ${s.connections || 0} read · ${s.newLeads} new leads (${s.withEmail} with an email, ${s.withPhone} with a phone)${note ? ` · ${note}` : ''}`);
+    this.status('running', `LinkedIn connections: ${s.connections || 0} read · ${s.newLeads} new leads${s.updated ? ` · ${s.updated} updated` : ''} (${s.withEmail} with an email, ${s.withPhone} with a phone)${note ? ` · ${note}` : ''}`);
   }
 
   // One connection: profile, Contact info, saved. Missing details are left
@@ -354,6 +354,7 @@ class LinkedInSession extends SearchSession {
     }
     if (saved?.lead) {
       if (saved.isNewLead) s.newLeads++;
+      else s.updated = (s.updated || 0) + 1;
       if (emails.length) s.withEmail++;
       if (phones.length) s.withPhone++;
       this.stats.leads++;

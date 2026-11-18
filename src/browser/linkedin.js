@@ -547,15 +547,29 @@ function readProfileInPage() {
 // last one opened), never another dialog (messaging, notices) or the
 // profile behind it.
 function contactInfoBox() {
-  const all = [...document.querySelectorAll('[role="dialog"], .artdeco-modal, [aria-modal="true"]')];
-  return all.filter((d) => /contact info/i.test(d.innerText || '')).pop() || document.querySelector('.pv-contact-info') || null;
+  const all = [...document.querySelectorAll('[role="dialog"], [role="alertdialog"], dialog[open], .artdeco-modal, [aria-modal="true"], [data-test-modal]')];
+  // Last resort: the "Contact info" heading (not the profile's link) and the popup around it.
+  const headingBox = () => {
+    const h = [...document.querySelectorAll('h1, h2, h3, [role="heading"]')].find((e) => /^\s*contact info\s*$/i.test(e.textContent || '') && !e.closest('a'));
+    let box = h?.parentElement;
+    while (box && box !== document.body && !box.querySelector('a[href]')) box = box.parentElement;
+    return box && box !== document.body && !box.matches('main') ? box : null;
+  };
+  return all.filter((d) => /contact info/i.test(d.innerText || '')).pop() || document.querySelector('.pv-contact-info') || headingBox();
 }
 
 // Ready once the popup shows its details (a link or a label with a value),
 // not just its title while it loads.
 function contactInfoReadyInPage() {
-  const all = [...document.querySelectorAll('[role="dialog"], .artdeco-modal, [aria-modal="true"]')];
-  const box = all.filter((d) => /contact info/i.test(d.innerText || '')).pop() || document.querySelector('.pv-contact-info');
+  const all = [...document.querySelectorAll('[role="dialog"], [role="alertdialog"], dialog[open], .artdeco-modal, [aria-modal="true"], [data-test-modal]')];
+  // Last resort: the "Contact info" heading (not the profile's link) and the popup around it.
+  const headingBox = () => {
+    const h = [...document.querySelectorAll('h1, h2, h3, [role="heading"]')].find((e) => /^\s*contact info\s*$/i.test(e.textContent || '') && !e.closest('a'));
+    let box = h?.parentElement;
+    while (box && box !== document.body && !box.querySelector('a[href]')) box = box.parentElement;
+    return box && box !== document.body && !box.matches('main') ? box : null;
+  };
+  const box = all.filter((d) => /contact info/i.test(d.innerText || '')).pop() || document.querySelector('.pv-contact-info') || headingBox();
   if (!box) return null;
   const lines = (box.innerText || '').split('\n').map((l) => l.trim()).filter(Boolean);
   return box.querySelector('a[href]') && lines.length >= 3 ? 'ok' : null;
@@ -567,8 +581,15 @@ function contactInfoReadyInPage() {
 // popup only: its text (label, then values) and its links.
 function readContactInfoInPage() {
   const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim();
-  const all = [...document.querySelectorAll('[role="dialog"], .artdeco-modal, [aria-modal="true"]')];
-  const box = all.filter((d) => /contact info/i.test(d.innerText || '')).pop() || document.querySelector('.pv-contact-info');
+  const all = [...document.querySelectorAll('[role="dialog"], [role="alertdialog"], dialog[open], .artdeco-modal, [aria-modal="true"], [data-test-modal]')];
+  // Last resort: the "Contact info" heading (not the profile's link) and the popup around it.
+  const headingBox = () => {
+    const h = [...document.querySelectorAll('h1, h2, h3, [role="heading"]')].find((e) => /^\s*contact info\s*$/i.test(e.textContent || '') && !e.closest('a'));
+    let box = h?.parentElement;
+    while (box && box !== document.body && !box.querySelector('a[href]')) box = box.parentElement;
+    return box && box !== document.body && !box.matches('main') ? box : null;
+  };
+  const box = all.filter((d) => /contact info/i.test(d.innerText || '')).pop() || document.querySelector('.pv-contact-info') || headingBox();
   const empty = { emails: [], phones: [], websites: [], other: [], profile: '', fields: {} };
   if (!box) return empty;
   const LABEL = /^(email|e-mail|emails|phone|phones|mobile|website|websites|birthday|connected|connected since|address|twitter|x \(twitter\)|im|instant messenger|wechat|whatsapp|skype|.+['’]s profile|your profile|profile)$/i;
@@ -735,8 +756,15 @@ async function waitForPopup(page, timeout) {
 async function closeContactInfo(page) {
   await page
     .evaluate(() => {
-      const all = [...document.querySelectorAll('[role="dialog"], .artdeco-modal, [aria-modal="true"]')];
-      const box = all.filter((d) => /contact info/i.test(d.innerText || '')).pop();
+      const all = [...document.querySelectorAll('[role="dialog"], [role="alertdialog"], dialog[open], .artdeco-modal, [aria-modal="true"], [data-test-modal]')];
+  // Last resort: the "Contact info" heading (not the profile's link) and the popup around it.
+  const headingBox = () => {
+    const h = [...document.querySelectorAll('h1, h2, h3, [role="heading"]')].find((e) => /^\s*contact info\s*$/i.test(e.textContent || '') && !e.closest('a'));
+    let box = h?.parentElement;
+    while (box && box !== document.body && !box.querySelector('a[href]')) box = box.parentElement;
+    return box && box !== document.body && !box.matches('main') ? box : null;
+  };
+      const box = all.filter((d) => /contact info/i.test(d.innerText || '')).pop() || headingBox();
       const btn = box && [...box.querySelectorAll('button')].find((b) => /dismiss|close/i.test(`${b.getAttribute('aria-label') || ''} ${b.textContent || ''}`));
       btn?.click();
     })

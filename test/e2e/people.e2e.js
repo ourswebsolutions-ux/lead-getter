@@ -145,7 +145,9 @@ test('People search: default mode, location, verification setting, contact datas
   assert.match(csv, /LinkedIn Profile URL,Person Title,Company,All Phones/);
   assert.match(csv, /Verified,https:\/\/www\.linkedin\.com\/in\/jane-doe-seo,SEO Lead,Acme Growth,"'\+15125550142 \(direct, valid\)/);
 
-  // Start: LinkedIn alone, with its search and location.
+  // Start: LinkedIn alone, with its search and location (the Contact data menu closed first).
+  if (await panel.isVisible()) await win.getByRole('button', { name: /^Contact data/ }).click();
+  await panel.waitFor({ state: 'hidden' });
   await win.getByRole('switch', { name: 'Google Maps search' }).click();
   await win.locator('#li-kw').fill('SEO');
   await win.locator('#li-loc').fill('USA');

@@ -73,8 +73,9 @@ test('My connections: every connection (Show more results), profile and Contact 
   assert.match(omar.discovery, /Birthday: June 5/);
   assert.match(omar.discovery, /Connected: Nov 10, 2026/);
   // Missing details: left empty, the lead is still saved.
-  assert.deepEqual([by['Sara Khan'].email, by['Sara Khan'].phone], ['', '']);
-  assert.equal(by['Nina Shah'].phone, '+923001234567', 'a local number read with the profile’s country');
+  // A native <dialog> popup (Sara); a missing phone stays empty.
+  assert.deepEqual([by['Sara Khan'].email, by['Sara Khan'].phone], ['sara@brightmedia.example', '']);
+  assert.equal(by['Nina Shah'].phone, '+923001234567', 'a plain popup (heading only); a local number read with the profile’s country');
   assert.equal(by['Zain Ali'].websiteUrl, 'https://arcstudio.example/');
   assert.equal(by['Omar Farooq'].email, 'omar@buildco.example');
   assert.ok(statuses.some((m) => /LinkedIn connections: \d+ read/.test(m)), 'progress');
@@ -104,7 +105,8 @@ test('My connections: a connection saved by an earlier version without its Conta
   store.savePersonLead({ profileUrl: 'https://www.linkedin.com/in/ali-raza', name: 'Ali Raza', company: 'Fit Out Pro', email: '', emailStatus: 'none', emails: [], phones: [], discovery: 'LinkedIn connection; contact info: 0 emails, 0 phones, no website', sourceUrl: 'https://www.linkedin.com/mynetwork/invite-connect/connections/' });
   // Saved by People search: left alone.
   store.savePersonLead({ profileUrl: 'https://www.linkedin.com/in/sara-khan', name: 'Sara Khan', email: '', emailStatus: 'none', emails: [], phones: [], discovery: 'email: not found' });
-  const { visited } = await run(t, { store });
+  const { visited, outcome } = await run(t, { store });
+  assert.match(outcome.message, /1 saved earlier now updated with their Contact info/);
   const opened = visited.filter((u) => /^\/in\/[^/]+\/?$/.test(u)).map((u) => u.split('/')[2]);
   assert.ok(opened.includes('ali-raza'), 'read once more');
   assert.ok(!opened.includes('sara-khan'));
