@@ -535,35 +535,72 @@ function readProfileInPage() {
   };
 }
 
-function contactInfoReadyInPage() {
-  const box = document.querySelector('[role="dialog"], .pv-contact-info, section.pv-contact-info__contact-type');
-  return box && /contact info/i.test(box.innerText || '') ? 'ok' : null;
+// The Contact info popup itself: the dialog that says "Contact info" (the
+// last one opened), never another dialog (messaging, notices) or the
+// profile behind it.
+function contactInfoBox() {
+  const all = [...document.querySelectorAll('[role="dialog"], .artdeco-modal, [aria-modal="true"]')];
+  return all.filter((d) => /contact info/i.test(d.innerText || '')).pop() || document.querySelector('.pv-contact-info') || null;
 }
 
-// The profile's Contact info: { emails, phones, websites }. Only what
-// LinkedIn shows this user (the member's own sharing settings decide).
+// Ready once the popup shows its details (a link or a label with a value),
+// not just its title while it loads.
+function contactInfoReadyInPage() {
+  const all = [...document.querySelectorAll('[role="dialog"], .artdeco-modal, [aria-modal="true"]')];
+  const box = all.filter((d) => /contact info/i.test(d.innerText || '')).pop() || document.querySelector('.pv-contact-info');
+  if (!box) return null;
+  const lines = (box.innerText || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  return box.querySelector('a[href]') && lines.length >= 3 ? 'ok' : null;
+}
+
+// What the Contact info popup shows this user (the member's own sharing
+// settings decide): emails, phones, websites, and every other field by its
+// label (Birthday, Connected, Address, Twitter, IM...). Read from the
+// popup only: its text (label, then values) and its links.
 function readContactInfoInPage() {
   const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim();
-  const box = document.querySelector('[role="dialog"]') || document.querySelector('.pv-contact-info') || document.body;
-  const emails = [...box.querySelectorAll('a[href^="mailto:"]')].map((a) => a.getAttribute('href').replace(/^mailto:/i, '').split('?')[0].trim());
-  const phones = [];
-  const websites = [];
-  for (const sec of box.querySelectorAll('section, .pv-contact-info__contact-type')) {
-    const head = clean(sec.querySelector('h3, header')?.textContent);
-    if (/^phone/i.test(head)) for (const li of sec.querySelectorAll('li, span.t-14')) phones.push(clean(li.textContent).replace(/\((mobile|work|home)\)/i, '').trim());
-    if (/^website/i.test(head)) for (const a of sec.querySelectorAll('a[href]')) websites.push(a.href);
+  const all = [...document.querySelectorAll('[role="dialog"], .artdeco-modal, [aria-modal="true"]')];
+  const box = all.filter((d) => /contact info/i.test(d.innerText || '')).pop() || document.querySelector('.pv-contact-info');
+  const empty = { emails: [], phones: [], websites: [], other: [], profile: '', fields: {} };
+  if (!box) return empty;
+  const LABEL = /^(email|e-mail|emails|phone|phones|mobile|website|websites|birthday|connected|connected since|address|twitter|x \(twitter\)|im|instant messenger|wechat|whatsapp|skype|.+['’]s profile|your profile|profile)$/i;
+  const SKIP = /^(contact info|dismiss|close|edit contact info|show all|see all|\(mobile\)|\(work\)|\(home\)|\(company\)|\(personal\)|\(blog\)|\(portfolio\)|\(other\)|\(rss feed\))$/i;
+  const fields = {};
+  let cur = null;
+  for (const raw of (box.innerText || '').split('\n')) {
+    const line = clean(raw);
+    if (!line || SKIP.test(line)) continue;
+    if (LABEL.test(line)) {
+      cur = /profile$/i.test(line) ? 'Profile' : line.replace(/^./, (c) => c.toUpperCase());
+      fields[cur] = fields[cur] || [];
+      continue;
+    }
+    if (cur && fields[cur].length < 6) fields[cur].push(line.replace(/\s*\((mobile|work|home|company|personal|blog|portfolio|other|rss feed)\)$/i, ''));
   }
-  for (const a of box.querySelectorAll('a[href^="tel:"]')) phones.push(a.getAttribute('href').replace(/^tel:/i, ''));
-  // Other professional details it shows (Address, Twitter, IM, Connected
-  // since); not the birthday, which is personal.
-  const other = [];
-  for (const sec of box.querySelectorAll('section, .pv-contact-info__contact-type')) {
-    const head = clean(sec.querySelector('h3, header')?.textContent);
-    if (!head || /^(phone|website|email|birthday|contact info)/i.test(head) || /profile$/i.test(head)) continue;
-    const value = clean([...sec.querySelectorAll('a, span, li, div')].map((e) => e.children.length ? '' : e.textContent).filter((t) => t && clean(t) !== head).join(' ')) || clean(sec.textContent.replace(head, ''));
-    if (value && value.length < 300) other.push({ label: head.slice(0, 40), value: value.slice(0, 200) });
-  }
-  return { emails: [...new Set(emails)].slice(0, 5), phones: [...new Set(phones.filter((p) => /\d{5,}/.test(p.replace(/\D/g, ''))))].slice(0, 5), websites: [...new Set(websites)].slice(0, 5), other: other.slice(0, 6) };
+  const pick = (re) => Object.entries(fields).filter(([k]) => re.test(k)).flatMap(([, v]) => v);
+  const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,24}/gi;
+  // Links: a website may be wrapped in LinkedIn's redirect.
+  const unwrap = (href) => {
+    try {
+      const u = new URL(href, location.href);
+      if (/linkedin\.com$/i.test(u.hostname) && /\/redir\//.test(u.pathname)) return u.searchParams.get('url') || '';
+      return u.href;
+    } catch {
+      return '';
+    }
+  };
+  const links = [...box.querySelectorAll('a[href]')].map((a) => a.getAttribute('href'));
+  const emails = [...links.filter((h) => /^mailto:/i.test(h)).map((h) => decodeURIComponent(h.replace(/^mailto:/i, '').split('?')[0]).trim()), ...pick(/^e-?mails?$/i).flatMap((v) => v.match(EMAIL) || [])].map((e) => e.toLowerCase());
+  const phones = [...links.filter((h) => /^tel:/i.test(h)).map((h) => h.replace(/^tel:/i, '')), ...pick(/^(phones?|mobile)$/i)].filter((p) => /\d{5,}/.test(String(p).replace(/\D/g, '')));
+  const hrefs = links.filter((h) => !/^(mailto|tel|javascript):/i.test(h)).map(unwrap).filter(Boolean);
+  const profile = hrefs.find((h) => /linkedin\.com\/in\//i.test(h)) || '';
+  const websites = [...hrefs.filter((h) => /^https?:/i.test(h) && !/linkedin\.com/i.test(new URL(h).hostname))];
+  // A website written without a link.
+  for (const v of pick(/^websites?$/i)) if (!websites.some((w) => w.includes(v.replace(/^https?:\/\//, '').replace(/\/$/, '')))) websites.push(/^https?:/i.test(v) ? v : `https://${v}`);
+  const other = Object.entries(fields)
+    .filter(([k, v]) => v.length && !/^(e-?mails?|phones?|mobile|websites?|profile)$/i.test(k))
+    .map(([k, v]) => ({ label: k, value: v.join(', ').slice(0, 200) }));
+  return { emails: [...new Set(emails)].slice(0, 5), phones: [...new Set(phones)].slice(0, 5), websites: [...new Set(websites)].slice(0, 5), other: other.slice(0, 8), profile, fields };
 }
 
 async function searchPeople(page, q, { geoUrn = null, n = 1 } = {}) {
@@ -613,6 +650,8 @@ async function readProfile(page, profileUrl) {
 async function readContactInfo(page, profileUrl) {
   const r = await open(page, `${profileUrl.replace(/\/$/, '')}/overlay/contact-info/`, contactInfoReadyInPage, { timeout: 15_000 });
   if (r.mode !== 'ok') return r;
+  // The popup fills in its fields a moment after it opens.
+  await page.waitForTimeout(600);
   return { mode: 'ok', info: await page.evaluate(readContactInfoInPage) };
 }
 

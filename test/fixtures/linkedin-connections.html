@@ -5,11 +5,11 @@
 // Built like LinkedIn's pages: My Network > Connections (cards with a
 // "Show more results" button), profiles, and the Contact info overlay.
 const PEOPLE = {
-  'ali-raza': { name: 'Ali Raza', headline: 'CEO at Fit Out Pro', location: 'Dubai, United Arab Emirates', company: 'Fit Out Pro', email: 'ali@fitoutpro.example', phone: '+971 50 123 4567', website: 'https://fitoutpro.example', address: 'Business Bay, Dubai' },
+  'ali-raza': { name: 'Ali Raza', headline: 'CEO at Fit Out Pro', location: 'Dubai, United Arab Emirates', company: 'Fit Out Pro', email: 'ali@fitoutpro.example', phone: '+971 50 123 4567', website: 'https://fitoutpro.example', address: 'Business Bay, Dubai', birthday: 'March 3' },
   'sara-khan': { name: 'Sara Khan', headline: 'Marketing Manager', location: 'Lahore, Pakistan', company: 'Bright Media' },
-  'omar-farooq': { name: 'Omar Farooq', headline: 'Founder, BuildCo', location: 'Doha, Qatar', company: 'BuildCo', email: 'omar@buildco.example' },
+  'omar-farooq': { name: 'Omar Farooq', headline: 'Founder, BuildCo', location: 'Doha, Qatar', company: 'BuildCo', email: 'omar@buildco.example', website: 'https://buildco.example', phone: '+974 5555 1234', birthday: 'June 5', sdui: true },
   'nina-shah': { name: 'Nina Shah', headline: 'Sales Lead', location: 'Karachi, Pakistan', company: 'SellWell', phone: '0300 1234567' },
-  'zain-ali': { name: 'Zain Ali', headline: 'Architect', location: 'Riyadh, Saudi Arabia', company: 'Arc Studio', website: 'https://arcstudio.example' },
+  'zain-ali': { name: 'Zain Ali', headline: 'Architect', location: 'Riyadh, Saudi Arabia', company: 'Arc Studio', website: 'https://arcstudio.example', sdui: true },
 };
 const ORDER = Object.keys(PEOPLE);
 const card = (id) => `<li class="mn-connection-card"><a href="/in/${id}/"><span class="mn-connection-card__name">${PEOPLE[id].name}</span></a><span class="mn-connection-card__occupation">${PEOPLE[id].headline}</span><time>Connected 1 week ago</time><button>Message</button></li>`;
@@ -26,15 +26,38 @@ if (p.startsWith('/mynetwork/invite-connect/connections')) {
   draw();
 } else if ((m = p.match(/^\/in\/([^/]+)\/overlay\/contact-info/))) {
   const x = PEOPLE[m[1]];
+  const id = m[1];
   document.title = `${x.name} | LinkedIn`;
-  main.innerHTML = `<section class="pv-top-card"><h1>${x.name}</h1><div class="text-body-medium">${x.headline}</div></section><div role="dialog"><h2>Contact info</h2>
-    <section class="pv-contact-info__contact-type"><h3>${x.name}’s Profile</h3><a href="https://www.linkedin.com/in/${m[1]}">linkedin.com/in/${m[1]}</a></section>
-    ${x.website ? `<section class="pv-contact-info__contact-type"><h3>Website</h3><a href="${x.website}">${x.website.replace('https://', '')}</a></section>` : ''}
-    ${x.phone ? `<section class="pv-contact-info__contact-type"><h3>Phone</h3><ul><li><span class="t-14">${x.phone}</span> (Mobile)</li></ul></section>` : ''}
-    ${x.address ? `<section class="pv-contact-info__contact-type"><h3>Address</h3><a href="https://maps.example">${x.address}</a></section>` : ''}
-    ${x.email ? `<section class="pv-contact-info__contact-type"><h3>Email</h3><a href="mailto:${x.email}">${x.email}</a></section>` : ''}
-    <section class="pv-contact-info__contact-type"><h3>Birthday</h3><span>March 3</span></section>
-    <section class="pv-contact-info__contact-type"><h3>Connected</h3><span>Nov 10, 2026</span></section></div>`;
+  // The profile behind the popup (with an email of its own that must NOT be
+  // taken), LinkedIn's messaging panel (also a dialog, first in the page),
+  // then the Contact info popup, which fills in a moment after it opens.
+  main.innerHTML = `<section class="pv-top-card"><h1>${x.name}</h1><div class="text-body-medium">${x.headline}</div></section>
+    <section><h2>About</h2><p>For press write to <a href="mailto:press@background.example">press@background.example</a></p></section>
+    <aside role="dialog" aria-label="Messaging" class="msg-overlay"><h2>Messaging</h2><a href="mailto:inbox@messaging.example">inbox</a><p>Phone 0300 9999999</p></aside>
+    <div role="dialog" class="artdeco-modal" aria-labelledby="ci"><h2 id="ci">Contact info</h2><div id="body"></div><button aria-label="Dismiss">Dismiss</button></div>`;
+  const body = document.getElementById('body');
+  const row = (label, inner) => `<div class="ci-row"><p class="ci-label"><svg></svg>${label}</p><div>${inner}</div></div>`;
+  setTimeout(() => {
+    if (x.sdui) {
+      // LinkedIn's newer markup: no sections or h3, labels in <p>, a website behind LinkedIn's redirect.
+      body.innerHTML = [
+        row(`${x.name}’s Profile`, `<a href="https://www.linkedin.com/in/${id}">linkedin.com/in/${id}</a>`),
+        x.website ? row('Website', `<a href="https://www.linkedin.com/redir/redirect?url=${encodeURIComponent(x.website)}&urlhash=x">${x.website.replace('https://', '')}</a><span> (Company)</span>`) : '',
+        x.phone ? row('Phone', `<span>${x.phone}</span><span> (Mobile)</span>`) : '',
+        x.email ? row('Email', `<a href="mailto:${x.email}">${x.email}</a>`) : '',
+        x.birthday ? row('Birthday', `<span>${x.birthday}</span>`) : '',
+        row('Connected', '<span>Nov 10, 2026</span>'),
+      ].join('');
+    } else {
+      body.innerHTML = `<section class="pv-contact-info__contact-type"><h3>${x.name}’s Profile</h3><a href="https://www.linkedin.com/in/${id}">linkedin.com/in/${id}</a></section>
+        ${x.website ? `<section class="pv-contact-info__contact-type"><h3>Website</h3><a href="${x.website}">${x.website.replace('https://', '')}</a></section>` : ''}
+        ${x.phone ? `<section class="pv-contact-info__contact-type"><h3>Phone</h3><ul><li><span class="t-14">${x.phone}</span> (Mobile)</li></ul></section>` : ''}
+        ${x.address ? `<section class="pv-contact-info__contact-type"><h3>Address</h3><a href="https://maps.example">${x.address}</a></section>` : ''}
+        ${x.email ? `<section class="pv-contact-info__contact-type"><h3>Email</h3><a href="mailto:${x.email}">${x.email}</a></section>` : ''}
+        ${x.birthday ? `<section class="pv-contact-info__contact-type"><h3>Birthday</h3><span>${x.birthday}</span></section>` : ''}
+        <section class="pv-contact-info__contact-type"><h3>Connected</h3><span>Nov 10, 2026</span></section>`;
+    }
+  }, 700);
 } else if ((m = p.match(/^\/in\/([^/]+)\/?$/))) {
   const x = PEOPLE[m[1]];
   document.title = `${x.name} | LinkedIn`;

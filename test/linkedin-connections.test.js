@@ -61,7 +61,15 @@ test('My connections: every connection (Show more results), profile and Contact 
   assert.deepEqual([ali.email, ali.phone, ali.websiteUrl, ali.profileUrl, ali.companyName, ali.address], ['ali@fitoutpro.example', '+971501234567', 'https://fitoutpro.example/', 'https://www.linkedin.com/in/ali-raza', 'Fit Out Pro', 'Dubai, United Arab Emirates']);
   assert.match(ali.discovery, /Address: Business Bay, Dubai/);
   assert.match(ali.discovery, /Connected: Nov 10, 2026/);
-  assert.doesNotMatch(ali.discovery, /March 3/, 'the birthday is personal: not kept');
+  assert.match(ali.discovery, /Birthday: March 3/);
+  // Only the popup: not the profile behind it, not the messaging panel.
+  const everything = JSON.stringify(store.listLeads({ source: 'linkedin' }));
+  assert.doesNotMatch(everything, /background\.example|messaging\.example|9999999/);
+  // LinkedIn's newer popup markup (no sections), a website behind LinkedIn's redirect.
+  const omar = by['Omar Farooq'];
+  assert.deepEqual([omar.email, omar.phone, omar.websiteUrl], ['omar@buildco.example', '+97455551234', 'https://buildco.example/']);
+  assert.match(omar.discovery, /Birthday: June 5/);
+  assert.match(omar.discovery, /Connected: Nov 10, 2026/);
   // Missing details: left empty, the lead is still saved.
   assert.deepEqual([by['Sara Khan'].email, by['Sara Khan'].phone], ['', '']);
   assert.equal(by['Nina Shah'].phone, '+923001234567', 'a local number read with the profile’s country');
