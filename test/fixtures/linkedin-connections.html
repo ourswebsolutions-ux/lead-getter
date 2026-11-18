@@ -1,0 +1,47 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>LinkedIn</title></head>
+<body><main id="main"></main>
+<script>
+// Built like LinkedIn's pages: My Network > Connections (cards with a
+// "Show more results" button), profiles, and the Contact info overlay.
+const PEOPLE = {
+  'ali-raza': { name: 'Ali Raza', headline: 'CEO at Fit Out Pro', location: 'Dubai, United Arab Emirates', company: 'Fit Out Pro', email: 'ali@fitoutpro.example', phone: '+971 50 123 4567', website: 'https://fitoutpro.example', address: 'Business Bay, Dubai' },
+  'sara-khan': { name: 'Sara Khan', headline: 'Marketing Manager', location: 'Lahore, Pakistan', company: 'Bright Media' },
+  'omar-farooq': { name: 'Omar Farooq', headline: 'Founder, BuildCo', location: 'Doha, Qatar', company: 'BuildCo', email: 'omar@buildco.example' },
+  'nina-shah': { name: 'Nina Shah', headline: 'Sales Lead', location: 'Karachi, Pakistan', company: 'SellWell', phone: '0300 1234567' },
+  'zain-ali': { name: 'Zain Ali', headline: 'Architect', location: 'Riyadh, Saudi Arabia', company: 'Arc Studio', website: 'https://arcstudio.example' },
+};
+const ORDER = Object.keys(PEOPLE);
+const card = (id) => `<li class="mn-connection-card"><a href="/in/${id}/"><span class="mn-connection-card__name">${PEOPLE[id].name}</span></a><span class="mn-connection-card__occupation">${PEOPLE[id].headline}</span><time>Connected 1 week ago</time><button>Message</button></li>`;
+const main = document.getElementById('main');
+const p = location.pathname;
+let m;
+if (p.startsWith('/mynetwork/invite-connect/connections')) {
+  let shown = 3;
+  const draw = () => {
+    main.innerHTML = `<section><h1>${ORDER.length} connections</h1><ul>${ORDER.slice(0, shown).map(card).join('')}</ul>${shown < ORDER.length ? '<button id="more">Show more results</button>' : ''}</section>`;
+    const b = document.getElementById('more');
+    if (b) b.onclick = () => { shown += 2; draw(); };
+  };
+  draw();
+} else if ((m = p.match(/^\/in\/([^/]+)\/overlay\/contact-info/))) {
+  const x = PEOPLE[m[1]];
+  document.title = `${x.name} | LinkedIn`;
+  main.innerHTML = `<section class="pv-top-card"><h1>${x.name}</h1><div class="text-body-medium">${x.headline}</div></section><div role="dialog"><h2>Contact info</h2>
+    <section class="pv-contact-info__contact-type"><h3>${x.name}’s Profile</h3><a href="https://www.linkedin.com/in/${m[1]}">linkedin.com/in/${m[1]}</a></section>
+    ${x.website ? `<section class="pv-contact-info__contact-type"><h3>Website</h3><a href="${x.website}">${x.website.replace('https://', '')}</a></section>` : ''}
+    ${x.phone ? `<section class="pv-contact-info__contact-type"><h3>Phone</h3><ul><li><span class="t-14">${x.phone}</span> (Mobile)</li></ul></section>` : ''}
+    ${x.address ? `<section class="pv-contact-info__contact-type"><h3>Address</h3><a href="https://maps.example">${x.address}</a></section>` : ''}
+    ${x.email ? `<section class="pv-contact-info__contact-type"><h3>Email</h3><a href="mailto:${x.email}">${x.email}</a></section>` : ''}
+    <section class="pv-contact-info__contact-type"><h3>Birthday</h3><span>March 3</span></section>
+    <section class="pv-contact-info__contact-type"><h3>Connected</h3><span>Nov 10, 2026</span></section></div>`;
+} else if ((m = p.match(/^\/in\/([^/]+)\/?$/))) {
+  const x = PEOPLE[m[1]];
+  document.title = `${x.name} | LinkedIn`;
+  main.innerHTML = `<section class="artdeco-card pv-top-card"><div><h1 class="text-heading-xlarge">${x.name}</h1><span>· 1st</span></div>
+    <div class="text-body-medium break-words">${x.headline}</div>
+    <div><span class="text-body-small inline t-black--light break-words">${x.location}</span> · <a href="/in/${m[1]}/overlay/contact-info/">Contact info</a></div>
+    <ul><li><a href="/company/${x.company.toLowerCase().replace(/\s+/g, '-')}/"><span>${x.company}</span></a></li></ul></section>
+    <section><h2>Experience</h2><ul><li><span>${x.headline.split(' at ')[0]}</span><span>${x.company}</span></li></ul></section>`;
+}
+</script></body></html>

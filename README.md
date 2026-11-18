@@ -324,6 +324,9 @@ What each source needs:
 
 ## LinkedIn Lead Search
 
+**My connections:** tick *My connections* under "LinkedIn finds" (no search words needed when it is the only mode) and click Start Search. Lead Finder opens My Network > Connections in your LinkedIn session, loads the whole list (scrolling, "Show more results"), and opens each connection's profile and Contact info: name, profile URL, headline and job title, company, location, and what Contact info shows you (emails, phones, website, address, Twitter or IM, connected since; not the birthday). Nothing is looked up elsewhere or guessed; missing details stay empty and the next connection follows. Each is saved as a LinkedIn lead (category "LinkedIn Connections" unless you give one), once: someone already saved is not opened again. Progress shows in the status line; Stop Search ends it at once. Export with the Source filter set to LinkedIn and **Export CSV** (LinkedIn Profile URL, Person Title, Company, All Phones, All Emails columns). A login page, security check or limit stops it and is reported, never worked around.
+
+
 **LinkedIn Lead Search** is the LinkedIn switch. It searches what you type in the **LinkedIn search** bar and finds **companies that need what it describes** (for `Full Stack Developer`: companies hiring one, or asking for one in a post) and their **public business contact details**. It runs at the same time as Google Maps and Facebook, in its own Chrome window, using that profile's LinkedIn login.
 
 **Modes** (checkboxes under the LinkedIn search bar, each can be switched off):

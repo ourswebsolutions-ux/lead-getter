@@ -124,7 +124,7 @@ class LinkedInSession extends SearchSession {
     this.fetchImpl = fetchImpl;
     this.country = country;
     this.diagnose = diagnose;
-    this.modes = { people: modes.people === true, jobs: modes.jobs !== false, posts: modes.posts !== false, companies: modes.companies !== false };
+    this.modes = { connections: modes.connections === true, people: modes.people === true, jobs: modes.jobs !== false, posts: modes.posts !== false, companies: modes.companies !== false };
     this.location = String(location || '').trim();
     this.geo = this.li.geoFor ? this.li.geoFor(this.location) : null;
     this.verifier = verifier;
@@ -172,6 +172,7 @@ class LinkedInSession extends SearchSession {
     const s = this.stats.linkedin;
     const n = (v, one, many = `${one}s`) => `${v} ${v === 1 ? one : many}`;
     const parts = [];
+    if (this.modes.connections) parts.push(`${n(s.connections || 0, 'connection')} read`);
     if (this.modes.people) parts.push(`${n(s.profiles, 'profile')} opened from ${n(this.peoplePage, 'people results page')}`, ...(this.extension ? [`${s.fromExtension} with contacts from ${this.extension.provider.label}`] : []), `${s.verified} verified email${s.verified === 1 ? '' : 's'}`, `${s.directPhones} direct phone${s.directPhones === 1 ? '' : 's'}`);
     if (this.modes.jobs) parts.push(`${n(s.jobs, 'job')} on ${n(s.pages, 'results page')}`);
     if (this.modes.posts) parts.push(n(s.posts, 'post'));
@@ -214,9 +215,12 @@ class LinkedInSession extends SearchSession {
 
   async searchOnce() {
     const page = await this.op(() => this.pages.linkedin());
-    for (const mode of ['people', 'jobs', 'posts', 'companies']) {
+    for (const mode of ['connections', 'people', 'jobs', 'posts', 'companies']) {
       if (!this.modes[mode] || this.done.has(mode)) continue;
-      if (mode === 'people') {
+      if (mode === 'connections') {
+        this.inPeople = true;
+        await this.runConnections(page).finally(() => (this.inPeople = false));
+      } else if (mode === 'people') {
         this.inPeople = true;
         await this.runPeople(page).finally(() => (this.inPeople = false));
       }
@@ -227,6 +231,126 @@ class LinkedInSession extends SearchSession {
     }
     // Companies found before LinkedIn closed its pages are still completed.
     for (const c of this.companies.values()) if (c.state === 'queued') await this.completeCompany(page, c);
+  }
+
+  // --- My connections: their Contact info --------------------------------------------------
+
+  // My Network > Connections: each connection's profile and Contact info
+  // (only what LinkedIn shows this user), saved as a person lead. The list
+  // is read as it loads (scrolling, "Show more results") until it brings no
+  // one new. Someone already saved is not opened again.
+  async runConnections(page) {
+    this.setStep('searching');
+    const s = this.stats.linkedin;
+    s.connections = 0;
+    this.connProgress('opening My Network > Connections');
+    const r = await this.liPage(page, () => this.li.openConnections(page));
+    if (!r) return;
+    if (r.mode === 'empty') return this.connProgress('LinkedIn shows no connections');
+    if (r.mode !== 'ok') return this.connProgress(`the connections page did not load (${r.detail || r.mode})`);
+    let list = r.people;
+    let idle = 0;
+    const max = this.pacing.liMaxConnections || 5000;
+    while (!this.blocked && s.connections < max) {
+      const fresh = list.filter((p) => p.profileUrl && !this.seenProfiles.has(p.profileUrl));
+      if (!fresh.length) {
+        if (++idle > 2) return this.connProgress(`all ${s.connections} connections read`);
+      } else idle = 0;
+      this.setStep('analyzing');
+      for (const p of fresh) {
+        this.seenProfiles.add(p.profileUrl);
+        s.connections++;
+        await this.processConnection(page, p);
+        if (this.blocked) return;
+      }
+      // Back to the list for more (profiles were opened in the same tab).
+      this.connProgress('loading more connections');
+      const back = await this.liPage(page, () => this.li.openConnections(page));
+      if (!back || back.mode !== 'ok') return;
+      let more = back.people;
+      for (let i = 0; i < 40 && more.every((p) => this.seenProfiles.has(p.profileUrl)); i++) {
+        const before = more.length;
+        more = await this.op(() => this.li.moreConnections(page));
+        if (more.length === before) break;
+      }
+      list = more;
+    }
+  }
+
+  connProgress(note = '') {
+    const s = this.stats.linkedin;
+    this.status('running', `LinkedIn connections: ${s.connections || 0} read · ${s.newLeads} new leads (${s.withEmail} with an email, ${s.withPhone} with a phone)${note ? ` · ${note}` : ''}`);
+  }
+
+  // One connection: profile, Contact info, saved. Missing details are left
+  // empty; nothing is looked up elsewhere or guessed.
+  async processConnection(page, card) {
+    const s = this.stats.linkedin;
+    this.stats.processed++;
+    const profileUrl = this.li.cleanProfileUrl(card.profileUrl) || card.profileUrl;
+    if (this.store.hasPersonLead(profileUrl)) {
+      s.duplicates++;
+      return this.connProgress(`${card.name} is already a lead`);
+    }
+    this.connProgress(`${card.name}: profile`);
+    const r = await this.liPage(page, () => this.li.readProfile(page, profileUrl));
+    if (!r) return;
+    if (r.mode !== 'ok') {
+      s.failures++;
+      return this.connProgress(`${card.name}: the profile did not load (${r.detail || r.mode})`);
+    }
+    s.profiles++;
+    const p = { ...r.profile, name: r.profile.name || card.name, headline: r.profile.headline || card.headline, location: r.profile.location || card.location };
+    await this.pause(this.pacing.liPage);
+    this.connProgress(`${p.name}: contact info`);
+    let info = { emails: [], phones: [], websites: [], other: [] };
+    const ci = await this.liPage(page, () => this.li.readContactInfo(page, profileUrl));
+    if (ci?.mode === 'ok') info = { other: [], ...ci.info };
+    const country = countryFromAddress(p.location) || this.country;
+    const phones = (info.phones || [])
+      .map((raw) => normalizePhone(raw, { address: country ? `x, ${countryName(country)}` : p.location }))
+      .filter((n) => n.phone)
+      .map((n) => ({ phone: n.phone, raw: n.raw, status: n.status === 'valid' ? 'valid' : 'unverified', country: n.country, kind: 'direct', source: 'LinkedIn contact info' }));
+    const emails = (info.emails || []).map((e) => ({ email: e, kind: 'person', status: 'unverified', source: 'LinkedIn contact info' }));
+    const website = (info.websites || []).map((h) => this.li.cleanWebsite(h)).find(Boolean) || '';
+    const other = (info.other || []).map((o) => `${o.label}: ${o.value}`);
+    const discovery = [`LinkedIn connection; contact info: ${ci?.mode === 'ok' ? `${emails.length} email${emails.length === 1 ? '' : 's'}, ${phones.length} phone${phones.length === 1 ? '' : 's'}, ${website ? 'a website' : 'no website'}` : `not read (${ci?.mode || this.blocked || 'closed'})`}`, ...other].join('; ');
+    let saved;
+    try {
+      saved = this.store.savePersonLead({
+        profileUrl,
+        name: p.name,
+        title: p.title || '',
+        headline: p.headline || '',
+        company: p.company || '',
+        companyUrl: this.li.cleanCompanyUrl(p.companyHref) || '',
+        location: p.location || '',
+        website,
+        email: emails[0]?.email || '',
+        emailStatus: emails.length ? 'unverified' : 'none',
+        emails,
+        phone: phones[0] || null,
+        phones,
+        discovery,
+        providers: [],
+        sourceUrl: this.li.CONNECTIONS_URL,
+        keyword: this.keyword,
+        categoryId: this.categoryId,
+      });
+    } catch (err) {
+      s.failures++;
+      return this.connProgress(`${p.name}: not saved (${err.message})`);
+    }
+    if (saved?.lead) {
+      if (saved.isNewLead) s.newLeads++;
+      if (emails.length) s.withEmail++;
+      if (phones.length) s.withPhone++;
+      this.stats.leads++;
+      if (saved.isNewLead) this.stats.newLeads++;
+      this.emit('lead', saved.lead);
+    }
+    this.connProgress(`${p.name}: ${emails.length || phones.length ? 'saved with contact details' : 'saved (no contact details shared)'}`);
+    await this.pause(this.pacing.liPage);
   }
 
   // --- People: profiles and contact discovery -------------------------------------------

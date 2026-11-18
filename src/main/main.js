@@ -514,8 +514,11 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn, raw
   }
   let linkedinKeyword = '';
   let linkedinLocation = '';
+  // My connections alone needs no LinkedIn search words.
+  const lim = linkedinModes();
+  const connectionsOnly = lim.connections && !lim.people && !lim.jobs && !lim.posts && !lim.companies;
   if (withLinkedIn) {
-    const k = validateKeyword(rawLinkedIn);
+    const k = connectionsOnly && !String(rawLinkedIn || '').trim() ? { keyword: 'LinkedIn connections' } : validateKeyword(rawLinkedIn);
     if (k.error) return { ok: false, error: `LinkedIn search: ${k.error.replace(/^Enter a search keyword/, 'enter what to search for')}` };
     linkedinKeyword = k.keyword;
     linkedinLocation = String(rawLocation || '').replace(/\s+/g, ' ').trim().slice(0, 80);
@@ -523,7 +526,7 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn, raw
     if (!keyword) {
       keyword = linkedinKeyword;
       const given = validateCategory(rawCategory);
-      cat = given.error ? validateCategory(linkedinKeyword) : given;
+      cat = given.error ? validateCategory(connectionsOnly ? 'LinkedIn Connections' : linkedinKeyword) : given;
       if (cat.error) return { ok: false, error: cat.error };
     }
   }
@@ -781,8 +784,8 @@ function setLinkedInSearch(on) {
 // is the default; settings saved before it existed start with People only.
 function linkedinModes() {
   const m = store.getState('linkedinModes');
-  if (!m || typeof m.people !== 'boolean') return { people: true, jobs: false, posts: false, companies: false };
-  return { people: m.people, jobs: m.jobs === true, posts: m.posts === true, companies: m.companies === true };
+  if (!m || typeof m.people !== 'boolean') return { connections: false, people: true, jobs: false, posts: false, companies: false };
+  return { connections: m.connections === true, people: m.people, jobs: m.jobs === true, posts: m.posts === true, companies: m.companies === true };
 }
 
 // Contact discovery for People: verify emails with mail servers (default
@@ -819,8 +822,8 @@ function linkedinSettings() {
 function setLinkedInSettings(raw) {
   if (!raw || typeof raw !== 'object') return { ok: false, error: 'Invalid value' };
   if (raw.modes) {
-    const m = { people: raw.modes.people === true, jobs: raw.modes.jobs === true, posts: raw.modes.posts === true, companies: raw.modes.companies === true };
-    if (!m.people && !m.jobs && !m.posts && !m.companies) return { ok: false, error: 'Keep at least one LinkedIn mode on.' };
+    const m = { connections: raw.modes.connections === true, people: raw.modes.people === true, jobs: raw.modes.jobs === true, posts: raw.modes.posts === true, companies: raw.modes.companies === true };
+    if (!m.connections && !m.people && !m.jobs && !m.posts && !m.companies) return { ok: false, error: 'Keep at least one LinkedIn mode on.' };
     store.setState('linkedinModes', m);
   }
   if (raw.contact && typeof raw.contact === 'object') {

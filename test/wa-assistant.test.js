@@ -282,3 +282,18 @@ test('A completed search: the admin is asked what is next; nothing starts unless
   await say('leads');
   assert.match(last(), /Found: 118 · Checked: 118 · Remaining: 0 · New leads: 31\nStatus: Completed \(all results checked\)/);
 });
+
+test('A command is never blocked by an unanswered suggestion', async () => {
+  const { a, say, last } = world({ campaigns: [] });
+  await a.suggest();
+  assert.match(last(), /is currently available/);
+  await say('search');
+  assert.match(last(), /Which country/, '"search" works although a YES / NO question was open');
+  await say('UAE');
+  assert.match(last(), /Select a category/);
+  await say('stop');
+  assert.match(last(), /No search is running/, '"stop" is never taken as an answer');
+  await say('Construction');
+  assert.match(last(), /I did not understand/, 'the setup was ended by stop');
+});
+

@@ -556,7 +556,7 @@ export default function App({ onLock }) {
   }); // LinkedIn's own search
   const [linkedinOn, setLinkedinOn] = useState(false); // LinkedIn Lead Search (stored in the app)
   const [country, setCountry] = useState(null); // { setting, effective, countries }: how local numbers are read
-  const [liSettings, setLiSettings] = useState({ modes: { people: true, jobs: false, posts: false, companies: false }, contact: { verify: true, verifierUrl: '', provider: 'builtin', reveal: true, installedIn: [] }, datasets: [] }); // LinkedIn modes, contact discovery
+  const [liSettings, setLiSettings] = useState({ modes: { connections: false, people: true, jobs: false, posts: false, companies: false }, contact: { verify: true, verifierUrl: '', provider: 'builtin', reveal: true, installedIn: [] }, datasets: [] }); // LinkedIn modes, contact discovery
   const [liLocation, setLiLocation] = useState(() => {
     try {
       return localStorage.getItem('lf-linkedin-location') || '';
@@ -809,12 +809,15 @@ export default function App({ onLock }) {
   // Each source on its own: Google Maps and Facebook use the keyword and
   // category, LinkedIn its own search; at least one source must be on.
   const mainSearch = mapsOn || facebookOn;
+  // LinkedIn "My connections" alone: no search words needed.
+  const lm = liSettings.modes;
+  const connectionsOnly = Boolean(lm.connections && !lm.people && !lm.jobs && !lm.posts && !lm.companies);
   const anySource = mainSearch || linkedinOn;
   const canStart =
     !active &&
     anySource &&
     (!mainSearch || (keyword.trim().length >= 2 && formatCategory(category).length >= 2)) &&
-    (!linkedinOn || liKeyword.trim().length >= 2);
+    (!linkedinOn || liKeyword.trim().length >= 2 || connectionsOnly);
 
   async function toggleMaps() {
     const next = !mapsOn;
@@ -1045,7 +1048,7 @@ export default function App({ onLock }) {
                     id="li-kw"
                     value={liKeyword}
                     onChange={(e) => setLiKeyword(e.target.value)}
-                    placeholder={liSettings.modes.people ? 'e.g. SEO' : 'e.g. Full Stack Developer'}
+                    placeholder={connectionsOnly ? 'Not needed for My connections' : liSettings.modes.people ? 'e.g. SEO' : 'e.g. Full Stack Developer'}
                     maxLength={120}
                     disabled={active}
                     title={liSettings.modes.people ? 'People on LinkedIn matching this (title, skills, headline)' : 'Jobs, posts and companies on LinkedIn: the companies that need this'}
@@ -1109,6 +1112,7 @@ export default function App({ onLock }) {
             <div className="li-options" role="group" aria-label="LinkedIn modes">
               <span className="muted">LinkedIn finds</span>
               {[
+                ['connections', 'My connections', 'Your LinkedIn connections (My Network > Connections): each profile and its Contact info (email, phone, website) as LinkedIn shows them to you'],
                 ['people', 'People', 'LinkedIn People search: each profile is opened and the person\'s professional email and phone are discovered'],
                 ['jobs', 'Jobs', 'Job listings for the LinkedIn search: the companies hiring'],
                 ['posts', 'Posts', 'Posts about hiring, projects or outsourcing for the LinkedIn search'],

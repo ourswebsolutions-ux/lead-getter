@@ -554,7 +554,16 @@ function readContactInfoInPage() {
     if (/^website/i.test(head)) for (const a of sec.querySelectorAll('a[href]')) websites.push(a.href);
   }
   for (const a of box.querySelectorAll('a[href^="tel:"]')) phones.push(a.getAttribute('href').replace(/^tel:/i, ''));
-  return { emails: [...new Set(emails)].slice(0, 5), phones: [...new Set(phones.filter((p) => /\d{5,}/.test(p.replace(/\D/g, ''))))].slice(0, 5), websites: [...new Set(websites)].slice(0, 5) };
+  // Other professional details it shows (Address, Twitter, IM, Connected
+  // since); not the birthday, which is personal.
+  const other = [];
+  for (const sec of box.querySelectorAll('section, .pv-contact-info__contact-type')) {
+    const head = clean(sec.querySelector('h3, header')?.textContent);
+    if (!head || /^(phone|website|email|birthday|contact info)/i.test(head) || /profile$/i.test(head)) continue;
+    const value = clean([...sec.querySelectorAll('a, span, li, div')].map((e) => e.children.length ? '' : e.textContent).filter((t) => t && clean(t) !== head).join(' ')) || clean(sec.textContent.replace(head, ''));
+    if (value && value.length < 300) other.push({ label: head.slice(0, 40), value: value.slice(0, 200) });
+  }
+  return { emails: [...new Set(emails)].slice(0, 5), phones: [...new Set(phones.filter((p) => /\d{5,}/.test(p.replace(/\D/g, ''))))].slice(0, 5), websites: [...new Set(websites)].slice(0, 5), other: other.slice(0, 6) };
 }
 
 async function searchPeople(page, q, { geoUrn = null, n = 1 } = {}) {
@@ -564,6 +573,32 @@ async function searchPeople(page, q, { geoUrn = null, n = 1 } = {}) {
   await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight)).catch(() => {});
   await page.waitForTimeout(1200);
   return { mode: 'ok', people: await page.evaluate(collectPeopleInPage) };
+}
+
+// --- My Network > Connections --------------------------------------------------------
+
+const CONNECTIONS_URL = 'https://www.linkedin.com/mynetwork/invite-connect/connections/';
+
+function connectionsReadyInPage() {
+  const main = document.querySelector('main') || document.body;
+  if (main.querySelector('a[href*="/in/"]')) return 'ok';
+  if (/you don.t have any connections|no connections yet|0 connections/i.test(main.innerText || '')) return 'empty';
+  return null;
+}
+
+// The user's own connections, as LinkedIn lists them (newest first).
+async function openConnections(page) {
+  const r = await open(page, CONNECTIONS_URL, connectionsReadyInPage, { timeout: 30_000 });
+  if (r.mode !== 'ok') return { ...r, people: [] };
+  await page.waitForTimeout(1500);
+  return { mode: 'ok', people: await page.evaluate(collectPeopleInPage) };
+}
+
+// More of the list: scrolls, and presses "Show more results" when shown.
+async function moreConnections(page) {
+  await scrollMore(page, 'main a[href*="/in/"]');
+  await page.waitForTimeout(1200);
+  return page.evaluate(collectPeopleInPage).catch(() => []);
 }
 
 async function readProfile(page, profileUrl) {
@@ -684,6 +719,9 @@ async function searchCompanies(page, q, n = 1) {
 
 module.exports = {
   LI,
+  CONNECTIONS_URL,
+  openConnections,
+  moreConnections,
   jobsSearchUrl,
   jobsResultsUrl,
   postsSearchUrl,

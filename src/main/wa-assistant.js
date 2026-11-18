@@ -55,7 +55,7 @@ const COUNTRY_NAMES = {
 const YES = /^(y|yes|yeah|yep|yup|ok|okay|sure|go|go ahead|start|confirm|confirmed|ji|jee|g|haan|han|haa|ha|hn|theek|thik|theek hai|thik hai|kar do|kr do|krdo|kardo|chalo|done|✅|👍)[.!\s]*$/i;
 const NO = /^(n|no|nope|nah|nahi|nahin|nai|na|mat|mat karo|not now|later|❌|👎)[.!\s]*$/i;
 const CANCEL = /^(cancel|stop setup|exit|quit|band karo|band kro|chhoro|chodo|rehne do|rehnay do)[.!\s]*$/i;
-const SKIP = /^(skip|next|agla|aglay|agle)[.!\s]*$/i;
+const SKIP = /^(skip|agla|aglay|agle)[.!\s]*$/i;
 const COMMANDS = [
   ['help', /^(help|menu|commands|\?)$/i],
   ['status', /^(status|haal|hal)$/i],
@@ -218,8 +218,13 @@ class Assistant {
     // answer (a step waiting for text, or "next" meaning skip).
     const free = c && ['keyword', 'message', 'country', 'category', 'business', 'lines', 'choose'].includes(c.step);
     // "pool" answering "start it or add it to the pool?" is an answer.
+    // Any other command replaces an open yes/no question (a suggestion the
+    // admin did not answer must never block "search", "stop" and the rest).
     const answer = c && c.flow === 'search' && ['confirm', 'busy'].includes(c.step) && cmd === 'pool';
-    if (cmd && !answer && (!c || (ANYTIME.has(cmd) && !free))) {
+    // "stop", "power off" and "help" work even while a question waits for text.
+    const always = ['stop', 'power', 'help'].includes(cmd);
+    if (cmd && !answer && (!free || always)) {
+      if (c && (!ANYTIME.has(cmd) || cmd === 'stop' || cmd === 'power')) delete s.convo[phone];
       this.save(s);
       return this.command(cmd, phone, accountId);
     }
@@ -331,19 +336,17 @@ class Assistant {
       if (c.step === 'country') {
         const { countries, unknown } = parseCountries(text);
         if (countries.length !== 1 || unknown.length) return this.say(phone, `${unknown.length ? `I don't know "${unknown[0]}". ` : ''}Please send one country, for example: UAE`, c.accountId);
-        const cats = this.d.categories().slice(0, 9);
-        return this.ask(phone, { ...c, step: 'category', data: { ...c.data, country: countries[0], cats } }, `Country: ${countries[0]}\n\nSelect a category${cats.length ? ` (a number, or type a new one):\n${cats.map((n, i) => `${i + 1}. ${n}`).join('\n')}` : ', for example: Construction'}`);
+        return this.searchNext(phone, { ...c, data: { ...c.data, country: countries[0], cats: this.d.categories().slice(0, 9) } });
       }
       if (c.step === 'category') {
         const n = Number(text);
         const category = Number.isInteger(n) && n >= 1 && n <= (c.data.cats || []).length ? c.data.cats[n - 1] : text;
         if (category.length < 2 || category.length > 60) return this.say(phone, 'Please send a category name of 2 to 60 characters, or its number.', c.accountId);
-        return this.ask(phone, { ...c, step: 'business', data: { ...c.data, category } }, `Category: ${category}\n\nWhich business type do you want to find? (for example: Fit Out Companies)`);
+        return this.searchNext(phone, { ...c, data: { ...c.data, category } });
       }
       if (c.step === 'business') {
         if (text.length < 2 || text.length > 120) return this.say(phone, 'Please send a business type of 2 to 120 characters.', c.accountId);
-        const data = { ...c.data, business: text };
-        return this.ask(phone, { ...c, step: 'confirm', data }, `Your search:\n• Country: ${data.country}\n• Category: ${data.category}\n• Business: ${data.business}\n\nShould I start this search? Reply YES to start, POOL to add it to the search pool, or NO.`);
+        return this.searchNext(phone, { ...c, data: { ...c.data, business: text } });
       }
       if (c.step === 'confirm' || c.step === 'busy') {
         const pool = /^(pool|add to pool|queue|later)$/i.test(text);
@@ -535,6 +538,15 @@ class Assistant {
     if (!r.ok) return this.say(phone, `The campaign could not start: ${r.error}`, c.accountId);
     this.log(`assistant: campaign started for ${category.name} on ${d.account}`);
     return this.say(phone, d.category ? `Started. "${category.name}" is being messaged from the chosen account. Send "campaigns" for progress.` : `Started. Lead Finder is searching "${d.keyword}" in ${d.countries.join(', ')}; new leads confirmed on WhatsApp join the campaign as they are found. Send "status" for progress.`, c.accountId);
+  }
+
+  // The next missing part of a search, or its confirmation.
+  async searchNext(phone, c) {
+    const data = c.data;
+    if (!data.country) return this.ask(phone, { ...c, step: 'country' }, `${data.business ? `Business: ${data.business}\n\n` : ''}Which country do you want to search? (for example: UAE)`);
+    if (!data.category) return this.ask(phone, { ...c, step: 'category' }, `Country: ${data.country}${data.business ? `\nBusiness: ${data.business}` : ''}\n\nSelect a category${c.data.cats.length ? ` (a number, or type a new one):\n${c.data.cats.map((n, i) => `${i + 1}. ${n}`).join('\n')}` : ', for example: Construction'}`);
+    if (!data.business) return this.ask(phone, { ...c, step: 'business' }, `Country: ${data.country}\nCategory: ${data.category}\n\nWhich business type do you want to find? (for example: Fit Out Companies)`);
+    return this.ask(phone, { ...c, step: 'confirm' }, `Your search:\n• Country: ${data.country}\n• Category: ${data.category}\n• Business: ${data.business}\n\nShould I start this search? Reply YES to start, POOL to add it to the search pool, or NO.`);
   }
 
   // --- searches: pool and inventory ---------------------------------------------------
