@@ -10,6 +10,7 @@ const { ChromeConnection, ChromeError, ConnectCancelled, defaultUserDataDir, lis
 const { SearchSession, WEBSITE_FILTERS } = require('../browser/search-session');
 const { FacebookSession } = require('../browser/facebook-session');
 const { LinkedInSession } = require('../browser/linkedin-session');
+const { cleanPageLink } = require('../browser/linkedin');
 const { runSources } = require('../browser/search-sources');
 const podcastLib = require('../browser/podcasts');
 const { PodcastSearch } = require('../browser/podcast-search');
@@ -517,8 +518,13 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn, raw
   // My connections alone needs no LinkedIn search words.
   const lim = linkedinModes();
   const connectionsOnly = lim.connections && !lim.people && !lim.jobs && !lim.posts && !lim.companies;
+  let linkedinLink = '';
+  if (withLinkedIn && lim.link) {
+    linkedinLink = cleanPageLink(rawLinkedIn) || '';
+    if (!linkedinLink) return { ok: false, error: 'LinkedIn link: paste the address of a LinkedIn page (https://www.linkedin.com/...).' };
+  }
   if (withLinkedIn) {
-    const k = connectionsOnly && !String(rawLinkedIn || '').trim() ? { keyword: 'LinkedIn connections' } : validateKeyword(rawLinkedIn);
+    const k = lim.link ? { keyword: 'LinkedIn link' } : connectionsOnly && !String(rawLinkedIn || '').trim() ? { keyword: 'LinkedIn connections' } : validateKeyword(rawLinkedIn);
     if (k.error) return { ok: false, error: `LinkedIn search: ${k.error.replace(/^Enter a search keyword/, 'enter what to search for')}` };
     linkedinKeyword = k.keyword;
     linkedinLocation = String(rawLocation || '').replace(/\s+/g, ' ').trim().slice(0, 80);
@@ -526,7 +532,7 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn, raw
     if (!keyword) {
       keyword = linkedinKeyword;
       const given = validateCategory(rawCategory);
-      cat = given.error ? validateCategory(connectionsOnly ? 'LinkedIn Connections' : linkedinKeyword) : given;
+      cat = given.error ? validateCategory(lim.link ? 'LinkedIn Link' : connectionsOnly ? 'LinkedIn Connections' : linkedinKeyword) : given;
       if (cat.error) return { ok: false, error: cat.error };
     }
   }
@@ -557,7 +563,7 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn, raw
     sendStatus({ state: 'connecting', phase: 'connection', step: 'connecting', keyword: `${keyword} in ${cont.countries[0]}`, category: category.name, sources, message: `Continuous search: ${cont.countries.join(' → ')}, then again` });
     return { ok: true, keyword, category, continuous: true };
   }
-  const r = launchSearch({ keyword, category, websiteFilter, findEmails, withMaps, withFacebook, withLinkedIn, linkedinKeyword, linkedinLocation });
+  const r = launchSearch({ keyword, category, websiteFilter, findEmails, withMaps, withFacebook, withLinkedIn, linkedinKeyword, linkedinLocation, linkedinLink });
   return { ok: r.ok, keyword: r.keyword, category: r.category };
 }
 
@@ -565,7 +571,7 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn, raw
 // country of a continuous search (auto: its query). search.promise resolves
 // to how it ended: { state: 'done' | 'stopped' | 'error', code, message,
 // newLeads, url }. limit: listings processed (end-to-end tests only).
-function launchSearch({ keyword, category, websiteFilter, findEmails, withMaps, withFacebook = false, withLinkedIn = false, linkedinKeyword = '', linkedinLocation = '', auto = null, signal = null, limit = 0 }) {
+function launchSearch({ keyword, category, websiteFilter, findEmails, withMaps, withFacebook = false, withLinkedIn = false, linkedinKeyword = '', linkedinLocation = '', linkedinLink = '', auto = null, signal = null, limit = 0 }) {
   const sources = [...(withMaps ? ['maps'] : []), ...(withFacebook ? ['facebook'] : []), ...(withLinkedIn ? ['linkedin'] : [])];
   const controller = new AbortController();
   signal?.addEventListener('abort', () => controller.abort(), { once: true });
@@ -665,6 +671,7 @@ function launchSearch({ keyword, category, websiteFilter, findEmails, withMaps, 
             keyword: linkedinKeyword,
             location: linkedinLocation,
             modes: linkedinModes(),
+            link: linkedinLink ? { url: linkedinLink, ...linkPages() } : null,
             // People: contact discovery checks emails with mail servers (or
             // the user's self-hosted verifier) and reads company websites
             // only where their robots.txt allows.
@@ -784,8 +791,15 @@ function setLinkedInSearch(on) {
 // is the default; settings saved before it existed start with People only.
 function linkedinModes() {
   const m = store.getState('linkedinModes');
-  if (!m || typeof m.people !== 'boolean') return { connections: false, people: true, jobs: false, posts: false, companies: false };
-  return { connections: m.connections === true, people: m.people, jobs: m.jobs === true, posts: m.posts === true, companies: m.companies === true };
+  if (!m || typeof m.people !== 'boolean') return { link: false, connections: false, people: true, jobs: false, posts: false, companies: false };
+  return { link: m.link === true, connections: m.connections === true, people: m.people, jobs: m.jobs === true, posts: m.posts === true, companies: m.companies === true };
+}
+
+// Link mode: which pages of the link are read (1 to 1 unless chosen).
+function linkPages() {
+  const p = store.getState('linkedinLinkPages') || {};
+  const from = Math.min(100, Math.max(1, p.from | 0 || 1));
+  return { from, to: Math.min(100, Math.max(from, p.to | 0 || from)) };
 }
 
 // Contact discovery for People: verify emails with mail servers (default
@@ -816,15 +830,22 @@ function contactOutInstalled() {
 }
 
 function linkedinSettings() {
-  return { modes: linkedinModes(), contact: contactSettings(), datasets: store.contactDatasets() };
+  return { modes: linkedinModes(), linkPages: linkPages(), contact: contactSettings(), datasets: store.contactDatasets() };
 }
 
 function setLinkedInSettings(raw) {
   if (!raw || typeof raw !== 'object') return { ok: false, error: 'Invalid value' };
   if (raw.modes) {
-    const m = { connections: raw.modes.connections === true, people: raw.modes.people === true, jobs: raw.modes.jobs === true, posts: raw.modes.posts === true, companies: raw.modes.companies === true };
-    if (!m.connections && !m.people && !m.jobs && !m.posts && !m.companies) return { ok: false, error: 'Keep at least one LinkedIn mode on.' };
+    const m = { link: raw.modes.link === true, connections: raw.modes.connections === true, people: raw.modes.people === true, jobs: raw.modes.jobs === true, posts: raw.modes.posts === true, companies: raw.modes.companies === true };
+    // Link (a LinkedIn page the user gives) runs on its own.
+    if (m.link) Object.assign(m, { connections: false, people: false, jobs: false, posts: false, companies: false });
+    if (!m.link && !m.connections && !m.people && !m.jobs && !m.posts && !m.companies) return { ok: false, error: 'Keep at least one LinkedIn mode on.' };
     store.setState('linkedinModes', m);
+  }
+  if (raw.linkPages && typeof raw.linkPages === 'object') {
+    const from = Math.min(100, Math.max(1, parseInt(raw.linkPages.from, 10) || 1));
+    const to = Math.min(100, Math.max(from, parseInt(raw.linkPages.to, 10) || from));
+    store.setState('linkedinLinkPages', { from, to });
   }
   if (raw.contact && typeof raw.contact === 'object') {
     const url = String(raw.contact.verifierUrl ?? contactSettings().verifierUrl).trim();

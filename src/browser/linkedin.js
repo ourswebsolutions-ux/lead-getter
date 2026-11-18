@@ -667,6 +667,52 @@ async function moreConnections(page) {
   return page.evaluate(collectPeopleInPage).catch(() => []);
 }
 
+// --- A LinkedIn page the user gives (its link) ---------------------------------------
+
+// The link checked: a LinkedIn page (https, linkedin.com). Returns the URL
+// (as a string), or null.
+function cleanPageLink(raw) {
+  try {
+    const t = String(raw || '').trim();
+    const u = new URL(/^https?:\/\//i.test(t) ? t : `https://${t}`);
+    if (!isLinkedInHost(u.hostname)) return null;
+    u.protocol = 'https:';
+    u.hash = '';
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
+// Search results (people, and the like) have numbered pages (&page=N);
+// other pages (a company's People, a group, connections) load more as they
+// are scrolled.
+const isPagedLink = (url) => /\/search\/results\//i.test(new URL(url).pathname);
+
+function pageOfLink(url, n) {
+  const u = new URL(url);
+  if (n > 1) u.searchParams.set('page', String(n));
+  else u.searchParams.delete('page');
+  return u.toString();
+}
+
+// The people on page n of the link: { mode, people, paged }. A page that
+// is not numbered: opened once, then scrolled n - 1 times for more.
+async function openLinkPage(page, url, n = 1) {
+  const paged = isPagedLink(url);
+  if (paged || n === 1 || !page.url().startsWith(url.split('?')[0])) {
+    const r = await open(page, paged ? pageOfLink(url, n) : url, peopleReadyInPage, { timeout: 30_000 });
+    if (r.mode !== 'ok') return { ...r, people: [], paged };
+    await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight)).catch(() => {});
+    await page.waitForTimeout(1500);
+    if (!paged) for (let i = 1; i < n; i++) await scrollMore(page, 'main a[href*="/in/"]');
+  } else {
+    await scrollMore(page, 'main a[href*="/in/"]');
+    await page.waitForTimeout(1200);
+  }
+  return { mode: 'ok', people: await page.evaluate(collectPeopleInPage).catch(() => []), paged };
+}
+
 async function readProfile(page, profileUrl) {
   const r = await open(page, profileUrl, profileReadyInPage);
   if (r.mode !== 'ok') return r;
@@ -878,6 +924,10 @@ module.exports = {
   LI,
   CONNECTIONS_URL,
   openConnections,
+  cleanPageLink,
+  isPagedLink,
+  pageOfLink,
+  openLinkPage,
   moreConnections,
   jobsSearchUrl,
   jobsResultsUrl,

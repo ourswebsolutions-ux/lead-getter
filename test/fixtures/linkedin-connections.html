@@ -26,6 +26,11 @@ if (p.startsWith('/mynetwork/invite-connect/connections')) {
     if (b) b.onclick = () => { shown += 2; draw(); };
   };
   draw();
+} else if (p.startsWith('/search/results/people')) {
+  // A people search link: two people a page, numbered with &page=N.
+  const n = Number(new URLSearchParams(location.search).get('page') || 1);
+  const ids = ['ali-raza', 'sara-khan', 'omar-farooq', 'nina-shah', 'zain-ali'].slice((n - 1) * 2, n * 2);
+  main.innerHTML = ids.length ? `<ul>${ids.map(card).join('')}</ul><p>Page ${n}</p>` : '<p>No results found</p>';
 } else if ((m = p.match(/^\/in\/([^/]+)/))) {
   // A profile. Its "Contact info" link (next to the location) opens the
   // popup when clicked; opening the popup's address directly shows the

@@ -15,7 +15,7 @@ const { leadsToCsv } = require('../src/export/csv');
 const exe = findChromeExecutable();
 const fixture = fs.readFileSync(path.join(__dirname, 'fixtures', 'linkedin-connections.html'), 'utf8');
 
-async function run(t, { store = new LeadStore(':memory:'), signal = new AbortController().signal, onStatus } = {}) {
+async function run(t, { store = new LeadStore(':memory:'), signal = new AbortController().signal, onStatus, link = null } = {}) {
   const browser = await chromium.launch({ executablePath: exe, headless: true });
   t.after(() => browser.close());
   const context = await browser.newContext({ viewport: { width: 1100, height: 900 } });
@@ -23,7 +23,8 @@ async function run(t, { store = new LeadStore(':memory:'), signal = new AbortCon
   const page = await context.newPage();
   const visited = [];
   await context.route('https://www.linkedin.com/**', (r) => {
-    visited.push(new URL(r.request().url()).pathname);
+    const u = new URL(r.request().url());
+    visited.push(u.pathname + (u.pathname.startsWith('/search/') ? u.search : ''));
     return r.fulfill({ contentType: 'text/html; charset=utf-8', body: fixture });
   });
   await context.route(/^https:\/\/(?!www\.linkedin\.com)/, (r) => r.fulfill({ status: 404, body: '' }));
@@ -32,7 +33,8 @@ async function run(t, { store = new LeadStore(':memory:'), signal = new AbortCon
   const cat = store.ensureCategory('LinkedIn Connections');
   const session = new LinkedInSession({
     keyword: 'LinkedIn connections',
-    modes: { connections: true, people: false, jobs: false, posts: false, companies: false },
+    modes: link ? { link: true, connections: false, people: false, jobs: false, posts: false, companies: false } : { connections: true, people: false, jobs: false, posts: false, companies: false },
+    link,
     country: 'PK',
     store,
     categoryId: cat.id,
@@ -114,4 +116,28 @@ test('My connections: a connection saved by an earlier version without its Conta
   assert.deepEqual([ali.email, ali.phone], ['ali@fitoutpro.example', '+971501234567']);
   assert.match(ali.discovery, /Contact info read/);
   assert.equal(store.listLeads({ source: 'linkedin' }).filter((l) => l.name === 'Ali Raza').length, 1, 'still one lead');
+});
+
+test('Page link: only the chosen pages of a LinkedIn search link, each person\'s profile and Contact info', { skip: !exe && 'Google Chrome not installed' }, async (t) => {
+  const url = 'https://www.linkedin.com/search/results/people/?keywords=seo&network=%5B%22F%22%5D';
+  const { outcome, stats, visited, leads } = await run(t, { link: { url, from: 2, to: 3 } });
+  assert.equal(outcome.state, 'done', outcome.message);
+  assert.match(outcome.message, /3 people read from 2 pages of the link/);
+  const searched = visited.filter((u) => u.startsWith('/search/'));
+  assert.equal(searched.length, 2, searched.join(' '));
+  assert.match(searched[0], /page=2/);
+  assert.match(searched[1], /page=3/);
+  assert.ok(!visited.some((u) => /connections/.test(u)), 'nothing else read');
+  const opened = visited.filter((u) => /^\/in\/[^/]+\/?$/.test(u)).map((u) => u.split('/')[2]);
+  assert.deepEqual(opened, ['omar-farooq', 'nina-shah', 'zain-ali']);
+  assert.equal(leads.length, 3);
+  assert.equal(stats.connections, 3);
+});
+
+test('Page link: a page past the last one ends the run', { skip: !exe && 'Google Chrome not installed' }, async (t) => {
+  const url = 'https://www.linkedin.com/search/results/people/?keywords=seo';
+  const { outcome, leads } = await run(t, { link: { url, from: 3, to: 9 } });
+  assert.equal(outcome.state, 'done', outcome.message);
+  assert.equal(leads.length, 1);
+  assert.match(outcome.message, /1 person read/);
 });

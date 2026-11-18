@@ -606,7 +606,7 @@ export default function App({ onLock }) {
   }); // LinkedIn's own search
   const [linkedinOn, setLinkedinOn] = useState(false); // LinkedIn Lead Search (stored in the app)
   const [country, setCountry] = useState(null); // { setting, effective, countries }: how local numbers are read
-  const [liSettings, setLiSettings] = useState({ modes: { connections: false, people: true, jobs: false, posts: false, companies: false }, contact: { verify: true, verifierUrl: '', provider: 'builtin', reveal: true, installedIn: [] }, datasets: [] }); // LinkedIn modes, contact discovery
+  const [liSettings, setLiSettings] = useState({ modes: { link: false, connections: false, people: true, jobs: false, posts: false, companies: false }, contact: { verify: true, verifierUrl: '', provider: 'builtin', reveal: true, installedIn: [] }, datasets: [] }); // LinkedIn modes, contact discovery
   const [liLocation, setLiLocation] = useState(() => {
     try {
       return localStorage.getItem('lf-linkedin-location') || '';
@@ -862,12 +862,15 @@ export default function App({ onLock }) {
   // LinkedIn "My connections" alone: no search words needed.
   const lm = liSettings.modes;
   const connectionsOnly = Boolean(lm.connections && !lm.people && !lm.jobs && !lm.posts && !lm.companies);
+  // LinkedIn "Page link": the search bar holds a LinkedIn page's address.
+  const linkMode = Boolean(lm.link);
+  const linkOk = /^(https?:\/\/)?([\w-]+\.)*linkedin\.com\//i.test(liKeyword.trim());
   const anySource = mainSearch || linkedinOn;
   const canStart =
     !active &&
     anySource &&
     (!mainSearch || (keyword.trim().length >= 2 && formatCategory(category).length >= 2)) &&
-    (!linkedinOn || liKeyword.trim().length >= 2 || connectionsOnly);
+    (!linkedinOn || (linkMode ? linkOk : liKeyword.trim().length >= 2 || connectionsOnly));
 
   async function toggleMaps() {
     const next = !mapsOn;
@@ -901,21 +904,38 @@ export default function App({ onLock }) {
 
   async function changeLinkedIn(next) {
     const res = await api.setLinkedInSettings(next).catch((e) => ({ ok: false, error: e.message }));
-    if (res.ok) setLiSettings({ modes: res.modes, contact: res.contact, datasets: res.datasets || [] });
+    if (res.ok) setLiSettings({ modes: res.modes, linkPages: res.linkPages, contact: res.contact, datasets: res.datasets || [] });
     else notify({ type: 'error', text: res.error });
+  }
+
+  // Link mode's pages, saved when a field is left.
+  const [linkFrom, setLinkFrom] = useState(1);
+  const [linkTo, setLinkTo] = useState(1);
+  useEffect(() => {
+    if (liSettings.linkPages) {
+      setLinkFrom(liSettings.linkPages.from);
+      setLinkTo(liSettings.linkPages.to);
+    }
+  }, [liSettings.linkPages?.from, liSettings.linkPages?.to]);
+  function saveLinkPages() {
+    const from = Math.min(100, Math.max(1, parseInt(linkFrom, 10) || 1));
+    const to = Math.min(100, Math.max(from, parseInt(linkTo, 10) || from));
+    setLinkFrom(from);
+    setLinkTo(to);
+    return changeLinkedIn({ linkPages: { from, to } });
   }
 
   async function importContacts() {
     const res = await api.importContacts().catch((e) => ({ ok: false, error: e.message }));
     if (res.canceled) return;
     if (!res.ok) return notify({ type: 'error', text: res.error });
-    setLiSettings({ modes: res.modes, contact: res.contact, datasets: res.datasets || [] });
+    setLiSettings({ modes: res.modes, linkPages: res.linkPages, contact: res.contact, datasets: res.datasets || [] });
     notify({ type: 'ok', text: `Imported ${res.imported} contact${res.imported === 1 ? '' : 's'} from "${res.dataset}"${res.skipped ? ` (${res.skipped} rows without a name or email skipped)` : ''}.` });
   }
 
   async function deleteDataset(name) {
     const res = await api.deleteContactDataset(name).catch((e) => ({ ok: false, error: e.message }));
-    if (res.ok) setLiSettings({ modes: res.modes, contact: res.contact, datasets: res.datasets || [] });
+    if (res.ok) setLiSettings({ modes: res.modes, linkPages: res.linkPages, contact: res.contact, datasets: res.datasets || [] });
     else notify({ type: 'error', text: res.error });
   }
 
@@ -926,6 +946,7 @@ export default function App({ onLock }) {
   }
 
   async function runSearch(kw, cat, li = liKeyword, loc = liLocation) {
+    if (linkedinOn && linkMode) await saveLinkPages();
     try {
       localStorage.setItem('lf-linkedin-keyword', li);
       localStorage.setItem('lf-linkedin-location', loc);
@@ -1089,7 +1110,7 @@ export default function App({ onLock }) {
             )}
             {linkedinOn && (
               <div className="field grow">
-                <label htmlFor="li-kw">LinkedIn search</label>
+                <label htmlFor="li-kw">{linkMode ? 'LinkedIn page link' : 'LinkedIn search'}</label>
                 <div className="input-wrap">
                   <span className="field-icon">
                     <Icon name="search" />
@@ -1098,15 +1119,25 @@ export default function App({ onLock }) {
                     id="li-kw"
                     value={liKeyword}
                     onChange={(e) => setLiKeyword(e.target.value)}
-                    placeholder={connectionsOnly ? 'Not needed for My connections' : liSettings.modes.people ? 'e.g. SEO' : 'e.g. Full Stack Developer'}
-                    maxLength={120}
+                    placeholder={linkMode ? 'Paste the LinkedIn page link here' : connectionsOnly ? 'Not needed for My connections' : liSettings.modes.people ? 'e.g. SEO' : 'e.g. Full Stack Developer'}
+                    maxLength={linkMode ? 2000 : 120}
                     disabled={active}
                     title={liSettings.modes.people ? 'People on LinkedIn matching this (title, skills, headline)' : 'Jobs, posts and companies on LinkedIn: the companies that need this'}
                   />
                 </div>
               </div>
             )}
-            {linkedinOn && liSettings.modes.people && (
+            {linkedinOn && linkMode && (
+              <div className="field li-pages" role="group" aria-label="Pages of the link">
+                <label htmlFor="li-from">Pages</label>
+                <div className="li-pages-row">
+                  <input id="li-from" type="number" min={1} max={100} value={linkFrom} disabled={active} aria-label="From page" title="First page to read" onChange={(e) => setLinkFrom(e.target.value)} onBlur={saveLinkPages} />
+                  <span className="muted">to</span>
+                  <input type="number" min={1} max={100} value={linkTo} disabled={active} aria-label="To page" title="Last page to read" onChange={(e) => setLinkTo(e.target.value)} onBlur={saveLinkPages} />
+                </div>
+              </div>
+            )}
+            {linkedinOn && !linkMode && liSettings.modes.people && (
               <div className="field li-loc">
                 <label htmlFor="li-loc">Location</label>
                 <input
@@ -1162,6 +1193,7 @@ export default function App({ onLock }) {
             <div className="li-options" role="group" aria-label="LinkedIn modes">
               <span className="muted">LinkedIn finds</span>
               {[
+                ['link', 'Page link', 'A LinkedIn page you choose (search results, a company\'s people…): paste its link in the search bar and choose its pages; each person\'s profile and Contact info are read'],
                 ['connections', 'My connections', 'Your LinkedIn connections (My Network > Connections): each profile and its Contact info (email, phone, website) as LinkedIn shows them to you'],
                 ['people', 'People', 'LinkedIn People search: each profile is opened and the person\'s professional email and phone are discovered'],
                 ['jobs', 'Jobs', 'Job listings for the LinkedIn search: the companies hiring'],
@@ -1174,7 +1206,7 @@ export default function App({ onLock }) {
                     checked={liSettings.modes[k]}
                     disabled={active}
                     aria-label={`LinkedIn ${label}`}
-                    onChange={(e) => changeLinkedIn({ modes: { ...liSettings.modes, [k]: e.target.checked } })}
+                    onChange={(e) => changeLinkedIn({ modes: k === 'link' ? (e.target.checked ? { ...liSettings.modes, link: true } : { ...liSettings.modes, link: false, people: true }) : { ...liSettings.modes, link: false, [k]: e.target.checked } })}
                   />
                   <span>{label}</span>
                 </label>

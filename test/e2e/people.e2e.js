@@ -78,7 +78,7 @@ test('People search: default mode, location, verification setting, contact datas
   await win.locator('#li-loc').waitFor({ state: 'detached' });
   await setBox(mode('People'), true);
   await setBox(mode('Jobs'), false);
-  assert.deepEqual((await win.evaluate(() => window.leadFinder.linkedinSettings())).modes, { connections: false, people: true, jobs: false, posts: false, companies: false });
+  assert.deepEqual((await win.evaluate(() => window.leadFinder.linkedinSettings())).modes, { link: false, connections: false, people: true, jobs: false, posts: false, companies: false });
 
   // Contacts from: ContactOut by default (it is installed in this Chrome), named in the tooltip; reveal on (ContactOut masks values until "View").
   const from = win.getByRole('combobox', { name: 'Contacts from' });
