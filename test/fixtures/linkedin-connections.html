@@ -24,22 +24,39 @@ if (p.startsWith('/mynetwork/invite-connect/connections')) {
     if (b) b.onclick = () => { shown += 2; draw(); };
   };
   draw();
-} else if ((m = p.match(/^\/in\/([^/]+)\/overlay\/contact-info/))) {
-  const x = PEOPLE[m[1]];
+} else if ((m = p.match(/^\/in\/([^/]+)/))) {
+  // A profile. Its "Contact info" link (next to the location) opens the
+  // popup when clicked; opening the popup's address directly shows the
+  // profile only, as LinkedIn's current site does. "More" opens a menu.
   const id = m[1];
+  const x = PEOPLE[id];
   document.title = `${x.name} | LinkedIn`;
-  // The profile behind the popup (with an email of its own that must NOT be
-  // taken), LinkedIn's messaging panel (also a dialog, first in the page),
-  // then the Contact info popup, which fills in a moment after it opens.
-  main.innerHTML = `<section class="pv-top-card"><h1>${x.name}</h1><div class="text-body-medium">${x.headline}</div></section>
+  const link = x.sdui ? `<button type="button" class="ci-link">Contact info</button>` : `<a id="top-card-text-details-contact-info" href="/in/${id}/overlay/contact-info/">Contact info</a>`;
+  main.innerHTML = `<section class="artdeco-card pv-top-card"><div><h1 class="text-heading-xlarge">${x.name}</h1><span>· 1st</span></div>
+    <div class="text-body-medium break-words">${x.headline}</div>
+    <div><span class="text-body-small inline t-black--light break-words">${x.location}</span> · ${link}</div>
+    <ul><li><a href="/company/${x.company.toLowerCase().replace(/\s+/g, '-')}/"><span>${x.company}</span></a></li></ul>
+    <div><button type="button">Message</button><button type="button" id="more">More</button></div></section>
     <section><h2>About</h2><p>For press write to <a href="mailto:press@background.example">press@background.example</a></p></section>
-    <aside role="dialog" aria-label="Messaging" class="msg-overlay"><h2>Messaging</h2><a href="mailto:inbox@messaging.example">inbox</a><p>Phone 0300 9999999</p></aside>
-    <div role="dialog" class="artdeco-modal" aria-labelledby="ci"><h2 id="ci">Contact info</h2><div id="body"></div><button aria-label="Dismiss">Dismiss</button></div>`;
+    <section><h2>Experience</h2><ul><li><span>${x.headline.split(' at ')[0]}</span><span>${x.company}</span></li></ul></section>
+    <aside role="dialog" aria-label="Messaging" class="msg-overlay"><h2>Messaging</h2><a href="mailto:inbox@messaging.example">inbox</a><p>Phone 0300 9999999</p></aside>`;
+  window.contactClicks = 0;
+  document.getElementById('more').onclick = () => main.insertAdjacentHTML('beforeend', '<div role="dialog" class="more-menu"><a href="mailto:share@more.example">Share profile</a><p>Save to PDF</p></div>');
+  const opener = main.querySelector('#top-card-text-details-contact-info, .ci-link');
+  opener.addEventListener('click', (e) => {
+    e.preventDefault();
+    window.contactClicks++;
+    openPopup(id);
+  });
+}
+function openPopup(id) {
+  const x = PEOPLE[id];
+  main.insertAdjacentHTML('beforeend', `<div role="dialog" class="artdeco-modal" aria-labelledby="ci"><h2 id="ci">Contact info</h2><div id="body"></div><button aria-label="Dismiss" id="dismiss">Dismiss</button></div>`);
+  document.getElementById('dismiss').onclick = () => document.querySelector('.artdeco-modal')?.remove();
   const body = document.getElementById('body');
   const row = (label, inner) => `<div class="ci-row"><p class="ci-label"><svg></svg>${label}</p><div>${inner}</div></div>`;
   setTimeout(() => {
     if (x.sdui) {
-      // LinkedIn's newer markup: no sections or h3, labels in <p>, a website behind LinkedIn's redirect.
       body.innerHTML = [
         row(`${x.name}’s Profile`, `<a href="https://www.linkedin.com/in/${id}">linkedin.com/in/${id}</a>`),
         x.website ? row('Website', `<a href="https://www.linkedin.com/redir/redirect?url=${encodeURIComponent(x.website)}&urlhash=x">${x.website.replace('https://', '')}</a><span> (Company)</span>`) : '',
@@ -58,13 +75,5 @@ if (p.startsWith('/mynetwork/invite-connect/connections')) {
         <section class="pv-contact-info__contact-type"><h3>Connected</h3><span>Nov 10, 2026</span></section>`;
     }
   }, 700);
-} else if ((m = p.match(/^\/in\/([^/]+)\/?$/))) {
-  const x = PEOPLE[m[1]];
-  document.title = `${x.name} | LinkedIn`;
-  main.innerHTML = `<section class="artdeco-card pv-top-card"><div><h1 class="text-heading-xlarge">${x.name}</h1><span>· 1st</span></div>
-    <div class="text-body-medium break-words">${x.headline}</div>
-    <div><span class="text-body-small inline t-black--light break-words">${x.location}</span> · <a href="/in/${m[1]}/overlay/contact-info/">Contact info</a></div>
-    <ul><li><a href="/company/${x.company.toLowerCase().replace(/\s+/g, '-')}/"><span>${x.company}</span></a></li></ul></section>
-    <section><h2>Experience</h2><ul><li><span>${x.headline.split(' at ')[0]}</span><span>${x.company}</span></li></ul></section>`;
 }
 </script></body></html>

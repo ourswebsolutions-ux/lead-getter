@@ -647,12 +647,94 @@ async function readProfile(page, profileUrl) {
   return { mode: 'ok', profile: await page.evaluate(readProfileInPage) };
 }
 
+// The profile's Contact info, the way a person opens it: on the profile,
+// the "Contact info" link next to the location is clicked (never the More
+// button), the popup is waited for and read, then closed. A click that does
+// not open it is retried; as a last resort the popup's own address is
+// opened. Returns { mode, info, via: 'click' | 'address' }.
 async function readContactInfo(page, profileUrl) {
-  const r = await open(page, `${profileUrl.replace(/\/$/, '')}/overlay/contact-info/`, contactInfoReadyInPage, { timeout: 15_000 });
-  if (r.mode !== 'ok') return r;
-  // The popup fills in its fields a moment after it opens.
+  const base = profileUrl.replace(/\/$/, '');
+  const onProfile = () => {
+    try {
+      return new URL(page.url()).pathname.replace(/\/$/, '').toLowerCase() === new URL(base).pathname.replace(/\/$/, '').toLowerCase();
+    } catch {
+      return false;
+    }
+  };
+  if (!onProfile()) {
+    const r = await open(page, base, profileReadyInPage);
+    if (r.mode !== 'ok') return r;
+  }
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const link = await contactInfoLink(page);
+    if (!link) {
+      // The top card may still be rendering.
+      await page.waitForTimeout(1000);
+      continue;
+    }
+    await link.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
+    await link.click({ timeout: 5000 }).catch(() => {});
+    const opened = await waitForPopup(page, 10_000);
+    if (opened === 'state') return { mode: (await detectState(page)) || 'failed' };
+    if (opened) {
+      await page.waitForTimeout(600); // its fields fill in a moment after it opens
+      const info = await page.evaluate(readContactInfoInPage);
+      await closeContactInfo(page);
+      return { mode: 'ok', info, via: 'click' };
+    }
+  }
+  // Last resort: the popup's own address.
+  const r = await open(page, `${base}/overlay/contact-info/`, contactInfoReadyInPage, { timeout: 15_000 });
+  if (r.mode !== 'ok') return { ...r, detail: r.detail || 'the Contact info link did not open its popup' };
   await page.waitForTimeout(600);
-  return { mode: 'ok', info: await page.evaluate(readContactInfoInPage) };
+  const info = await page.evaluate(readContactInfoInPage);
+  await closeContactInfo(page);
+  return { mode: 'ok', info, via: 'address' };
+}
+
+// The "Contact info" link of the profile's top card: its address, its id,
+// or its exact text; never "More" or another button.
+async function contactInfoLink(page) {
+  const candidates = [
+    page.locator('main a[href*="/overlay/contact-info"]'),
+    page.locator('#top-card-text-details-contact-info'),
+    page.locator('main a, main button, main [role="link"]').filter({ hasText: /^\s*contact info\s*$/i }),
+  ];
+  for (const c of candidates) {
+    const n = await c.count().catch(() => 0);
+    for (let i = 0; i < n; i++) {
+      const el = c.nth(i);
+      if (await el.isVisible().catch(() => false)) return el;
+    }
+  }
+  return null;
+}
+
+// true once the popup shows its details; 'state' for a login page, check or
+// limit; false after the timeout.
+async function waitForPopup(page, timeout) {
+  const end = Date.now() + timeout;
+  while (Date.now() < end) {
+    if (await page.evaluate(contactInfoReadyInPage).catch(() => null)) return true;
+    if (await detectState(page)) return 'state';
+    await page.waitForTimeout(300);
+  }
+  return false;
+}
+
+// Closes the popup (its Dismiss button, else Escape) so the next profile
+// starts clean.
+async function closeContactInfo(page) {
+  await page
+    .evaluate(() => {
+      const all = [...document.querySelectorAll('[role="dialog"], .artdeco-modal, [aria-modal="true"]')];
+      const box = all.filter((d) => /contact info/i.test(d.innerText || '')).pop();
+      const btn = box && [...box.querySelectorAll('button')].find((b) => /dismiss|close/i.test(`${b.getAttribute('aria-label') || ''} ${b.textContent || ''}`));
+      btn?.click();
+    })
+    .catch(() => {});
+  await page.keyboard.press('Escape').catch(() => {});
+  await page.waitForTimeout(300);
 }
 
 // Scrolls a results list (the box it scrolls in, or the page) for more.

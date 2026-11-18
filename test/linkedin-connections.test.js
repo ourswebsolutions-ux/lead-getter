@@ -55,6 +55,7 @@ test('My connections: every connection (Show more results), profile and Contact 
   assert.equal(leads.length, 5);
   assert.ok(!visited.some((u) => /\/search\//.test(u)), 'no LinkedIn search: only the connections');
   const opened = visited.filter((u) => /^\/in\/[^/]+\/?$/.test(u)).map((u) => u.split('/')[2]);
+  assert.ok(!visited.some((u) => /overlay\/contact-info/.test(u)), 'the popup was opened with its link (a click), not its address');
   assert.deepEqual(opened, ['ali-raza', 'sara-khan', 'omar-farooq', 'nina-shah', 'zain-ali'], 'each profile once, in list order');
   const by = Object.fromEntries(store.listLeads({ source: 'linkedin' }).map((l) => [l.name, l]));
   const ali = by['Ali Raza'];
@@ -64,7 +65,7 @@ test('My connections: every connection (Show more results), profile and Contact 
   assert.match(ali.discovery, /Birthday: March 3/);
   // Only the popup: not the profile behind it, not the messaging panel.
   const everything = JSON.stringify(store.listLeads({ source: 'linkedin' }));
-  assert.doesNotMatch(everything, /background\.example|messaging\.example|9999999/);
+  assert.doesNotMatch(everything, /background\.example|messaging\.example|more\.example|9999999/);
   // LinkedIn's newer popup markup (no sections), a website behind LinkedIn's redirect.
   const omar = by['Omar Farooq'];
   assert.deepEqual([omar.email, omar.phone, omar.websiteUrl], ['omar@buildco.example', '+97455551234', 'https://buildco.example/']);
