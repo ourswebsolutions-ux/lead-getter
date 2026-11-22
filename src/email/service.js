@@ -8,6 +8,12 @@ const { EmailAccounts } = require('./accounts');
 const { EmailCampaigns } = require('./campaigns');
 const { ReplyWatcher, imapInbox } = require('./replies');
 const { extractAccounts, providerFor } = require('./credentials');
+const { ClickTracker } = require('./tracking');
+const fs = require('node:fs');
+const path = require('node:path');
+
+// The tracking file for the user's website, and the Cloudflare Worker.
+const TRACKER_FILES = { php: path.join(__dirname, '..', '..', 'server', 'click-tracker', 'index.php'), worker: path.join(__dirname, '..', '..', 'server', 'click-tracker', 'worker.js') };
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -24,7 +30,7 @@ function leadFilter(raw) {
   return out;
 }
 
-function createEmail({ store, vault, files, canSend, allowInsecure = false, log = () => {} }) {
+function createEmail({ store, vault, files, canSend, allowInsecure = false, log = () => {}, fetch = globalThis.fetch }) {
   const accounts = new EmailAccounts({ store, vault, allowInsecure });
   const campaigns = new EmailCampaigns({
     db: store.db,
@@ -39,6 +45,10 @@ function createEmail({ store, vault, files, canSend, allowInsecure = false, log 
     canSend,
   });
   campaigns.on('error', (err) => log(`email campaigns: ${err.message}`));
+  // Link clicks, fetched from the user's tracking address.
+  const tracker = new ClickTracker({ state: { get: (k) => store.getState(k), set: (k, v) => store.setState(k, v) }, vault, fetch, allowInsecure, log });
+  tracker.onClick = (c) => campaigns.recordClick(c);
+  campaigns.tracker = tracker;
   // Replies and unsubscribes, from each account's own inbox.
   const replies = new ReplyWatcher({ accounts, campaigns, state: { get: (k) => store.getState(k), set: (k, v) => store.setState(k, v) }, openInbox: (login, since) => imapInbox(login, since, { allowInsecure }), log });
   // Accounts given as text (pasted, imported, or written to the assistant):
@@ -82,11 +92,11 @@ function createEmail({ store, vault, files, canSend, allowInsecure = false, log 
     return { found: found.length, results, redacted };
   }
 
-  return { accounts, campaigns, replies, addFromText };
+  return { accounts, campaigns, replies, tracker, addFromText };
 }
 
 // IPC: handle(channel, fn) is main.js's ipcMain.handle wrapper.
-function registerEmailIpc({ handle, email, requirePlan, pickFiles, send, listCategories = () => [] }) {
+function registerEmailIpc({ handle, email, requirePlan, pickFiles, send, listCategories = () => [], saveFile = null }) {
   const { accounts, campaigns } = email;
   const id = (v) => (Number.isInteger(Number(v)) && Number(v) > 0 ? Number(v) : null);
   const withCampaign = (fn) => (raw, ...rest) => {
@@ -155,6 +165,7 @@ function registerEmailIpc({ handle, email, requirePlan, pickFiles, send, listCat
     for (const k of ['delaySeconds', 'dailyLimit']) if (p[k] != null) clean[k] = Number(p[k]);
     if (typeof p.allowPrevious === 'boolean') clean.allowPrevious = p.allowPrevious;
     if (typeof p.aiWrite === 'boolean') clean.aiWrite = p.aiWrite;
+    if (typeof p.trackClicks === 'boolean') clean.trackClicks = p.trackClicks;
     if (Array.isArray(p.accountIds)) clean.accountIds = p.accountIds.map(String).slice(0, 50);
     if (Array.isArray(p.attachments)) clean.attachments = p.attachments.map((a) => (typeof a === 'string' ? a : str(a?.id))).slice(0, 20);
     return campaigns.update(cid, clean);
@@ -183,6 +194,33 @@ function registerEmailIpc({ handle, email, requirePlan, pickFiles, send, listCat
   handle('email:optOut', (address) => campaigns.optOut(str(address)));
   handle('email:removeOptOut', (address) => campaigns.removeOptOut(str(address)));
   handle('email:attach', async () => pickFiles({ title: 'Attach files to the email' }));
+
+  // Click tracking: the tracking address, its files, clicks now.
+  const { tracker } = email;
+  tracker.on('change', () => send('email:tracking', tracker.status()));
+  handle('email:tracking', () => ({ ok: true, status: tracker.status() }));
+  handle('email:trackingConnect', async (base) => {
+    const r = await tracker.connect(str(base).slice(0, 500));
+    if (r.ok) send('email:state', { id: null });
+    return r;
+  });
+  handle('email:trackingDisconnect', () => {
+    const r = tracker.disconnect();
+    send('email:state', { id: null });
+    return r;
+  });
+  handle('email:trackingCheck', async () => {
+    const r = await tracker.poll();
+    if (r.skipped) return { ok: false, error: 'Click tracking is not connected.' };
+    return r.ok ? { ok: true, clicks: r.clicks } : { ok: false, error: `Clicks not checked: ${r.error}.` };
+  });
+  // kind 'php': saved where the user chooses (to upload); 'worker': its code (to paste).
+  handle('email:trackingFile', async (kind) => {
+    if (kind === 'worker') return { ok: true, code: fs.readFileSync(TRACKER_FILES.worker, 'utf8') };
+    if (!saveFile) return { ok: false, error: 'Saving files is not available.' };
+    return saveFile({ title: 'Save the click tracking file', defaultName: 'index.php', data: fs.readFileSync(TRACKER_FILES.php) });
+  });
+  handle('email:clicks', withCampaign((cid, address) => ({ ok: true, clicks: campaigns.clicksOf(cid, str(address).toLowerCase()) })));
 }
 
 module.exports = { createEmail, registerEmailIpc, leadFilter };

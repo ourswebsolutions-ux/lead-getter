@@ -447,7 +447,7 @@ function Editor({ snap, accounts, categories, notify, reload }) {
   const sendersKey = snap.accountIds.join(',');
   useEffect(() => setSenderIds(sendersKey ? sendersKey.split(',') : []), [sendersKey]);
   useEffect(() => {
-    if (!dirty) setD({ name: snap.name, aiWrite: snap.aiWrite, delayMinutes: Math.round((snap.delaySeconds / 60) * 10) / 10, subject: snap.subject, body: snap.body, delaySeconds: snap.delaySeconds, dailyLimit: snap.dailyLimit, allowPrevious: snap.allowPrevious });
+    if (!dirty) setD({ name: snap.name, aiWrite: snap.aiWrite, trackClicks: snap.trackClicks, delayMinutes: Math.round((snap.delaySeconds / 60) * 10) / 10, subject: snap.subject, body: snap.body, delaySeconds: snap.delaySeconds, dailyLimit: snap.dailyLimit, allowPrevious: snap.allowPrevious });
   }, [snap, dirty]);
   if (!d) return null;
   const running = snap.status === 'running';
@@ -581,6 +581,10 @@ function Editor({ snap, accounts, categories, notify, reload }) {
             <strong>{snap.replies}</strong>
             <span>Replies</span>
           </div>
+          <div className={snap.clicks ? 'ok' : ''} title={snap.tracking ? 'People who clicked a link' : 'Click tracking is off'}>
+            <strong>{snap.tracking || snap.clicks ? snap.clicks : '—'}</strong>
+            <span>Clicked</span>
+          </div>
           <div>
             <strong>{snap.sentToday}</strong>
             <span>Today / {snap.dailyLimit}</span>
@@ -702,6 +706,10 @@ function Editor({ snap, accounts, categories, notify, reload }) {
             <input type="checkbox" checked={Boolean(d.allowPrevious)} disabled={running} onChange={(e) => set('allowPrevious', e.target.checked)} />
             <span>Also people emailed by other campaigns</span>
           </label>
+          <label className="check-wrap small" title={snap.tracking || !d.trackClicks ? '' : 'Set up Click tracking (left) to track the links'}>
+            <input type="checkbox" checked={d.trackClicks !== false} disabled={running} onChange={(e) => set('trackClicks', e.target.checked)} />
+            <span>Track link clicks{d.trackClicks !== false && !snap.tracking ? ' (set up Click tracking first)' : ''}</span>
+          </label>
           <span className="grow" />
           <button type="button" className="btn btn-ghost btn-sm" disabled={busy === 'preview'} onClick={showPreview}>
             <Icon name={d.aiWrite ? 'sparkle' : 'eye'} size={13} /> {busy === 'preview' ? 'Writing…' : d.aiWrite ? 'Preview AI email' : 'Preview'}
@@ -779,6 +787,11 @@ function Editor({ snap, accounts, categories, notify, reload }) {
                       {r.error && <span className="em-err-text">{r.error}</span>}
                       {r.sentAt && <span className="muted small"> {when(r.sentAt)}</span>}
                       {r.repliedAt && <span className="em-state s-replied">Replied</span>}
+                      {r.clickedAt && (
+                        <span className="em-state s-clicked" title={`First click ${when(r.clickedAt)}`}>
+                          Clicked{r.clicks > 1 ? ` ×${r.clicks}` : ''}
+                        </span>
+                      )}
                       {r.aiBody && (
                         <details className="em-ai-sent">
                           <summary>AI email</summary>
@@ -821,6 +834,152 @@ function Editor({ snap, accounts, categories, notify, reload }) {
       </section>
       {picker && <RecipientPicker campaign={snap} categories={categories} notify={notify} onClose={() => setPicker(false)} onAdded={() => { setPicker(false); reload(); }} />}
     </>
+  );
+}
+
+// Click tracking: the user's own tracking address (a PHP file on their
+// website, or a Cloudflare Worker). Links in campaign emails go through it.
+function TrackingSetup({ status, onClose, notify }) {
+  const [base, setBase] = useState(status.base || '');
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+  const [worker, setWorker] = useState(null);
+  useEsc(onClose);
+  async function connect(e) {
+    e?.preventDefault();
+    setBusy('connect');
+    setError('');
+    const r = await api.emailTrackingConnect(base);
+    setBusy('');
+    if (!r.ok) return setError(r.error);
+    notify({ type: 'ok', text: 'Click tracking connected. Links in new campaign emails are tracked.' });
+    onClose();
+  }
+  async function savePhp() {
+    const r = await api.emailTrackingFile('php');
+    if (r.ok) notify({ type: 'ok', text: `Saved: ${r.filePath}` });
+    else if (!r.canceled) setError(r.error);
+  }
+  async function showWorker() {
+    const r = await api.emailTrackingFile('worker');
+    if (r.ok) setWorker(r.code);
+  }
+  return (
+    <div className="modal-scrim" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="em-modal wide" role="dialog" aria-modal="true" aria-label="Click tracking">
+        <header className="em-modal-head">
+          <span className="em-mark">
+            <Icon name="link" size={16} />
+          </span>
+          <div>
+            <h2>Click tracking</h2>
+            <p>See who clicked the links in your emails</p>
+          </div>
+          <button type="button" className="icon-btn" aria-label="Close" onClick={onClose}>
+            <Icon name="x" size={14} />
+          </button>
+        </header>
+        <ol className="em-steps">
+          <li>
+            <strong>Website with PHP (cPanel, Hostinger…):</strong> save the tracking file and upload it to a new folder of your website, e.g. <code>public_html/t/index.php</code>.{' '}
+            <button type="button" className="btn btn-ghost btn-sm" onClick={savePhp}>
+              <Icon name="download" size={12} /> Save index.php
+            </button>
+          </li>
+          <li>
+            <strong>No PHP?</strong> Use a free Cloudflare Worker (steps are at the top of its code).{' '}
+            <button type="button" className="btn btn-ghost btn-sm" onClick={showWorker}>
+              <Icon name="file" size={12} /> Show Worker code
+            </button>
+          </li>
+          <li>
+            Enter its address below and press Connect. Lead Finder checks it with a test click, then fetches new clicks every 3 minutes.
+          </li>
+        </ol>
+        {worker && (
+          <div className="em-worker">
+            <button type="button" className="btn btn-sm" onClick={() => navigator.clipboard.writeText(worker).then(() => notify({ type: 'ok', text: 'Worker code copied.' }))}>
+              <Icon name="copy" size={12} /> Copy
+            </button>
+            <pre aria-label="Worker code">{worker}</pre>
+          </div>
+        )}
+        <form className="em-track-form" onSubmit={connect}>
+          <input aria-label="Tracking address" placeholder="https://yourdomain.com/t/" value={base} onChange={(e) => setBase(e.target.value)} spellCheck={false} />
+          <button type="submit" className="btn btn-primary" disabled={busy === 'connect' || !base.trim()}>
+            <Icon name="check" size={13} /> {busy === 'connect' ? 'Testing…' : 'Connect'}
+          </button>
+        </form>
+        <p className="em-note">
+          <Icon name="shield" size={12} /> Use your own domain: links on shared tracking domains are often sent to spam. Every link is signed, so the address only ever opens your own links. No IP addresses or cookies are kept.
+        </p>
+        {error && (
+          <p className="em-error" role="alert">
+            <Icon name="alert" size={13} /> {error}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ClickTracking({ notify }) {
+  const [st, setSt] = useState(null);
+  const [open, setOpen] = useState(false);
+  const [checking, setChecking] = useState(false);
+  useEffect(() => {
+    api.emailTracking().then((r) => r.ok && setSt(r.status));
+    return api.onEmailTracking((s) => setSt(s));
+  }, []);
+  if (!st) return null;
+  async function check() {
+    setChecking(true);
+    const r = await api.emailTrackingCheck();
+    setChecking(false);
+    notify({ type: r.ok ? 'ok' : 'error', text: r.ok ? `${r.clicks} new click${r.clicks === 1 ? '' : 's'}.` : r.error });
+  }
+  async function off() {
+    if (!window.confirm('Turn click tracking off? New emails are sent with their links as they are; links already sent keep working.')) return;
+    await api.emailTrackingDisconnect();
+  }
+  let host = st.base;
+  try {
+    host = new URL(st.base).host + new URL(st.base).pathname.replace(/\/$/, '');
+  } catch {}
+  return (
+    <section className="panel em-card" aria-label="Click tracking">
+      <div className="or-card-head">
+        <h3>
+          <Icon name="link" size={14} /> Click tracking
+        </h3>
+        {st.connected ? (
+          <>
+            <button type="button" className="icon-btn" title="Check clicks now" aria-label="Check clicks now" disabled={checking} onClick={check}>
+              <Icon name="refresh" size={13} />
+            </button>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={off}>
+              Turn off
+            </button>
+          </>
+        ) : (
+          <button type="button" className="btn btn-sm" onClick={() => setOpen(true)}>
+            <Icon name="plus" size={13} /> Set up
+          </button>
+        )}
+      </div>
+      {st.connected ? (
+        <div className="em-track-status">
+          <span className="em-acc-ok">
+            <Icon name="check" size={11} /> On · {host}
+          </span>
+          <span className="muted small">{st.lastPollAt ? `Checked ${when(st.lastPollAt)}` : 'Clicks are checked every 3 minutes'}</span>
+          {st.lastError && <span className="em-acc-error">{st.lastError}</span>}
+        </div>
+      ) : (
+        <p className="muted small">Know which leads clicked a link in your email (needs a small file on your website, or a free Cloudflare Worker).</p>
+      )}
+      {open && <TrackingSetup status={st} onClose={() => setOpen(false)} notify={notify} />}
+    </section>
   );
 }
 
@@ -994,6 +1153,7 @@ export default function EmailView({ notify, hidden }) {
     <section className="outreach or-grid em-view" hidden={hidden} aria-label="Email campaigns">
       <aside className="or-side">
         <Accounts accounts={accounts.accounts} persistent={accounts.persistent} onChange={loadAccounts} notify={notify} />
+        <ClickTracking notify={notify} />
         <CategoryCampaigns list={catList} selected={selected} onOpen={openCategory} onToggle={toggleCategory} toggling={toggling} />
         <section className="panel em-card" aria-label="Campaign list">
           <div className="or-card-head">

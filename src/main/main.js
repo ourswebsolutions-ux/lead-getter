@@ -2363,6 +2363,7 @@ function startBackgroundWork() {
   initWhatsApp();
   email?.campaigns.init(); // email campaigns running when the app ended carry on
   email?.replies.start(); // replies and unsubscribes, read from each account's inbox
+  email?.tracker.start(); // link clicks, from the user's tracking address
   // Continuous searches running when the app ended carry on.
   if (autopilot.engine().state === 'running' && automationSettings().search.resumeInterrupted) {
     autopilot.start();
@@ -2974,6 +2975,7 @@ app.on('before-quit', (e) => {
     .then(() => outreach?.dispose())
     .then(() => email?.campaigns.dispose())
     .then(() => email?.replies.stop())
+    .then(() => email?.tracker.stop())
     .then(() => email?.accounts.dispose())
     .then(() => autoDialer?.stop())
     .then(() => sms?.disconnect())
@@ -3018,6 +3020,20 @@ async function pickFiles({ title }) {
     else errors.push(r.error);
   }
   return { ok: files.length > 0, files, errors, error: errors.join(' ') };
+}
+
+// A file the app gives the user (e.g. the click tracking file), saved where they choose.
+async function saveFile({ title, defaultName, data }) {
+  const testDir = !app.isPackaged && process.env.LEAD_FINDER_TEST_SAVE_DIR;
+  let filePath;
+  if (testDir) filePath = path.join(testDir, defaultName);
+  else {
+    const r = await dialog.showSaveDialog(win, { title, defaultPath: path.join(app.getPath('downloads'), defaultName) });
+    if (r.canceled || !r.filePath) return { ok: false, canceled: true };
+    filePath = r.filePath;
+  }
+  await fs.writeFile(filePath, data);
+  return { ok: true, filePath };
 }
 
 function planInfo() {
@@ -3218,7 +3234,7 @@ function initEmailAndAI() {
     allowInsecure: !app.isPackaged && process.env.LEAD_FINDER_TEST_SMTP_INSECURE === '1',
     log: autoLog,
   });
-  registerEmailIpc({ handle, email, requirePlan, pickFiles, send, listCategories: () => store.listCategories().categories });
+  registerEmailIpc({ handle, email, requirePlan, pickFiles, saveFile, send, listCategories: () => store.listCategories().categories });
   // Images and documents for WhatsApp campaigns (and any other attachment).
   handle('files:pick', () => pickFiles({ title: 'Attach images or documents' }));
   initInbox();

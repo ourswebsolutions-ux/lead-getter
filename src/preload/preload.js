@@ -194,6 +194,14 @@ contextBridge.exposeInMainWorld('leadFinder', {
   emailRemoveOptOut: (email) => ipcRenderer.invoke('email:removeOptOut', String(email ?? '')),
   emailAttach: () => ipcRenderer.invoke('email:attach'),
   onEmail: (cb) => subscribe('email:state', cb),
+  // Click tracking (the user's tracking address; the signing key stays in the main process)
+  emailTracking: () => ipcRenderer.invoke('email:tracking'),
+  emailTrackingConnect: (base) => ipcRenderer.invoke('email:trackingConnect', String(base ?? '')),
+  emailTrackingDisconnect: () => ipcRenderer.invoke('email:trackingDisconnect'),
+  emailTrackingCheck: () => ipcRenderer.invoke('email:trackingCheck'),
+  emailTrackingFile: (kind) => ipcRenderer.invoke('email:trackingFile', kind === 'worker' ? 'worker' : 'php'),
+  emailClicks: (id, email) => ipcRenderer.invoke('email:clicks', Number(id), String(email ?? '')),
+  onEmailTracking: (cb) => subscribe('email:tracking', cb),
   // Inbox: leads who replied (email and WhatsApp)
   inboxThreads: () => ipcRenderer.invoke('inbox:threads'),
   inboxThread: (id) => ipcRenderer.invoke('inbox:thread', Number(id)),

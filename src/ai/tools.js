@@ -150,6 +150,8 @@ function buildTools(d) {
       skipped: s.counts.skipped,
       remaining: s.counts.remaining,
       replies: s.replies,
+      link_clicks: s.tracking || s.clicks ? s.clicks : 'click tracking is off (Outreach > Email > Click tracking)',
+      clicked_by: s.clicks ? d.email.campaigns.clickers(c.id, 20) : undefined,
       sent_today: s.sentToday,
       not_ready: d.email.campaigns.problems(c),
     };

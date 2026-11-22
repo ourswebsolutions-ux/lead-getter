@@ -27,11 +27,13 @@ const { EventEmitter } = require('node:events');
 const { isEmail } = require('./accounts');
 const { extractName, cleanBusiness } = require('../whatsapp/templates');
 const { leadFacts } = require('../ai/lead-facts');
+const { newTrackId } = require('./tracking');
 
 // accountIds: the accounts it sends from, in turn (each with its own delay and daily limit).
 // aiWrite: each email written by the AI from the body (the user's instructions)
 // and the business's details; the text is kept on the recipient.
-const DEFAULTS = { delaySeconds: 60, dailyLimit: 100, allowPrevious: false, attachments: [], html: null, accountIds: [], senderNext: {}, senderDown: {}, aiWrite: false };
+// trackClicks: links go through the user's click tracking address (tracking.js), when it is set up.
+const DEFAULTS = { delaySeconds: 60, dailyLimit: 100, allowPrevious: false, attachments: [], html: null, accountIds: [], senderNext: {}, senderDown: {}, aiWrite: false, trackClicks: true };
 const SYNC_EVERY = 60_000; // category campaigns look for new leads with an email
 const LIMITS = { delay: { min: 10, max: 3600 }, daily: { min: 1, max: 2000 }, attachments: 10, attachmentBytes: 20 * 1024 * 1024, recipients: 20_000 };
 const MAX_ATTEMPTS = 3;
@@ -86,7 +88,20 @@ CREATE TABLE IF NOT EXISTS email_log (
   text TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS email_log_campaign ON email_log (campaign_id, id);
+CREATE TABLE IF NOT EXISTS email_clicks (
+  id TEXT PRIMARY KEY,
+  campaign_id INTEGER NOT NULL,
+  email TEXT NOT NULL,
+  url TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  ua TEXT,
+  bot INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS email_clicks_campaign ON email_clicks (campaign_id, email);
 `;
+
+// A link scanner opens links seconds after delivery; a person does not.
+const SCANNER_WINDOW = 15_000;
 
 const PLACEHOLDER = /\{\s*(name|business|business name|email|first name)\s*\}/gi;
 
@@ -193,11 +208,14 @@ class EmailCampaigns extends EventEmitter {
     this.db.exec(SCHEMA);
     // Replies (read from the account's inbox by replies.js), the account that
     // sent each email, and the AI's text for each recipient.
-    for (const col of ['replied_at INTEGER', 'reply_subject TEXT', 'sent_account TEXT', 'ai_subject TEXT', 'ai_body TEXT']) {
+    // Clicks: the recipient's tracking id (in their links), first click and count.
+    for (const col of ['replied_at INTEGER', 'reply_subject TEXT', 'sent_account TEXT', 'ai_subject TEXT', 'ai_body TEXT', 'track_id TEXT', 'clicked_at INTEGER', 'clicks INTEGER NOT NULL DEFAULT 0']) {
       try {
         this.db.exec(`ALTER TABLE email_recipients ADD COLUMN ${col}`);
       } catch {} // already there
     }
+    this.db.exec('CREATE INDEX IF NOT EXISTS email_recipients_track ON email_recipients (track_id)');
+    this.tracker = null; // ClickTracker (service.js)
     // A category campaign: the category's leads with an email, added as they come.
     try {
       this.db.exec('ALTER TABLE email_campaigns ADD COLUMN category TEXT');
@@ -349,6 +367,7 @@ class EmailCampaigns extends EventEmitter {
     }
     if (patch.allowPrevious !== undefined) config.allowPrevious = Boolean(patch.allowPrevious);
     if (patch.aiWrite !== undefined) config.aiWrite = Boolean(patch.aiWrite);
+    if (patch.trackClicks !== undefined) config.trackClicks = Boolean(patch.trackClicks);
     if (patch.attachments !== undefined) {
       const list = [];
       let bytes = 0;
@@ -375,6 +394,7 @@ class EmailCampaigns extends EventEmitter {
     if (c.status === 'running') return { ok: false, error: 'Stop the campaign before deleting it.' };
     this.db.prepare('DELETE FROM email_recipients WHERE campaign_id = ?').run(c.id);
     this.db.prepare('DELETE FROM email_log WHERE campaign_id = ?').run(c.id);
+    this.db.prepare('DELETE FROM email_clicks WHERE campaign_id = ?').run(c.id);
     this.db.prepare('DELETE FROM email_campaigns WHERE id = ?').run(c.id);
     this.emit('change', { id: c.id });
     return { ok: true };
@@ -581,6 +601,8 @@ class EmailCampaigns extends EventEmitter {
     } catch (err) {
       return { ok: false, error: `The AI could not write the test email: ${err.message}.` };
     }
+    // Its links are tracked too: a click shows in the campaign's history.
+    if (this.tracking(c)) msg = { ...msg, ...this.tracker.rewrite(msg, `test-${c.id}`) };
     try {
       await this.accounts.send(from, { to: address, subject: `[Test] ${msg.subject}`, text: msg.text, html: msg.html, attachments: this.attachments(c) });
       this.log(c.id, 'info', `Test email sent to ${address}`);
@@ -742,7 +764,12 @@ class EmailCampaigns extends EventEmitter {
     if (!reserved) return;
     this.patchConfig(c.id, (cfg) => (cfg.senderNext = { ...(cfg.senderNext || {}), [accountId]: now + c.config.delaySeconds * 1000 }));
     this.setFields(c.id, { nextDueAt: now + c.config.delaySeconds * 1000 });
-    const msg = text ? compose({ subject: text.subject, body: text.body }, { name: r.name, business: r.business, email: r.email }) : compose(c, { name: r.name, business: r.business, email: r.email });
+    let msg = text ? compose({ subject: text.subject, body: text.body }, { name: r.name, business: r.business, email: r.email }) : compose(c, { name: r.name, business: r.business, email: r.email });
+    if (this.tracking(c)) {
+      const t = r.track_id || newTrackId();
+      if (!r.track_id) set({ track_id: t });
+      msg = { ...msg, ...this.tracker.rewrite(msg, t) };
+    }
     const account = this.accounts.get(accountId);
     try {
       const res = await this.accounts.send(accountId, {
@@ -916,6 +943,47 @@ class EmailCampaigns extends EventEmitter {
     return { ok: true, first, unsubscribed, campaignId: r.id };
   }
 
+  // Links in this campaign's emails are tracked now.
+  tracking(c) {
+    return Boolean(this.tracker?.active && c.config.trackClicks !== false);
+  }
+
+  // A click fetched from the tracking address: { id, t, url, at, ua, bot }.
+  // Kept once (by its id); clicks by link scanners are kept but not counted.
+  // Resolves { recorded: true } for a person's click.
+  recordClick({ id, t, url, at, ua = '', bot = false }) {
+    const test = /^test-(\d+)$/.exec(t);
+    if (test) {
+      const c = this.row(Number(test[1]));
+      if (!c || this.db.prepare('SELECT 1 FROM email_clicks WHERE id = ?').get(id)) return { recorded: false };
+      this.db.prepare('INSERT INTO email_clicks (id, campaign_id, email, url, at, ua, bot) VALUES (?, ?, ?, ?, ?, ?, 1)').run(id, c.id, '(test email)', url, at, ua);
+      this.log(c.id, 'info', `Test email: link clicked (${url.slice(0, 120)})`);
+      this.emit('change', { id: c.id });
+      return { recorded: false, test: true };
+    }
+    const r = this.db.prepare('SELECT campaign_id, email, name, business, lead_id, sent_at, clicked_at FROM email_recipients WHERE track_id = ?').get(t);
+    if (!r) return { recorded: false };
+    const scanner = bot || (r.sent_at && at - r.sent_at >= 0 && at - r.sent_at < SCANNER_WINDOW);
+    const added = this.db.prepare('INSERT OR IGNORE INTO email_clicks (id, campaign_id, email, url, at, ua, bot) VALUES (?, ?, ?, ?, ?, ?, ?)').run(id, r.campaign_id, r.email, url, at, ua, scanner ? 1 : 0).changes;
+    if (!added || scanner) return { recorded: false };
+    const first = !r.clicked_at;
+    this.db.prepare('UPDATE email_recipients SET clicks = clicks + 1, clicked_at = COALESCE(clicked_at, ?) WHERE campaign_id = ? AND email = ?').run(at, r.campaign_id, r.email);
+    if (first) this.log(r.campaign_id, 'info', `${r.email} clicked ${url.slice(0, 120)}`);
+    this.emit('clicked', { id: r.campaign_id, email: r.email, name: r.name || r.business || null, business: r.business, leadId: r.lead_id, url, at, first });
+    this.emit('change', { id: r.campaign_id });
+    return { recorded: true, first };
+  }
+
+  // Who clicked (people only), latest first.
+  clickers(id, limit = 20) {
+    return this.db.prepare('SELECT email, name, business, clicks, clicked_at AS firstClickAt FROM email_recipients WHERE campaign_id = ? AND clicked_at IS NOT NULL ORDER BY clicked_at DESC LIMIT ?').all(Number(id), limit);
+  }
+
+  // A recipient's clicks (people only), latest first.
+  clicksOf(id, email) {
+    return this.db.prepare('SELECT url, at FROM email_clicks WHERE campaign_id = ? AND email = ? AND bot = 0 ORDER BY at DESC LIMIT 20').all(Number(id), String(email));
+  }
+
   // --- for the window and the assistant -------------------------------------------
 
   summary(id) {
@@ -944,6 +1012,9 @@ class EmailCampaigns extends EventEmitter {
       counts: n,
       sentToday: this.sentToday(null, c.id),
       replies: this.db.prepare('SELECT COUNT(*) AS n FROM email_recipients WHERE campaign_id = ? AND replied_at IS NOT NULL').get(c.id).n,
+      clicks: this.db.prepare('SELECT COUNT(*) AS n FROM email_recipients WHERE campaign_id = ? AND clicked_at IS NOT NULL').get(c.id).n,
+      trackClicks: c.config.trackClicks !== false,
+      tracking: this.tracking(c),
       nextDueAt: c.nextDueAt,
       createdAt: c.createdAt,
       startedAt: c.startedAt,
@@ -963,7 +1034,7 @@ class EmailCampaigns extends EventEmitter {
       body: c.body,
       allowPrevious: c.config.allowPrevious,
       problems: this.problems(c),
-      recipients: this.db.prepare('SELECT email, lead_id AS leadId, name, business, state, attempts, error, sent_at AS sentAt, retry_at AS retryAt, replied_at AS repliedAt, ai_subject AS aiSubject, ai_body AS aiBody FROM email_recipients WHERE campaign_id = ? ORDER BY CASE state WHEN \'sending\' THEN 0 WHEN \'failed\' THEN 1 WHEN \'uncertain\' THEN 2 WHEN \'queued\' THEN 3 ELSE 4 END, updated_at DESC LIMIT ?').all(c.id, recipients),
+      recipients: this.db.prepare('SELECT email, lead_id AS leadId, name, business, state, attempts, error, sent_at AS sentAt, retry_at AS retryAt, replied_at AS repliedAt, clicked_at AS clickedAt, clicks, ai_subject AS aiSubject, ai_body AS aiBody FROM email_recipients WHERE campaign_id = ? ORDER BY CASE state WHEN \'sending\' THEN 0 WHEN \'failed\' THEN 1 WHEN \'uncertain\' THEN 2 WHEN \'queued\' THEN 3 ELSE 4 END, updated_at DESC LIMIT ?').all(c.id, recipients),
       log: this.db.prepare('SELECT at, level, text FROM email_log WHERE campaign_id = ? ORDER BY id DESC LIMIT 100').all(c.id),
       limits: LIMITS,
     };
