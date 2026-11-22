@@ -53,7 +53,7 @@ class WhatsAppAccounts extends EventEmitter {
     // Replies and receipts for Outreach (live messages only, not history).
     client.on('chat-messages', (list, { live } = {}) => {
       if (!live) return;
-      for (const m of list) if (!m.fromMe && m.phone) this.emit('incoming', { accountId: id, phone: m.phone, text: m.text || '' });
+      for (const m of list) if (!m.fromMe && m.phone) this.emit('incoming', { accountId: id, phone: m.phone, text: m.text || '', media: m.media || null });
     });
     client.on('chat-status', (list) => list.forEach((s) => this.emit('status', { accountId: id, id: s.id, status: s.status })));
     return client;
@@ -103,6 +103,16 @@ class WhatsAppAccounts extends EventEmitter {
       throw err;
     }
     return c.sendAudio(phone, audio);
+  }
+
+  async sendMedia(id, phone, file) {
+    const c = this.client(id);
+    if (!c || c.state !== 'open') {
+      const err = new Error('This WhatsApp account is not connected.');
+      err.code = 'not_connected';
+      throw err;
+    }
+    return c.sendMedia(phone, file);
   }
 
   list() {

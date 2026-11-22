@@ -1118,6 +1118,39 @@ function VoicesSection({ draft, disabled, edit, errors }) {
   );
 }
 
+// Images and documents, sent after the voice files (shown only when there is one).
+function MediaSection({ draft, disabled, edit }) {
+  const media = draft.media || [];
+  if (!media.length) return null;
+  return (
+    <section className="panel or-voices" aria-label="Images and documents">
+      <div className="or-card-head">
+        <h3>
+          <Icon name="image" size={15} /> Images and documents <span className="or-count">{media.length}</span>
+        </h3>
+      </div>
+      <ul className="or-voice-list">
+        {media.map((m) => (
+          <li key={m.id}>
+            <span className="or-voice-icon">
+              <Icon name={m.kind === 'image' ? 'image' : 'file'} size={15} />
+            </span>
+            <span className="or-voice-main">
+              <strong title={m.name}>{m.name}</strong>
+              <span>
+                <span className="or-badge">{m.kind === 'image' ? 'Image' : 'Document'}</span> {kb(m.size)}
+              </span>
+            </span>
+            <button type="button" className="icon-btn danger" disabled={disabled} aria-label={`Remove ${m.name}`} onClick={() => edit({ media: media.filter((x) => x.id !== m.id) })}>
+              <Icon name="x" size={14} />
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 // The campaign's content: message 1 (required), then only what the user adds.
 function Composer({ draft, disabled, edit, notify, preview }) {
   const [adding, setAdding] = useState(false);
@@ -1145,6 +1178,21 @@ function Composer({ draft, disabled, edit, notify, preview }) {
       setAdding(false);
     }
   };
+  const addMedia = async () => {
+    setAdding(true);
+    try {
+      const r = await api.filesPick();
+      if (r.canceled) return;
+      const errs = [...(r.errors || [])];
+      const ok = (r.files || []).filter((f) => f.kind !== 'audio');
+      if ((r.files || []).some((f) => f.kind === 'audio')) errs.push('Audio goes with Add Voice.');
+      const media = draft.media || [];
+      if (ok.length) edit({ media: [...media, ...ok].slice(0, 10) });
+      setErrors(errs);
+    } finally {
+      setAdding(false);
+    }
+  };
   return (
     <div className="or-messages campaign-templates">
       {steps.map((step, i) => (
@@ -1152,6 +1200,7 @@ function Composer({ draft, disabled, edit, notify, preview }) {
       ))}
       <LinksSection draft={draft} disabled={disabled} edit={edit} />
       <VoicesSection draft={draft} disabled={disabled} edit={edit} errors={errors} />
+      <MediaSection draft={draft} disabled={disabled} edit={edit} />
       <div className="or-add-row" role="group" aria-label="Add to the campaign">
         <button type="button" className="btn" disabled={disabled || steps.length >= 10} onClick={() => edit({ templates: [...steps, { variations: [{ text: '', fallback: '' }] }] })}>
           <Icon name="plus" size={14} /> Add Message
@@ -1161,6 +1210,9 @@ function Composer({ draft, disabled, edit, notify, preview }) {
         </button>
         <button type="button" className="btn" disabled={disabled || adding || draft.voices.length >= 10} onClick={addVoice}>
           <Icon name="audio" size={14} /> {adding ? 'Adding…' : 'Add Voice'}
+        </button>
+        <button type="button" className="btn" disabled={disabled || adding || (draft.media || []).length >= 10} onClick={addMedia}>
+          <Icon name="image" size={14} /> Add Image / File
         </button>
       </div>
     </div>

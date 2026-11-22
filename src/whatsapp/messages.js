@@ -71,6 +71,22 @@ function contentOf(message) {
   return null; // protocol, reaction, senderKeyDistribution, pollUpdate, ...
 }
 
+// An image, voice/audio message or document that can be downloaded:
+// { kind: 'image' | 'audio' | 'document', mime, name, caption } or null.
+const EXT = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'audio/ogg': '.ogg', 'audio/mpeg': '.mp3', 'audio/mp4': '.m4a', 'audio/aac': '.aac', 'audio/amr': '.amr', 'application/pdf': '.pdf' };
+function mediaOf(message) {
+  const m = inner(message);
+  if (!m) return null;
+  for (const [field, kind, base] of [['imageMessage', 'image', 'photo'], ['audioMessage', 'audio', 'voice'], ['documentMessage', 'document', 'document']]) {
+    const x = m[field];
+    if (!x) continue;
+    const mime = String(x.mimetype || '').toLowerCase();
+    const name = x.fileName || `${base}-${Date.now()}${EXT[mime.split(';')[0].trim()] || ''}`;
+    return { kind, mime, name: String(name).slice(0, 120), caption: typeof x.caption === 'string' ? x.caption.slice(0, 2000) : '' };
+  }
+  return null;
+}
+
 // Normalizes one Baileys WebMessageInfo. Returns null when it isn't a
 // displayable one-to-one message.
 function normalizeMessage(msg) {
@@ -113,4 +129,5 @@ function laterStatus(current, next) {
   return (STATUS_RANK[next] || 0) > (STATUS_RANK[current] || 0) ? next : current;
 }
 
-module.exports = { normalizeMessage, normalizeStatus, laterStatus, isPersonJid, phoneOfJid, jidOfPhone, toMs, contentOf };
+module.exports = {
+  mediaOf, normalizeMessage, normalizeStatus, laterStatus, isPersonJid, phoneOfJid, jidOfPhone, toMs, contentOf };

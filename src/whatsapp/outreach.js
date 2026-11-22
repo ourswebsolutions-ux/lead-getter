@@ -51,6 +51,7 @@ const DEFAULT_CONFIG = {
   dailyCap: DEFAULT_CAP,
   links: [], // [{ title, url }], added below the message of attachStep
   voices: [], // [{ id, name, mime, size, ptt }], sent right after that message
+  media: [], // [{ id, name, mime, size, kind: 'image' | 'document' }], sent after the voice files
   attachStep: null, // the message links and voice files go with (null: the last one)
   quietStart: 21,
   quietEnd: 9,
@@ -133,9 +134,9 @@ class Outreach extends EventEmitter {
   // canSend() -> Promise<bool> (an active plan; test campaigns don't need one).
   // leads(filter) -> LeadStore.listLeads(filter) rows (for category campaigns);
   // nameFor(lead) -> the name to use for a lead added automatically.
-  constructor({ store, state, transport, audio = { info: () => null }, details = () => ({}), canSend = async () => true, clock = () => Date.now(), random = Math.random, zoneOf = timeZoneOf, tickMs = 30_000, leads = () => [], nameFor = (lead) => extractName(lead.name) }) {
+  constructor({ store, state, transport, audio = { info: () => null }, files = { info: () => null }, details = () => ({}), canSend = async () => true, clock = () => Date.now(), random = Math.random, zoneOf = timeZoneOf, tickMs = 30_000, leads = () => [], nameFor = (lead) => extractName(lead.name) }) {
     super();
-    Object.assign(this, { store, state, transport, audio, details, canSend, clock, random, zoneOf, tickMs, leads, nameFor });
+    Object.assign(this, { store, state, transport, audio, files, details, canSend, clock, random, zoneOf, tickMs, leads, nameFor });
     this.syncedAt = new Map(); // campaign id -> last queue sync
     this.busyKeys = new Set(); // WhatsApp accounts (lanes) sending right now
     this.ticking = false;
@@ -157,6 +158,7 @@ class Outreach extends EventEmitter {
     config.attachStep = attachOf(config);
     config.links = Array.isArray(config.links) ? config.links : [];
     config.voices = Array.isArray(config.voices) ? config.voices : [];
+    config.media = Array.isArray(config.media) ? config.media : [];
     return { ...c, config };
   }
 
@@ -357,6 +359,15 @@ class Outreach extends EventEmitter {
       if (!voices.some((x) => x.id === info.id)) voices.push({ id: info.id, name: info.name, mime: info.mime, size: info.size, ptt: Boolean(info.ptt) });
     }
     config.voices = voices;
+    // Images and documents: only files saved in the app (FileLibrary).
+    const media = [];
+    for (const m of Array.isArray(config.media) ? config.media : []) {
+      const info = this.files.info(typeof m === 'string' ? m : m?.id);
+      if (!info || !['image', 'document'].includes(info.kind)) return { ok: false, error: `The file “${m?.name || m}” is no longer available. Remove it and attach it again.` };
+      if (!media.some((x) => x.id === info.id)) media.push({ id: info.id, name: info.name, mime: info.mime, size: info.size, kind: info.kind });
+    }
+    if (media.length > LIMITS.voices) return { ok: false, error: `Up to ${LIMITS.voices} images and documents.` };
+    config.media = media;
     delete config.intervalMin;
     delete config.intervalMax;
     config.accountId = typeof config.accountId === 'string' && config.accountId ? config.accountId.slice(0, 40) : 'primary';
@@ -784,7 +795,7 @@ class Outreach extends EventEmitter {
       this.scheduleAfter(st, contact.phone, stage, at);
       if (exists) this.save(st);
       this.emit('sent', { campaignId: id, phone: contact.phone, stage, text, waId: res.id, test: cfg.test, at });
-      if (stage === cfg.attachStep && cfg.voices.length) await this.sendVoices(st, contact, stage, day);
+      if (stage === cfg.attachStep && (cfg.voices.length || cfg.media?.length)) await this.sendVoices(st, contact, stage, day);
     } catch (err) {
       const msg = errorText(err);
       if (err?.code === 'not_connected') {
@@ -857,6 +868,24 @@ class Outreach extends EventEmitter {
         this.store.markFailed(partId, isTimeout(err) ? `${msg} (it may still have been delivered)` : msg, isTimeout(err) ? 'unknown' : 'failed');
         if (err?.code === 'not_connected' || isRestriction(err)) stopReason = `Not sent: ${msg}`;
         this.emit('failed', { campaignId: st.id, phone: contact.phone, stage, error: `Voice file “${voice.name}”: ${msg}`, paused: null });
+      }
+    }
+    // Then the images and documents, each reserved on its own the same way.
+    for (const [i, file] of (cfg.media || []).entries()) {
+      const partId = this.store.reserve({ campaignId: st.id, campaignName: st.name, phone: contact.phone, stage, part: cfg.voices.length + i + 1, kind: file.kind === 'image' ? 'image' : 'document', body: file.name, test: cfg.test, day, now: this.clock() });
+      if (partId === null) continue;
+      if (stopReason) {
+        this.store.markFailed(partId, stopReason);
+        continue;
+      }
+      try {
+        const res = cfg.test ? { id: `TEST-${partId}` } : await this.transport.sendMedia(contact.phone, file, cfg.accountId || 'primary');
+        this.store.markSent(partId, res.id, this.clock());
+      } catch (err) {
+        const msg = errorText(err);
+        this.store.markFailed(partId, isTimeout(err) ? `${msg} (it may still have been delivered)` : msg, isTimeout(err) ? 'unknown' : 'failed');
+        if (err?.code === 'not_connected' || isRestriction(err)) stopReason = `Not sent: ${msg}`;
+        this.emit('failed', { campaignId: st.id, phone: contact.phone, stage, error: `File “${file.name}”: ${msg}`, paused: null });
       }
     }
     this.emit('change', { id: st.id });

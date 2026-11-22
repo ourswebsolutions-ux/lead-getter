@@ -103,7 +103,7 @@ test('replies and receipts of added accounts carry the account', async () => {
   made[0].emit('chat-messages', [{ phone: '+923001234567', text: 'Ji', fromMe: false }, { phone: '+923001234567', text: 'mine', fromMe: true }], { live: true });
   made[0].emit('chat-messages', [{ phone: '+923001234567', text: 'old', fromMe: false }], { live: false });
   made[0].emit('chat-status', [{ id: 'm1', status: 'read' }]);
-  assert.deepEqual(got, [{ accountId: a.id, phone: '+923001234567', text: 'Ji' }, { accountId: a.id, id: 'm1', status: 'read' }]);
+  assert.deepEqual(got, [{ accountId: a.id, phone: '+923001234567', text: 'Ji', media: null }, { accountId: a.id, id: 'm1', status: 'read' }]);
 });
 
 test('the same WhatsApp number cannot be linked twice', async () => {

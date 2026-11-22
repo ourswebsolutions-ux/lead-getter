@@ -15,6 +15,8 @@ import { currentTheme, setTheme } from './theme.js';
 import Activation, { planNeeded, planPill, statusLine } from './Activation.jsx';
 import { ChangePin } from './LockScreen.jsx';
 import SettingsView from './SettingsView.jsx';
+import EmailView from './EmailView.jsx';
+import AssistantView from './AssistantView.jsx';
 
 const ROWS_PER_PAGE = 500;
 
@@ -625,7 +627,7 @@ export default function App({ onLock }) {
   // keeps each one's place (scroll, open chat, unsaved templates).
   const [workspace, setWorkspaceState] = useState(() => {
     try {
-      return ['leads', 'podcasts', 'outreach', 'settings'].includes(localStorage.getItem('workspace')) ? localStorage.getItem('workspace') : 'leads';
+      return ['leads', 'podcasts', 'outreach', 'assistant', 'settings'].includes(localStorage.getItem('workspace')) ? localStorage.getItem('workspace') : 'leads';
     } catch {
       return 'leads';
     }
@@ -645,6 +647,22 @@ export default function App({ onLock }) {
   const [pastDate, setPastDate] = useState('');
   const [range, setRange] = useState({ from: '', to: '' });
   const [catFilter, setCatFilter] = useState('all'); // 'all' | 'none' | id
+  // Outreach: WhatsApp or Email campaigns.
+  const [channel, setChannelState] = useState(() => {
+    try {
+      return localStorage.getItem('outreach-channel') === 'email' ? 'email' : 'whatsapp';
+    } catch {
+      return 'whatsapp';
+    }
+  });
+  const [emailSeen, setEmailSeen] = useState(channel === 'email');
+  const setChannel = (c) => {
+    setChannelState(c);
+    if (c === 'email') setEmailSeen(true);
+    try {
+      localStorage.setItem('outreach-channel', c);
+    } catch {}
+  };
   const [dates, setDates] = useState([]);
   const [leads, setLeads] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -1028,6 +1046,28 @@ export default function App({ onLock }) {
     setTableSearch('');
     setSearchQuery('');
   };
+  // The assistant opens the Leads tab with a filter ("show garments leads").
+  const showAllRef = useRef(showAll);
+  showAllRef.current = showAll;
+  useEffect(
+    () =>
+      api.onAiShowLeads((f) => {
+        showAllRef.current();
+        setWorkspace('leads');
+        if (f?.category != null && f.category !== 'all') setCatFilter(f.category === 'none' ? 'none' : Number(f.category));
+        if (f?.date && f.date !== localDate()) {
+          setView('past');
+          setPastMode('date');
+          setPastDate(f.date);
+        } else if (f?.date) setView('today');
+        else {
+          setView('past');
+          setPastMode('all');
+        }
+        if (f?.search) setTableSearch(f.search);
+      }),
+    [], // eslint-disable-line react-hooks/exhaustive-deps
+  );
 
   const allSelected = leads.length > 0 && leads.every((l) => selected.has(l.id));
   const title = view === 'today' ? `Today's leads` : 'Past leads';
@@ -1051,6 +1091,7 @@ export default function App({ onLock }) {
             ['leads', 'Leads', 'inbox'],
             ['podcasts', 'Podcasts', 'mic'],
             ['outreach', 'Outreach', 'send'],
+            ['assistant', 'Assistant', 'sparkle'],
             // Dialer, Numbers and Messages are hidden for now (their code stays).
             // ['dialer', 'Dialer', 'phone'],
             // ['numbers', 'Numbers', 'users'],
@@ -1081,7 +1122,23 @@ export default function App({ onLock }) {
       </header>
 
       {visited.has('podcasts') && <PodcastsView notify={notify} hidden={workspace !== 'podcasts'} categories={catData.categories} />}
-      {visited.has('outreach') && <OutreachView wa={wa} notify={notify} hidden={workspace !== 'outreach'} />}
+      {visited.has('outreach') && (
+        <div className="outreach-shell" hidden={workspace !== 'outreach'}>
+          <nav className="segmented channel-switch" aria-label="Campaign channel">
+            {[
+              ['whatsapp', 'WhatsApp', 'chat'],
+              ['email', 'Email', 'mail'],
+            ].map(([id, label, icon]) => (
+              <button key={id} type="button" className={channel === id ? 'on' : ''} aria-pressed={channel === id} onClick={() => setChannel(id)}>
+                <Icon name={icon} size={14} /> {label}
+              </button>
+            ))}
+          </nav>
+          <OutreachView wa={wa} notify={notify} hidden={workspace !== 'outreach' || channel !== 'whatsapp'} />
+          {(channel === 'email' || emailSeen) && <EmailView notify={notify} hidden={workspace !== 'outreach' || channel !== 'email'} />}
+        </div>
+      )}
+      {visited.has('assistant') && <AssistantView notify={notify} hidden={workspace !== 'assistant'} onOpenSettings={() => setWorkspace('settings')} />}
       {visited.has('dialer') && <DialerView notify={notify} hidden={workspace !== 'dialer'} prefill={dialFill} />}
       {visited.has('numbers') && <NumbersView notify={notify} hidden={workspace !== 'numbers'} onCall={callLead} onMessage={openMessages} />}
       {visited.has('settings') && <SettingsView notify={notify} hidden={workspace !== 'settings'} categories={catData.categories} />}

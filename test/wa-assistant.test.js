@@ -297,3 +297,27 @@ test('A command is never blocked by an unanswered suggestion', async () => {
   assert.match(last(), /I did not understand/, 'the setup was ended by stop');
 });
 
+
+test('With the AI on, an open yes/no suggestion never blocks another request: it is dropped and the message goes to the AI', async () => {
+  const { Assistant } = require('../src/main/wa-assistant');
+  const states = new Map();
+  const said = [];
+  const asked = [];
+  const a = new Assistant({
+    store: { getState: (k) => states.get(k), setState: (k, v) => states.set(k, v) },
+    settings: () => ({ admins: ['923211234567'], suggestions: true }),
+    setSettings: () => {},
+    send: async (_acc, _phone, text) => said.push(text),
+    accounts: () => [{ id: 'primary', label: 'web developer', number: '+923270583075', ready: true }],
+    campaigns: () => [],
+    unusedCategories: () => [],
+    ai: { available: () => true, reply: async (_p, text) => (asked.push(text), `AI: ${text}`) },
+  });
+  await a.suggest();
+  assert.match(said.at(-1), /is currently available/);
+  a.onMessage({ accountId: 'primary', phone: '923211234567', text: 'acha ab linkdin search start kro with my connection' });
+  await a.busy;
+  assert.deepEqual(asked, ['acha ab linkdin search start kro with my connection']);
+  assert.equal(said.at(-1), 'AI: acha ab linkdin search start kro with my connection');
+  assert.equal(Object.keys(a.state().convo).length, 0, 'the suggestion was dropped');
+});

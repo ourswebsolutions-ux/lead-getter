@@ -1,6 +1,6 @@
 {
   "name": "lead-finder",
-  "version": "1.22.0",
+  "version": "1.23.0",
   "description": "Finds Google Maps businesses with or without websites using your own Chrome.",
   "main": "src/main/entry.js",
   "scripts": {
@@ -9,7 +9,7 @@
     "start": "vite build && node scripts/dev.js --prod",
     "test": "node --test test/*.test.js",
     "test:integration": "node test/integration/real-chrome.js",
-    "test:e2e": "vite build && node --test --test-timeout=900000 test/e2e/app.e2e.js test/e2e/activation.e2e.js test/e2e/access.e2e.js test/e2e/sources.e2e.js test/e2e/design.e2e.js test/e2e/premium.e2e.js test/e2e/whatsapp.e2e.js test/e2e/outreach.e2e.js test/e2e/many-leads.e2e.js test/e2e/facebook.e2e.js test/e2e/live-leads.e2e.js test/e2e/podcasts.e2e.js test/e2e/people.e2e.js test/e2e/accounts-limits.e2e.js test/e2e/outreach-media.e2e.js test/e2e/outreach-layout.e2e.js test/e2e/free-trial.e2e.js test/e2e/cancellation.e2e.js test/e2e/pin-reset.e2e.js test/e2e/automation.e2e.js",
+    "test:e2e": "vite build && node --test --test-timeout=900000 test/e2e/app.e2e.js test/e2e/activation.e2e.js test/e2e/access.e2e.js test/e2e/sources.e2e.js test/e2e/design.e2e.js test/e2e/premium.e2e.js test/e2e/whatsapp.e2e.js test/e2e/outreach.e2e.js test/e2e/many-leads.e2e.js test/e2e/facebook.e2e.js test/e2e/live-leads.e2e.js test/e2e/podcasts.e2e.js test/e2e/people.e2e.js test/e2e/accounts-limits.e2e.js test/e2e/outreach-media.e2e.js test/e2e/outreach-layout.e2e.js test/e2e/free-trial.e2e.js test/e2e/cancellation.e2e.js test/e2e/pin-reset.e2e.js test/e2e/automation.e2e.js test/e2e/ai-email.e2e.js",
     "release": "node scripts/release.js",
     "bridge": "node src/bridge/run.js"
   },
@@ -22,9 +22,7 @@
     "@vitejs/plugin-react": "^6.1.2",
     "electron": "^44.9.2",
     "electron-builder": "^26.15.3",
-    "imapflow": "^2.10.2",
     "mailauth": "^8.0.4",
-    "mailparser": "^3.14.2",
     "vite": "^8.3.4"
   },
   "dependencies": {
@@ -32,7 +30,9 @@
     "@fontsource/ibm-plex-sans": "^5.3.0",
     "baileys": "^7.0.0-rc14",
     "electron-updater": "^6.8.9",
+    "imapflow": "^2.10.2",
     "libphonenumber-js": "^1.13.15",
+    "mailparser": "^3.14.2",
     "nodemailer": "^7.0.13",
     "playwright-core": "^1.64.1",
     "qrcode": "^1.5.4",
@@ -59,6 +59,8 @@
       "src/bridge/**",
       "src/numbers/**",
       "src/messaging/**",
+      "src/email/**",
+      "src/ai/**",
       "dist/renderer/**",
       "package.json"
     ],

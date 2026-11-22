@@ -10,7 +10,7 @@
 const { EventEmitter } = require('node:events');
 const QRCode = require('qrcode');
 const { useEncryptedAuthState, hasSession, wipeSession } = require('./auth-state');
-const { normalizeMessage, normalizeStatus, isPersonJid, phoneOfJid, jidOfPhone, toMs } = require('./messages');
+const { normalizeMessage, normalizeStatus, isPersonJid, phoneOfJid, jidOfPhone, toMs, mediaOf } = require('./messages');
 
 const RECONNECT_DELAYS = [2000, 5000, 15_000, 30_000, 60_000];
 
@@ -70,6 +70,7 @@ class WhatsAppClient extends EventEmitter {
     let baileys;
     try {
       baileys = await this.loadBaileys();
+      this.baileys = baileys;
     } catch (err) {
       this.set('error', { error: `WhatsApp library could not be loaded (${err.message}).` });
       return;
@@ -138,7 +139,11 @@ class WhatsAppClient extends EventEmitter {
       const n = normalizeMessage(m);
       if (!n) continue;
       const jid = await this.canonical(sock, n.jid, m.key?.remoteJidAlt || m.key?.senderPn);
-      list.push({ ...n, jid, phone: n.phone || phoneOfJid(jid) });
+      const item = { ...n, jid, phone: n.phone || phoneOfJid(jid) };
+      // A file someone sent now: downloadable on request (kept in memory only, never stored).
+      const media = live && !n.fromMe ? mediaOf(m.message) : null;
+      if (media) Object.defineProperty(item, 'media', { enumerable: false, value: { ...media, download: () => this.downloadMedia(m) } });
+      list.push(item);
     }
     if (list.length) this.emit('chat-messages', list, { live });
   }
@@ -269,6 +274,29 @@ class WhatsAppClient extends EventEmitter {
     const msg = await withTimeout(this.sock.sendMessage(jid, { audio: data, mimetype: mime, ptt: Boolean(ptt) }), 120_000, 'Sending timed out');
     const id = msg?.key?.id;
     if (!id) throw new Error('WhatsApp did not confirm the voice message');
+    return id;
+  }
+
+  // The bytes of a received image, audio or document (at most 16 MB).
+  async downloadMedia(raw) {
+    this.requireOpen();
+    const fn = this.baileys?.downloadMediaMessage;
+    if (typeof fn !== 'function') throw new Error('Files cannot be downloaded with this WhatsApp version.');
+    const sock = this.sock;
+    const data = await withTimeout(fn(raw, 'buffer', {}, { reuploadRequest: sock.updateMediaMessage?.bind(sock), logger: undefined }), 90_000, 'Downloading the file timed out');
+    if (!Buffer.isBuffer(data) || !data.length) throw new Error('The file was empty.');
+    if (data.length > 16 * 1024 * 1024) throw new Error('The file is larger than 16 MB.');
+    return data;
+  }
+
+  // An image or a document (kind: 'image' | 'document'). Resolves with the message id.
+  async sendMedia(e164, { data, mime, name, kind, caption = '' }) {
+    this.requireOpen();
+    const jid = `${String(e164).replace(/^\+/, '')}@s.whatsapp.net`;
+    const content = kind === 'image' ? { image: data, mimetype: mime, ...(caption ? { caption } : {}) } : { document: data, mimetype: mime, fileName: name || 'document', ...(caption ? { caption } : {}) };
+    const msg = await withTimeout(this.sock.sendMessage(jid, content), 120_000, 'Sending timed out');
+    const id = msg?.key?.id;
+    if (!id) throw new Error('WhatsApp did not confirm the file');
     return id;
   }
 }

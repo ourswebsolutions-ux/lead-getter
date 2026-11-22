@@ -17,6 +17,10 @@ const { PodcastSearch } = require('../browser/podcast-search');
 const { readResults, readSpotifyPage } = require('../browser/podcast-read');
 const { PLATFORMS, ADAPTERS, browserFindOf } = require('../browser/podcast-platforms');
 const { robotsChecker } = require('../browser/robots');
+const { Vault } = require('./vault');
+const { FileLibrary } = require('./file-library');
+const { createEmail, registerEmailIpc } = require('../email/service');
+const { createAI } = require('../ai/service');
 const { EmailVerifier } = require('../browser/email-verify');
 const { contactRowsFromCsv } = require('../export/csv-import');
 const { PROVIDERS: CONTACT_PROVIDERS, extensionState, installedIn } = require('../browser/extension-contacts');
@@ -59,6 +63,10 @@ let updater = null;
 let chats = null; // ChatService
 let outreach = null; // Outreach scheduler
 let audioLibrary = null; // voice files for outreach (whatsapp/audio-library.js)
+let fileLibrary = null; // images, documents and audio attached to campaigns and the assistant (file-library.js)
+let secrets = null; // SMTP passwords and the Groq key, encrypted with the OS keychain (vault.js)
+let email = null; // email accounts and campaigns (email/)
+let ai = null; // the Groq assistant (ai/)
 let store = null;
 let search = null; // { controller, promise }
 const chrome = new ChromeConnection({
@@ -571,7 +579,9 @@ async function startSearch(rawKeyword, rawCategory, rawWebsite, rawLinkedIn, raw
 // country of a continuous search (auto: its query). search.promise resolves
 // to how it ended: { state: 'done' | 'stopped' | 'error', code, message,
 // newLeads, url }. limit: listings processed (end-to-end tests only).
-function launchSearch({ keyword, category, websiteFilter, findEmails, withMaps, withFacebook = false, withLinkedIn = false, linkedinKeyword = '', linkedinLocation = '', linkedinLink = '', auto = null, signal = null, limit = 0 }) {
+// liModes / liPages: LinkedIn modes and Page-link pages for this search only
+// (the assistant's); otherwise those saved for the Leads tab.
+function launchSearch({ keyword, category, websiteFilter, findEmails, withMaps, withFacebook = false, withLinkedIn = false, linkedinKeyword = '', linkedinLocation = '', linkedinLink = '', liModes = null, liPages = null, auto = null, signal = null, limit = 0 }) {
   const sources = [...(withMaps ? ['maps'] : []), ...(withFacebook ? ['facebook'] : []), ...(withLinkedIn ? ['linkedin'] : [])];
   const controller = new AbortController();
   signal?.addEventListener('abort', () => controller.abort(), { once: true });
@@ -670,8 +680,8 @@ function launchSearch({ keyword, category, websiteFilter, findEmails, withMaps, 
           new LinkedInSession({
             keyword: linkedinKeyword,
             location: linkedinLocation,
-            modes: linkedinModes(),
-            link: linkedinLink ? { url: linkedinLink, ...linkPages() } : null,
+            modes: liModes || linkedinModes(),
+            link: linkedinLink ? { url: linkedinLink, ...(liPages || linkPages()) } : null,
             // People: contact discovery checks emails with mail servers (or
             // the user's self-hosted verifier) and reads company websites
             // only where their robots.txt allows.
@@ -1037,9 +1047,12 @@ function initChatsAndOutreach(cipher) {
       send: async (phone, text, accountId) => ({ id: await waAccounts.send(accountId, phone, text) }),
       // A voice file in its original format, read from the app's copy.
       sendAudio: async (phone, voice, accountId) => ({ id: await waAccounts.sendAudio(accountId, phone, audioLibrary.read(voice.id)) }),
+      // Images and documents, read from the app's copy.
+      sendMedia: async (phone, file, accountId) => ({ id: await waAccounts.sendMedia(accountId, phone, fileLibrary.read(file.id)) }),
       hasAccount: (accountId) => waAccounts.has(accountId),
     },
     audio: { info: (id) => audioLibrary.info(id) },
+    files: { info: (id) => fileLibrary.info(id) },
     details: (c) => ({ business: c.leadId ? store.leadById(c.leadId)?.name || null : null }),
     // Category campaigns fill their queues from the saved leads.
     leads: (filter = {}) => store.listLeads(filter),
@@ -1047,11 +1060,11 @@ function initChatsAndOutreach(cipher) {
     nameFor: (lead) => require('../whatsapp/templates').pickName({ contactName: chatStore.chat(jidOfPhone(lead.phone))?.name, businessName: lead.name }).name,
   });
   // The admin's messages are commands for the assistant, not campaign replies.
-  chats.on('incoming', (m) => assistant.onMessage({ accountId: 'primary', phone: m.phone, text: m.text }) || outreach.onIncoming({ phone: m.phone, text: m.text }));
+  chats.on('incoming', (m) => assistant.onMessage({ accountId: 'primary', phone: m.phone, text: m.text, media: m.media || null }) || outreach.onIncoming({ phone: m.phone, text: m.text }));
   chats.on('manual', ({ phone }) => phone && outreach.onManualMessage(phone));
   chats.on('status', (st) => outreach.onStatus(st.id, st.status));
   // Replies and receipts on the added accounts (the first account's come through Chats).
-  waAccounts.on('incoming', (m) => m.accountId !== 'primary' && !assistant.onMessage({ accountId: m.accountId, phone: m.phone, text: m.text }) && outreach.onIncoming({ phone: m.phone, text: m.text }));
+  waAccounts.on('incoming', (m) => m.accountId !== 'primary' && !assistant.onMessage({ accountId: m.accountId, phone: m.phone, text: m.text, media: m.media || null }) && outreach.onIncoming({ phone: m.phone, text: m.text }));
   waAccounts.on('status', (st) => st.accountId !== 'primary' && outreach.onStatus(st.id, st.status));
   outreach.on('change', (e) => send('outreach:state', { id: e?.id ?? null }));
   outreach.on('replied', (e) => send('outreach:event', { type: e.optOut ? 'opted_out' : 'replied', phone: e.phone }));
@@ -2215,6 +2228,7 @@ app.whenReady().then(() => {
   });
 
   initAutopilot();
+  initEmailAndAI();
   // Started at sign-in: the window opens (the work is resumed in the
   // background either way), and comes to the front when the PC is unlocked.
   createWindow({ show: true });
@@ -2280,6 +2294,8 @@ function startBackgroundWork() {
   backgroundStarted = true;
   watchActivation();
   initWhatsApp();
+  email?.campaigns.init(); // email campaigns running when the app ended carry on
+  email?.replies.start(); // replies and unsubscribes, read from each account's inbox
   // Continuous searches running when the app ended carry on.
   if (autopilot.engine().state === 'running' && automationSettings().search.resumeInterrupted) {
     autopilot.start();
@@ -2408,6 +2424,8 @@ function initAssistant() {
   assistant = new Assistant({
     store,
     log: autoLog,
+    ai: { available: () => Boolean(ai?.available()), reply: (phone, text, media) => ai.whatsappReply(phone, text, media) },
+    emailAccounts: (text) => (email ? email.addFromText(text) : Promise.resolve(null)),
     settings: assistantSettings,
     setSettings: (patch) => store.setState(ASSISTANT_KEY, { ...assistantSettings(), ...patch }),
     send: (accountId, phone, text) => waAccounts.send(accountId, phone, text),
@@ -2877,6 +2895,9 @@ app.on('before-quit', (e) => {
   podcastRun?.controller.abort();
   Promise.all([search?.promise, podcastRun?.promise, pilot].map((p) => Promise.resolve(p).catch(() => {})))
     .then(() => outreach?.dispose())
+    .then(() => email?.campaigns.dispose())
+    .then(() => email?.replies.stop())
+    .then(() => email?.accounts.dispose())
     .then(() => autoDialer?.stop())
     .then(() => sms?.disconnect())
     .then(() => dialer?.stop())
@@ -2891,5 +2912,203 @@ app.on('before-quit', (e) => {
       app.quit();
     });
 });
+
+// --- Email campaigns and the Groq assistant -----------------------------------------
+
+// The OS keychain cipher for secrets; end-to-end tests (never packaged) may
+// use a throwaway one, as there is no keychain on the test machine.
+function secretsCipher() {
+  if (!app.isPackaged && process.env.LEAD_FINDER_TEST_SECRETS === '1') return { encrypt: (t) => Buffer.from(String(t), 'utf8').reverse(), decrypt: (b) => Buffer.from(b).reverse().toString('utf8') };
+  return keychainCipher();
+}
+
+// Files chosen in a dialog, copied into the app (FileLibrary).
+async function pickFiles({ title }) {
+  const { EXTENSIONS } = require('./file-library');
+  const testPick = !app.isPackaged && process.env.LEAD_FINDER_TEST_FILE_PICK;
+  let paths;
+  if (testPick) paths = testPick.split(path.delimiter).filter(Boolean);
+  else {
+    const r = await dialog.showOpenDialog(win, { title, properties: ['openFile', 'multiSelections'], filters: [{ name: 'Images, documents and audio', extensions: EXTENSIONS }, { name: 'All files', extensions: ['*'] }] });
+    if (r.canceled || !r.filePaths.length) return { ok: false, canceled: true };
+    paths = r.filePaths;
+  }
+  const files = [];
+  const errors = [];
+  for (const p of paths.slice(0, 10)) {
+    const r = fileLibrary.add(p);
+    if (r.ok) files.push(r.file);
+    else errors.push(r.error);
+  }
+  return { ok: files.length > 0, files, errors, error: errors.join(' ') };
+}
+
+function planInfo() {
+  const st = activation.status();
+  const q = leadQuota?.status();
+  return { state: st.state, plan: st.planName || null, trial: Boolean(st.trial), expires_at: st.expiresAt || null, days_left: st.daysLeft ?? null, leads_today: q ? { used: q.used, limit: q.limit, remaining: q.remaining } : null };
+}
+
+function searchInfo() {
+  const t = autopilot?.active();
+  return {
+    running: Boolean(search) || Boolean(t),
+    state: lastStatus.state,
+    message: lastStatus.message || '',
+    keyword: search?.auto || lastStatus.keyword || (t ? t.keyword : null),
+    continuous: t ? { keyword: t.keyword, countries: t.countries, status: t.status } : null,
+  };
+}
+
+// A Google Maps search for the assistant: started now, or put in the pool when one runs.
+function aiStartSearch({ business, category, countries }) {
+  const plan = requirePlan();
+  if (!plan.ok) return plan;
+  const kw = validateKeyword(business);
+  if (kw.error) return { ok: false, error: kw.error };
+  const cat = validateCategory(category || formatCategory(business));
+  if (cat.error) return { ok: false, error: cat.error };
+  const c = store.ensureCategory(cat.category);
+  const busy = Boolean(autopilot.active() || search);
+  const r = autopilot.add({ keyword: kw.keyword, category: c.name, countries, origin: 'assistant', search: { withMaps: true }, queued: true });
+  if (!r.ok) return r;
+  if (!busy) {
+    const a = autopilot.activate(r.task.id);
+    if (!a.ok) return a;
+  }
+  return { ok: true, started: !busy, queued: busy, keyword: kw.keyword, category: c.name, countries };
+}
+
+// Any lead search for the assistant, with the Leads tab's engine: Google
+// Maps, Facebook, LinkedIn (My connections, Page link, People, Jobs, Posts,
+// Companies), alone or together. Google Maps in several countries goes
+// through the continuous search (one country after another).
+function aiLeadSearch(a) {
+  const plan = requirePlan();
+  if (!plan.ok) return plan;
+  const sources = new Set((a.sources || []).filter((x) => ['maps', 'facebook', 'linkedin'].includes(x)));
+  if (!sources.size) return { ok: false, error: 'Say where to search: Google Maps, Facebook or LinkedIn.' };
+  if (search || autopilot.active()) return { ok: false, error: `A search is already running${autopilot.active() ? ` ("${autopilot.active().keyword}")` : ''}. Stop it first, or wait for it to finish.` };
+  const mode = sources.has('linkedin') ? a.linkedinMode || 'people' : null;
+  if (mode && !['connections', 'link', 'people', 'jobs', 'posts', 'companies'].includes(mode)) return { ok: false, error: 'Unknown LinkedIn mode.' };
+  // Google Maps alone in several countries: the continuous search.
+  if (sources.size === 1 && sources.has('maps') && (a.countries || []).length > 1) return aiStartSearch({ business: a.business, category: a.category, countries: a.countries });
+  let keyword = '';
+  let linkedinKeyword = '';
+  let linkedinLink = '';
+  if (sources.has('maps') || sources.has('facebook')) {
+    const k = validateKeyword(`${a.business || ''}${a.countries?.length === 1 ? ` in ${a.countries[0]}` : ''}`);
+    if (k.error) return { ok: false, error: `Say what business to search for (${k.error}).` };
+    keyword = k.keyword;
+  }
+  if (mode === 'link') {
+    linkedinLink = cleanPageLink(a.link) || '';
+    if (!linkedinLink) return { ok: false, error: 'Give the address of the LinkedIn page (https://www.linkedin.com/...).' };
+    linkedinKeyword = 'LinkedIn link';
+  } else if (mode === 'connections') linkedinKeyword = 'LinkedIn connections';
+  else if (mode) {
+    const k = validateKeyword(a.linkedinSearch || a.business);
+    if (k.error) return { ok: false, error: 'Say what to search for on LinkedIn.' };
+    linkedinKeyword = k.keyword;
+  }
+  const catName = a.category || (keyword ? formatCategory(a.business) : mode === 'connections' ? 'LinkedIn Connections' : mode === 'link' ? 'LinkedIn Link' : formatCategory(linkedinKeyword));
+  const cat = validateCategory(catName);
+  if (cat.error) return { ok: false, error: cat.error };
+  let category;
+  try {
+    category = store.ensureCategory(cat.category);
+  } catch (err) {
+    return { ok: false, error: `Could not save the category: ${err.message}` };
+  }
+  const liModes = mode ? { link: mode === 'link', connections: mode === 'connections', people: mode === 'people', jobs: mode === 'jobs', posts: mode === 'posts', companies: mode === 'companies' } : null;
+  const from = Math.min(100, Math.max(1, Number(a.fromPage) || 1));
+  const liPages = { from, to: Math.min(100, Math.max(from, Number(a.toPage) || from)) };
+  const r = launchSearch({
+    keyword: keyword || linkedinKeyword,
+    category,
+    websiteFilter: WEBSITE_FILTERS.has(a.website) ? a.website : 'without',
+    findEmails: Boolean(a.findEmails) && sources.has('maps'),
+    withMaps: sources.has('maps'),
+    withFacebook: sources.has('facebook'),
+    withLinkedIn: Boolean(mode),
+    linkedinKeyword,
+    linkedinLocation: mode === 'people' ? String(a.location || '').slice(0, 80) : '',
+    linkedinLink,
+    liModes,
+    liPages,
+  });
+  if (!r.ok) return r;
+  showWindow();
+  return { ok: true, started: true, sources: [...sources], linkedin_mode: mode, keyword: keyword || null, linkedin: linkedinKeyword || null, category: category.name, ...(mode === 'link' ? { pages: `${liPages.from}-${liPages.to}` } : {}) };
+}
+
+function initEmailAndAI() {
+  secrets = new Vault({ store, key: 'secrets.v1', cipher: secretsCipher() });
+  fileLibrary = new FileLibrary({ dir: path.join(app.getPath('userData'), 'files'), state: { get: (k) => store.getState(k), set: (k, v) => store.setState(k, v) } });
+  email = createEmail({
+    store,
+    vault: secrets,
+    files: fileLibrary,
+    canSend: async () => activation.active,
+    allowInsecure: !app.isPackaged && process.env.LEAD_FINDER_TEST_SMTP_INSECURE === '1',
+    log: autoLog,
+  });
+  registerEmailIpc({ handle, email, requirePlan, pickFiles, send });
+  // Images and documents for WhatsApp campaigns (and any other attachment).
+  handle('files:pick', () => pickFiles({ title: 'Attach images or documents' }));
+  email.campaigns.on('completed', (e) => notice('campaign', 'Email campaign completed', `“${e.name}”: ${e.counts.sent} sent, ${e.counts.failed} failed.`));
+  email.campaigns.on('failed', (e) => e.paused && notice('failed', 'Email campaign paused', e.error));
+
+  ai = createAI({
+    store,
+    vault: secrets,
+    log: autoLog,
+    send,
+    // Tests only (never packaged): a local stand-in for Groq's API.
+    base: !app.isPackaged ? process.env.LEAD_FINDER_TEST_GROQ_URL : undefined,
+    bases: !app.isPackaged ? { openrouter: process.env.LEAD_FINDER_TEST_OPENROUTER_URL } : {},
+    toolDeps: {
+      version: app.getVersion(),
+      store,
+      outreach: () => outreach,
+      waAccounts: () => (waAccounts ? waAccounts.list().map((a) => ({ id: a.id, label: a.label, number: a.number, state: a.state })) : []),
+      waStart: (id, opts) => outreachStart(id, opts),
+      waResume: (id) => outreachResume(id),
+      waEligible: (id, filters) => eligibleFor(id, filters),
+      waAddLeads: (id, ids) => outreachAddLeads(id, ids),
+      audioAdd: (file, name) => {
+        if (!audioLibrary) return { ok: false, error: 'WhatsApp is not available on this computer right now.' };
+        // The library checks the name's extension: a copy keeps the original name.
+        const tmp = path.join(app.getPath('temp'), `lf-${Date.now()}-${path.basename(name)}`);
+        try {
+          require('node:fs').copyFileSync(file, tmp);
+          return audioLibrary.add(tmp);
+        } finally {
+          require('node:fs').rmSync(tmp, { force: true });
+        }
+      },
+      files: fileLibrary,
+      email,
+      requirePlan,
+      plan: planInfo,
+      search: { status: searchInfo, pool: () => (autopilot ? autopilot.pool().map((t) => ({ keyword: t.keyword, countries: t.countries, category: t.category })) : []), stop: () => ({ ok: true, ...stopSearch() }), start: aiStartSearch, run: aiLeadSearch },
+      settings: {
+        get: () => {
+          const s = automationSettings();
+          return { start_with_computer: s.startWithOS, background_engine: s.background, auto_resume: s.autoResume, notifications: s.notifications, continuous_search: s.search.continuous, countries: s.search.countries, chrome_profile: s.chrome.profile };
+        },
+        set: (patch) => {
+          const r = setAutomation(patch);
+          return r.ok ? { ok: true, settings: r.settings && { continuous_search: r.settings.search?.continuous, countries: r.settings.search?.countries, notifications: r.settings.notifications, background_engine: r.settings.background } } : { ok: false, error: r.error };
+        },
+      },
+      showLeads: (filter) => {
+        showWindow();
+        send('ai:showLeads', filter);
+      },
+    },
+  });
+  ai.registerIpc(handle, pickFiles);
+}
 
 module.exports = { validateKeyword };

@@ -185,6 +185,91 @@ function Inventory({ searches, pool, live, onError }) {
   );
 }
 
+// One AI provider: its API key (never shown again once saved), Save, Test, status.
+function ProviderKey({ id, label, placeholder, st, onSettings, notify }) {
+  const [key, setKey] = useState('');
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+  const p = st?.[id];
+  async function save(e) {
+    e.preventDefault();
+    setBusy('save');
+    const r = await api.aiSaveKey(key, id);
+    setBusy('');
+    onSettings(r.settings);
+    setError(r.ok ? '' : r.error);
+    if (r.ok) {
+      setKey('');
+      notify?.({ type: 'ok', text: `${label} API key saved.` });
+    }
+  }
+  async function test() {
+    setBusy('test');
+    const r = await api.aiTest(id);
+    setBusy('');
+    onSettings(r.settings);
+    setError(r.ok ? '' : r.error);
+  }
+  const status = !p?.configured ? ['', 'Not set up'] : p.status === 'connected' ? ['ok', 'Connected'] : p.status === 'failed' ? ['bad', 'Connection failed'] : ['', 'Saved, not tested'];
+  return (
+    <div className="st-group st-groq" aria-label={`${label} settings`} role="group">
+      <form className="st-groq-row" onSubmit={save}>
+        <label className="st-groq-field">
+          <span>{label} API Key</span>
+          <input type="password" value={key} onChange={(e) => setKey(e.target.value)} placeholder={p?.configured ? '•••••••••••••••• (saved)' : placeholder} autoComplete="off" spellCheck={false} aria-label={`${label} API Key`} maxLength={300} />
+        </label>
+        <button type="submit" className="btn btn-primary" disabled={busy === 'save' || !key.trim()}>
+          <Icon name="check" size={13} /> Save API Key
+        </button>
+        <button type="button" className="btn" disabled={busy === 'test' || !p?.configured} onClick={test}>
+          <Icon name="refresh" size={13} /> {busy === 'test' ? 'Testing…' : 'Test Connection'}
+        </button>
+      </form>
+      <div className={`st-groq-status ${status[0]}`} role="status">
+        <span className="st-dot" /> {status[1]}
+        {p?.testedAt && <span className="muted"> · {when(p.testedAt)}</span>}
+      </div>
+      {error && (
+        <p className="st-error" role="alert">
+          <Icon name="alert" size={14} /> {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// Groq and OpenRouter: either key works; with both, the main one is used
+// and the other takes over when it fails.
+function AiKeys({ notify }) {
+  const [st, setSt] = useState(null);
+  useEffect(() => {
+    api.aiSettings().then(setSt).catch(() => {});
+  }, []);
+  const both = st?.groq?.configured && st?.openrouter?.configured;
+  return (
+    <>
+      <ProviderKey id="groq" label="Groq" placeholder="gsk_…" st={st} onSettings={setSt} notify={notify} />
+      <ProviderKey id="openrouter" label="OpenRouter" placeholder="sk-or-v1-…" st={st} onSettings={setSt} notify={notify} />
+      {both && (
+        <div className="st-group st-groq st-main-ai" role="group" aria-label="Main AI">
+          <span className="st-groq-field">Main AI</span>
+          <div className="segmented">
+            {[
+              ['groq', 'Groq'],
+              ['openrouter', 'OpenRouter'],
+            ].map(([id, label]) => (
+              <button key={id} type="button" className={st.main === id ? 'on' : ''} aria-pressed={st.main === id} onClick={async () => setSt((await api.aiSetMain(id)).settings)}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <span className="muted small">The other one takes over if it fails.</span>
+        </div>
+      )}
+    </>
+  );
+}
+
 function AdminNumber({ value, onSave }) {
   const [v, setV] = useState(value || '');
   useEffect(() => setV(value || ''), [value]);
@@ -232,6 +317,7 @@ export default function SettingsView({ hidden, notify, categories = [] }) {
       ['chrome', 'globe', 'Chrome'],
       ['search', 'repeat', 'Continuous search'],
       ['captcha', 'shield', 'CAPTCHA'],
+      ['groq', 'sparkle', 'AI'],
     ],
     [win],
   );
@@ -496,6 +582,11 @@ export default function SettingsView({ hidden, notify, categories = [] }) {
             </Section>
             )}
 
+            {active === 'groq' && (
+            <Section id="groq" icon="sparkle" title="AI" lead="Groq or OpenRouter powers the Assistant.">
+              <AiKeys notify={notify} />
+            </Section>
+            )}
             {active === 'captcha' && (
             <Section id="captcha" icon="shield" title="CAPTCHA" lead="Pauses for Google’s human check.">
               <div className="st-group">

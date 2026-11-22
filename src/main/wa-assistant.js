@@ -39,6 +39,8 @@
 //   powerOff()                            pauses, saves and quits (and shuts down if allowed)
 //   settings()                            { admins: ['923001234567'], suggestions, shutdownComputer }
 //   setSettings(patch)                    saves them
+//   ai: { available(), reply(phone, text) } (optional) the Groq assistant for free text
+//   emailAccounts(text) (optional) adds email accounts written as "email app-password"
 
 const KEY = 'assistant.state';
 const TIMEOUT = 30 * 60_000;
@@ -106,6 +108,7 @@ const HELP = [
   '• suggestions on / off: offers for idle accounts',
   '• computer shutdown on / off: power off also shuts down the computer',
   '• admin off: this number stops being the admin',
+  '• or just write what you want, in English or Roman Urdu (with a Groq key in Settings)',
 ].join('\n');
 
 const digits = (s) => String(s || '').replace(/\D/g, '');
@@ -185,14 +188,15 @@ class Assistant {
   // --- incoming ------------------------------------------------------------------
 
   // Every incoming WhatsApp message; true when it was the admin's (handled here).
-  onMessage({ accountId, phone, text }) {
+  // media: a file the admin sent ({ kind, name, mime, caption, download() }), for the AI.
+  onMessage({ accountId, phone, text, media = null }) {
     if (typeof text !== 'string' || !text.trim()) return false;
     if (!this.isAdmin(phone)) return false;
-    this.busy = this.busy.then(() => this.handle({ accountId, phone: digits(phone), text: cleanLines(text) })).catch((err) => this.log(`assistant: ${err.message}`));
+    this.busy = this.busy.then(() => this.handle({ accountId, phone: digits(phone), text: cleanLines(text), media })).catch((err) => this.log(`assistant: ${err.message}`));
     return true;
   }
 
-  async handle({ accountId, phone, text }) {
+  async handle({ accountId, phone, text, media = null }) {
     const s = this.state();
     s.last = { at: this.now(), text: text.slice(0, 120) };
     this.log(`assistant: from admin: ${text.slice(0, 120)}`);
@@ -204,6 +208,17 @@ class Assistant {
       await this.say(phone, 'The earlier question timed out, so nothing was started.', accountId);
     }
     if (c) c.accountId = accountId || c.accountId;
+    // A file (photo, voice note, document): for the AI, with its caption.
+    if (media && this.d.ai?.available()) {
+      this.save(s);
+      let reply;
+      try {
+        reply = await this.d.ai.reply(phone, media.caption || '', media);
+      } catch (err) {
+        reply = `Sorry, the file could not be used: ${err.message}`;
+      }
+      return this.say(phone, String(reply || '').slice(0, 3500), accountId);
+    }
     const cmd = COMMANDS.find(([, re]) => re.test(text))?.[0];
     if (CANCEL.test(text)) {
       if (c) {
@@ -236,7 +251,37 @@ class Assistant {
     }
     if (!c) {
       this.save(s);
+      // Anything else: the Groq assistant, when a key is saved (it uses the
+      // same functions, and asks before anything is sent).
+      if (this.d.ai?.available()) {
+        let reply;
+        try {
+          reply = await this.d.ai.reply(phone, text);
+        } catch (err) {
+          reply = `Sorry, the assistant could not answer: ${err.message}`;
+        }
+        return this.say(phone, String(reply || '').slice(0, 3500), accountId);
+      }
+      // Without the AI: email accounts written as "email app-password" are still added.
+      if (this.d.emailAccounts && /@/.test(text)) {
+        const r = await this.d.emailAccounts(text).catch(() => null);
+        if (r?.found) return this.say(phone, ['Email accounts:', ...r.results.map((x) => `• ${x.email}: ${x.ok ? (x.created ? 'added and connected' : 'password updated, connected') : x.error}`)].join('\n'), accountId);
+      }
       return this.say(phone, `I did not understand "${text.slice(0, 60)}".\n\n${HELP}`, accountId);
+    }
+    // A yes/no question (e.g. "account is available... start a campaign?")
+    // answered with something else: with the AI on, the question is dropped
+    // and the message is handled as a new request, never blocked by it.
+    if (!free && this.d.ai?.available() && !YES.test(text) && !NO.test(text) && !SKIP.test(text)) {
+      delete s.convo[phone];
+      this.save(s);
+      let reply;
+      try {
+        reply = await this.d.ai.reply(phone, text);
+      } catch (err) {
+        reply = `Sorry, the assistant could not answer: ${err.message}`;
+      }
+      return this.say(phone, String(reply || '').slice(0, 3500), accountId);
     }
     c.at = this.now();
     s.convo[phone] = c;

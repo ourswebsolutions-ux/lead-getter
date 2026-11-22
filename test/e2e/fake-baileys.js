@@ -13,6 +13,7 @@ const LOG = process.env.LEAD_FINDER_TEST_BAILEYS_LOG;
 const ON_WHATSAPP = new Set((process.env.LEAD_FINDER_TEST_BAILEYS_NUMBERS || '').split(',').filter(Boolean));
 const HISTORY = process.env.LEAD_FINDER_TEST_BAILEYS_HISTORY === '1';
 let seq = 0;
+const MEDIA = new Map(); // message id -> bytes (downloadMediaMessage)
 let linked = 0; // numbers handed out: +923000000001, +923000000002, ...
 
 function logSend(entry) {
@@ -69,6 +70,13 @@ function makeSocket(opts) {
     incoming(phoneDigits, text, pushName = null) {
       ev.emit('messages.upsert', { type: 'notify', messages: [{ key: { remoteJid: `${phoneDigits}@s.whatsapp.net`, id: `IN${Date.now()}${++seq}`, fromMe: false }, messageTimestamp: secs(Date.now()), pushName, message: { conversation: text } }] });
     },
+    // A photo, voice note or document from a contact: { kind, data, mimetype, fileName, caption }.
+    incomingMedia(phoneDigits, { kind, data, mimetype, fileName = null, caption = '' }) {
+      const id = `IN${Date.now()}${++seq}`;
+      MEDIA.set(id, Buffer.from(data));
+      const field = { image: 'imageMessage', audio: 'audioMessage', document: 'documentMessage' }[kind];
+      ev.emit('messages.upsert', { type: 'notify', messages: [{ key: { remoteJid: `${phoneDigits}@s.whatsapp.net`, id, fromMe: false }, messageTimestamp: secs(Date.now()), message: { [field]: { mimetype, ...(fileName ? { fileName } : {}), ...(caption ? { caption } : {}), ...(kind === 'audio' ? { ptt: true } : {}) } } }] });
+    },
     // A delivery/read receipt for one of the app's messages.
     receipt(jid, id, status) {
       ev.emit('messages.update', [{ key: { remoteJid: jid, id, fromMe: true }, update: { status } }]);
@@ -89,4 +97,9 @@ module.exports = {
   Browsers: { appropriate: (b) => ['Linux', b, '1'] },
   fetchLatestBaileysVersion: async () => ({ version: [2, 3000, 1] }),
   makeCacheableSignalKeyStore: (k) => k,
+  downloadMediaMessage: async (m) => {
+    const data = MEDIA.get(m.key.id);
+    if (!data) throw new Error('media not found');
+    return data;
+  },
 };
