@@ -35,6 +35,7 @@ const DISPLAY = { off: 'OFF', running: 'Running', paused: 'Paused', completed: '
 const PAUSED = {
   user: 'Paused',
   restricted: 'Paused: WhatsApp refused messages (possible restriction). Check your account before resuming.',
+  ai: 'Paused: the AI could not write the messages. Check Settings > AI, then resume.',
   errors: 'Paused after repeated sending errors',
   finished: 'Finished: every contact has received the sequence or left it',
   ended: 'Ended: past the campaign’s end date',
@@ -1152,7 +1153,9 @@ function MediaSection({ draft, disabled, edit }) {
 }
 
 // The campaign's content: message 1 (required), then only what the user adds.
-function Composer({ draft, disabled, edit, notify, preview }) {
+function Composer({ draft, disabled, edit, notify, preview, campaignId }) {
+  const [aiPreview, setAiPreview] = useState(null);
+  const [writing, setWriting] = useState(false);
   const [adding, setAdding] = useState(false);
   const [errors, setErrors] = useState([]);
   const steps = draft.templates;
@@ -1193,21 +1196,72 @@ function Composer({ draft, disabled, edit, notify, preview }) {
       setAdding(false);
     }
   };
+  const ai = Boolean(draft.aiWrite);
+  async function previewAi() {
+    setWriting(true);
+    const r = await api.outreachAiPreview(campaignId, draft.aiPrompt || '');
+    setWriting(false);
+    if (r.ok) setAiPreview(r);
+    else notify({ type: 'error', text: r.error });
+  }
   return (
     <div className="or-messages campaign-templates">
-      {steps.map((step, i) => (
+      <div className={`em-ai ${ai ? 'on' : ''}`}>
+        <span className="em-ai-icon">
+          <Icon name="sparkle" size={15} />
+        </span>
+        <span className="em-ai-text">
+          <strong>Write each message with AI</strong>
+          <span>The AI gets each business’s details and writes one personal message from your prompt.</span>
+        </span>
+        <button type="button" role="switch" aria-checked={ai} aria-label="Write each message with AI" className={`switch ${ai ? 'on' : ''}`} disabled={disabled} onClick={() => edit({ aiWrite: !ai })}>
+          <span className="switch-knob" />
+        </button>
+      </div>
+      {ai && (
+        <section className="panel or-ai-prompt" aria-label="AI prompt">
+          <label className="em-field">
+            <span className="em-field-head">Your prompt for the AI</span>
+            <textarea rows={6} value={draft.aiPrompt || ''} disabled={disabled} maxLength={4000} placeholder="e.g. Hum Axora Web hain, websites aur online stores banate hain. Free homepage design offer karo. Roman Urdu, friendly, short. Agar website nahi hai to us ka zikr karo." onChange={(e) => edit({ aiPrompt: e.target.value })} />
+            <small className="muted">Each business’s name, category, area, website and phone go to the AI with this prompt. Every written message is kept and shown in the history.</small>
+          </label>
+          <div className="em-actions">
+            <span className="grow" />
+            <button type="button" className="btn btn-ghost btn-sm" disabled={writing || !(draft.aiPrompt || '').trim()} onClick={previewAi}>
+              <Icon name="sparkle" size={13} /> {writing ? 'Writing…' : 'Preview AI message'}
+            </button>
+          </div>
+          {aiPreview && (
+            <div className="em-preview">
+              <div className="em-preview-head">
+                <span>To: {aiPreview.phone}</span>
+                <strong>AI message</strong>
+                <button type="button" className="icon-btn" aria-label="Close preview" onClick={() => setAiPreview(null)}>
+                  <Icon name="x" size={12} />
+                </button>
+              </div>
+              <pre>{aiPreview.text}</pre>
+            </div>
+          )}
+        </section>
+      )}
+      {!ai && steps.map((step, i) => (
         <StepEditor key={i} index={i} step={step} disabled={disabled} onChange={(s) => setStep(i, s)} onRemove={i > 0 ? () => removeStep(i) : null} preview={preview?.messages?.[i]} />
       ))}
-      <LinksSection draft={draft} disabled={disabled} edit={edit} />
+      {!ai && <LinksSection draft={draft} disabled={disabled} edit={edit} />}
       <VoicesSection draft={draft} disabled={disabled} edit={edit} errors={errors} />
       <MediaSection draft={draft} disabled={disabled} edit={edit} />
       <div className="or-add-row" role="group" aria-label="Add to the campaign">
-        <button type="button" className="btn" disabled={disabled || steps.length >= 10} onClick={() => edit({ templates: [...steps, { variations: [{ text: '', fallback: '' }] }] })}>
-          <Icon name="plus" size={14} /> Add Message
-        </button>
-        <button type="button" className="btn" disabled={disabled || draft.links.length >= 10} onClick={() => edit({ links: [...draft.links, { title: '', url: '' }] })}>
-          <Icon name="link" size={14} /> Add Link
-        </button>
+        {!ai && (
+          <button type="button" className="btn" disabled={disabled || steps.length >= 10} onClick={() => edit({ templates: [...steps, { variations: [{ text: '', fallback: '' }] }] })}>
+            <Icon name="plus" size={14} /> Add Message
+          </button>
+        )}
+        {!ai && (
+          <button type="button" className="btn" disabled={disabled || draft.links.length >= 10} onClick={() => edit({ links: [...draft.links, { title: '', url: '' }] })}>
+            <Icon name="link" size={14} /> Add Link
+          </button>
+        )}
         <button type="button" className="btn" disabled={disabled || adding || draft.voices.length >= 10} onClick={addVoice}>
           <Icon name="audio" size={14} /> {adding ? 'Adding…' : 'Add Voice'}
         </button>
@@ -1586,7 +1640,7 @@ export default function OutreachView({ notify, hidden }) {
                     </label>
                   </div>
                 ) : null}
-                <Composer draft={draft} disabled={running} edit={edit} notify={notify} preview={preview} />
+                <Composer draft={draft} disabled={running} edit={edit} notify={notify} preview={preview} campaignId={snap.id} />
               </>
             )}
 

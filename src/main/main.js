@@ -440,7 +440,7 @@ function validateFilter(raw) {
   }
   if (f.campaign === 'seen' || f.campaign === 'unseen') out.campaign = f.campaign;
   if (['seen', 'unseen', 'dnc'].includes(f.call)) out.call = f.call;
-  if (['maps', 'facebook', 'linkedin', 'podcast'].includes(f.source)) out.source = f.source;
+  if (['maps', 'facebook', 'linkedin', 'podcast', 'import'].includes(f.source)) out.source = f.source;
   if (typeof f.search === 'string' && f.search.trim()) out.search = f.search.trim().slice(0, 100);
   return out;
 }
@@ -1066,8 +1066,19 @@ function initChatsAndOutreach(cipher) {
   // Replies and receipts on the added accounts (the first account's come through Chats).
   waAccounts.on('incoming', (m) => m.accountId !== 'primary' && !assistant.onMessage({ accountId: m.accountId, phone: m.phone, text: m.text, media: m.media || null }) && outreach.onIncoming({ phone: m.phone, text: m.text }));
   waAccounts.on('status', (st) => st.accountId !== 'primary' && outreach.onStatus(st.id, st.status));
+  // "Write with AI": the business's details and the AI that writes each message.
+  outreach.facts = (c) => require('../ai/lead-facts').leadFacts(c.leadId ? store.leadById(c.leadId) : null, { name: c.name });
+  outreach.writer = (x) => ai.writeWhatsApp(x);
+  outreach.writerReady = () => Boolean(ai?.available());
+  outreach.senderName = (accountId) => waAccounts?.list().find((a) => a.id === accountId)?.label || '';
   outreach.on('change', (e) => send('outreach:state', { id: e?.id ?? null }));
   outreach.on('replied', (e) => send('outreach:event', { type: e.optOut ? 'opted_out' : 'replied', phone: e.phone }));
+  // Replies (not opt-outs) go to the Inbox; the admin is told by email.
+  outreach.on('replied', (e) => {
+    if (e.optOut || !inbox || !e.text) return;
+    const lead = e.leadId ? store.leadById(e.leadId) : null;
+    inbox.incoming({ channel: 'whatsapp', address: e.phone, name: lead?.name || e.name, leadId: e.leadId, campaignId: e.campaignId, campaignName: e.campaignName, account: e.accountId, text: e.text, sent: e.sent });
+  });
   outreach.on('sent', (e) => send('outreach:event', { type: 'sent', campaignId: e.campaignId, phone: e.phone, stage: e.stage, test: e.test }));
   outreach.on('failed', (e) => send('outreach:event', { type: 'failed', campaignId: e.campaignId, phone: e.phone, stage: e.stage, error: e.error, paused: e.paused }));
   outreach.init();
@@ -1982,6 +1993,24 @@ app.whenReady().then(() => {
     return { ok: true, sample, values: c ? outreach.values(c) : { name: null, business: null }, messages: outreach.preview(c || { name: null }, clean, { links, attachStep }) };
   }));
   // Voice files: chosen on this computer, checked and copied into the app.
+  // The AI's message for the first contact (or a sample lead), not kept.
+  handle('outreach:aiPreview', withCampaign(async (id, prompt) => {
+    const st = outreach.load(id);
+    if (typeof prompt === 'string') st.config.aiPrompt = prompt.slice(0, 4000);
+    if (!st.config.aiPrompt.trim()) return { ok: false, error: 'Write the prompt for the AI first.' };
+    let contact = outreach.store.contacts(id).find((c) => c.state === 'queued') || outreach.store.contacts(id)[0];
+    if (!contact && st.category) {
+      const { isVerified } = require('../whatsapp/eligibility');
+      const lead = store.listLeads({ category: st.category === 'none' ? 'none' : Number(st.category) }).find(isVerified);
+      if (lead) contact = { phone: lead.phone, leadId: lead.id, name: null };
+    }
+    if (!contact) return { ok: false, error: 'Add leads first: the AI writes for a real business.' };
+    try {
+      return { ok: true, phone: contact.phone, text: await outreach.aiMessage(st, contact, { save: false }) };
+    } catch (err) {
+      return { ok: false, error: `The AI could not write it: ${err.message}.` };
+    }
+  }));
   handle('outreach:audioPick', async () => {
     if (!outreach) return unavailable();
     const { EXTENSIONS } = require('../whatsapp/audio-library');
@@ -2187,6 +2216,44 @@ app.whenReady().then(() => {
   handle('podcast:export', (scope) => exportPodcasts(scope));
   handle('podcast:open', (url) => openPodcastLink(url));
   handle('export:csv', (scope, filter) => exportCsv(scope === 'all' ? 'all' : 'filtered', filter));
+  // Importing the user's own CSV / Excel file: read, then mapped and imported.
+  const pendingImports = new Map(); // token -> { rows, columns }
+  handle('leads:importPick', async () => {
+    const { readTable, guessMapping, FIELDS } = require('../export/lead-import');
+    const testPick = !app.isPackaged && process.env.LEAD_FINDER_TEST_IMPORT_PICK;
+    let file = testPick;
+    if (!file) {
+      const r = await dialog.showOpenDialog(win, { title: 'Import leads', properties: ['openFile'], filters: [{ name: 'CSV or Excel', extensions: ['csv', 'xlsx', 'txt', 'tsv', 'xls'] }] });
+      if (r.canceled || !r.filePaths.length) return { ok: false, canceled: true };
+      file = r.filePaths[0];
+    }
+    const t = readTable(file);
+    if (!t.ok) return t;
+    const token = require('node:crypto').randomBytes(8).toString('hex');
+    pendingImports.clear();
+    pendingImports.set(token, t);
+    return { ok: true, token, file: path.basename(file), columns: t.columns, sample: t.rows.slice(0, 5), total: t.rows.length, truncated: t.truncated, mapping: guessMapping(t.columns), fields: FIELDS };
+  });
+  handle('leads:import', (token, mapping, category) => {
+    const t = pendingImports.get(String(token));
+    if (!t) return { ok: false, error: 'Choose the file again.' };
+    const m = {};
+    for (const [k, v] of Object.entries(mapping && typeof mapping === 'object' ? mapping : {})) if (Number.isInteger(v) && v >= 0 && v < t.columns.length) m[k] = v;
+    if (m.name == null && m.email == null && m.phone == null) return { ok: false, error: 'Choose the column with the business name, email or phone.' };
+    let categoryId = null;
+    const c = category && typeof category === 'object' ? category : {};
+    if (c.name) {
+      const v = validateCategory(c.name);
+      if (v.error) return { ok: false, error: v.error };
+      categoryId = store.ensureCategory(v.category).id;
+    } else if (Number.isInteger(Number(c.id)) && Number(c.id) > 0) categoryId = Number(c.id);
+    const { importRows } = require('../export/lead-import');
+    const r = importRows(store, t.rows, m, { categoryId });
+    pendingImports.delete(String(token));
+    autoLog(`leads imported: ${r.added} added, ${r.duplicates} already saved, ${r.skipped} skipped`);
+    send('leads:imported', r);
+    return { ok: true, ...r };
+  });
   handle('lead:open', (url) => openListing(url));
   handle('activation:status', () => sendActivation());
   handle('activation:request', (plan) => requestActivation(plan));
@@ -2426,6 +2493,7 @@ function initAssistant() {
     log: autoLog,
     ai: { available: () => Boolean(ai?.available()), reply: (phone, text, media) => ai.whatsappReply(phone, text, media) },
     emailAccounts: (text) => (email ? email.addFromText(text) : Promise.resolve(null)),
+    inboxReply: (id, text) => inboxReply(id, text, 'admin-whatsapp'),
     settings: assistantSettings,
     setSettings: (patch) => store.setState(ASSISTANT_KEY, { ...assistantSettings(), ...patch }),
     send: (accountId, phone, text) => waAccounts.send(accountId, phone, text),
@@ -2647,6 +2715,14 @@ async function openAutomationSignIn() {
 }
 
 function setAutomation(raw) {
+  // The admin's email: replies on WhatsApp are forwarded there.
+  if (raw && typeof raw.adminEmail === 'string') {
+    const e = raw.adminEmail.trim().toLowerCase();
+    if (e && !require('../email/accounts').isEmail(e)) return { ok: false, error: 'Enter a valid email address.', settings: automationView() };
+    store.setState(ASSISTANT_KEY, { ...assistantSettings(), adminEmail: e });
+    autoLog(`inbox: admin email ${e ? 'set' : 'removed'}`);
+    return { ok: true, settings: automationView() };
+  }
   // The WhatsApp admin: the number the assistant talks to (digits with country code).
   if (raw && typeof raw.adminNumber === 'string') {
     const n = raw.adminNumber.replace(/\D/g, '');
@@ -2679,6 +2755,7 @@ function automationView() {
     platform: process.platform,
     osUser: require('node:os').userInfo().username,
     adminNumber: (assistantSettings().admins || [])[0] || '',
+    adminEmail: assistantSettings().adminEmail || '',
     automationAccount: automationAccount(),
     startsWithOS: automation.startsWithOS(app),
     automationProfileDir: AUTOMATION_PROFILE_DIR(),
@@ -3042,6 +3119,94 @@ function aiLeadSearch(a) {
   return { ok: true, started: true, sources: [...sources], linkedin_mode: mode, keyword: keyword || null, linkedin: linkedinKeyword || null, category: category.name, ...(mode === 'link' ? { pages: `${liPages.from}-${liPages.to}` } : {}) };
 }
 
+// --- Inbox: replies, alerts to the admin, answers relayed to the client ---------------
+
+let inbox = null;
+const RELAYED_KEY = 'inbox.relayed'; // admin emails already relayed (Message-IDs)
+
+function initInbox() {
+  const { Inbox } = require('./inbox');
+  inbox = new Inbox({ db: store.db });
+  inbox.on('change', (e) => send('inbox:state', e));
+  inbox.on('incoming', ({ thread, message }) => alertAdmin(thread, message).catch((err) => autoLog(`inbox: admin not told: ${err.message}`)));
+  // Email replies, from the sending accounts' inboxes.
+  email.replies.onReply = (m) => {
+    const ctx = email.campaigns.lastSentTo(m.from);
+    inbox.incoming({ channel: 'email', address: m.from, name: ctx?.name || null, leadId: ctx?.leadId ?? null, campaignId: ctx?.campaignId ?? null, campaignName: ctx?.campaignName || null, account: m.accountId, subject: m.subject, text: m.text, extId: m.messageId, sent: ctx ? `${ctx.subject}\n\n${ctx.text}` : null, at: m.date || Date.now() });
+  };
+  // The admin answering an alert by email ("[#12]" in the subject): relayed to the client.
+  email.replies.onOther = async (m) => {
+    const admin = assistantSettings().adminEmail;
+    const ref = /\[#(\d{1,7})\]/.exec(m.subject || '');
+    if (!admin || m.from !== admin || !ref || !m.text?.trim()) return;
+    const done = store.getState(RELAYED_KEY) || [];
+    if (done.includes(m.messageId)) return;
+    store.setState(RELAYED_KEY, [...done, m.messageId].slice(-500));
+    const r = await inboxReply(Number(ref[1]), m.text.trim(), 'admin-email');
+    autoLog(`inbox: admin email answer ${r.ok ? 'sent' : `not sent: ${r.error}`}`);
+  };
+  handle('inbox:threads', () => ({ ok: true, threads: inbox.threads(), unread: inbox.unreadCount() }));
+  handle('inbox:thread', (id) => {
+    const t = inbox.thread(Number(id));
+    if (!t) return { ok: false, error: 'That conversation no longer exists.' };
+    inbox.markRead(t.id);
+    return { ok: true, thread: inbox.thread(t.id), messages: inbox.messages(t.id) };
+  });
+  handle('inbox:reply', (id, text) => inboxReply(Number(id), typeof text === 'string' ? text : '', 'app'));
+  handle('inbox:delete', (id) => inbox.remove(Number(id)));
+}
+
+// A reply came: email replies to the admin's WhatsApp, WhatsApp replies to the admin's email.
+async function alertAdmin(thread, message) {
+  const who = `${thread.name || thread.address}${thread.name ? ` (${thread.address})` : ''}`;
+  const head = `${thread.channel === 'email' ? 'Email' : 'WhatsApp'} reply #${thread.id} from ${who}${thread.campaignName ? ` · campaign “${thread.campaignName}”` : ''}`;
+  notice('reply', `New ${thread.channel === 'email' ? 'email' : 'WhatsApp'} reply`, `${thread.name || thread.address}: ${message.text.slice(0, 120)}`);
+  const st = assistantSettings();
+  if (thread.channel === 'email') {
+    const admin = (st.admins || [])[0];
+    if (!admin || !assistant) return;
+    await assistant.say(admin, `📩 ${head}:\n\n${message.text.slice(0, 2500)}\n\nTo answer: #${thread.id} your message`);
+  } else {
+    if (!st.adminEmail || !email) return;
+    const acc = email.accounts.list().find((a) => a.status === 'ok' && a.hasPassword) || email.accounts.list().find((a) => a.hasPassword);
+    if (!acc) return;
+    await email.accounts.send(acc.id, {
+      to: st.adminEmail,
+      subject: `[#${thread.id}] ${head}`.replace(/ · /g, ' - ').replace(/[“”]/g, '"'),
+      text: `${message.text}\n\n--\nTo answer the client on WhatsApp: reply to this email (keep [#${thread.id}] in the subject), or send "#${thread.id} your message" from your admin WhatsApp, or use Outreach > Inbox.`,
+    });
+  }
+}
+
+// An answer to a lead, sent on the channel they used. via: app | admin-whatsapp | admin-email | assistant.
+async function inboxReply(id, text, via = 'app') {
+  const t = inbox?.thread(id);
+  if (!t) return { ok: false, error: `There is no conversation #${id}.` };
+  const body = String(text || '').trim();
+  if (!body) return { ok: false, error: 'Write the message first.' };
+  if (body.length > 4000) return { ok: false, error: 'The message is too long.' };
+  try {
+    if (t.channel === 'whatsapp') {
+      if (!waAccounts) return { ok: false, error: 'WhatsApp is not available right now.' };
+      const acc = t.account && waAccounts.ready(t.account) ? t.account : waAccounts.list().find((a) => a.state === 'open')?.id;
+      if (!acc) return { ok: false, error: 'No WhatsApp account is connected.' };
+      await waAccounts.send(acc, t.address, body);
+      outreach?.onManualMessage(t.address); // a person is talking to them now
+    } else {
+      const accounts = email.accounts.list().filter((a) => a.hasPassword);
+      const acc = accounts.find((a) => a.id === t.account) || accounts.find((a) => a.status === 'ok') || accounts[0];
+      if (!acc) return { ok: false, error: 'No email account can send.' };
+      const subject = `Re: ${String(t.subject || 'Your reply').replace(/^\s*(re|aw)\s*:\s*/i, '')}`;
+      await email.accounts.send(acc.id, { to: t.address, subject, text: body });
+    }
+  } catch (err) {
+    return { ok: false, error: `Not sent: ${err.message}` };
+  }
+  inbox.outgoing(t.id, body, { via });
+  autoLog(`inbox: answer sent to #${t.id} (${t.channel}, ${via})`);
+  return { ok: true, sent: true, to: t.name || t.address, channel: t.channel };
+}
+
 function initEmailAndAI() {
   secrets = new Vault({ store, key: 'secrets.v1', cipher: secretsCipher() });
   fileLibrary = new FileLibrary({ dir: path.join(app.getPath('userData'), 'files'), state: { get: (k) => store.getState(k), set: (k, v) => store.setState(k, v) } });
@@ -3056,6 +3221,7 @@ function initEmailAndAI() {
   registerEmailIpc({ handle, email, requirePlan, pickFiles, send, listCategories: () => store.listCategories().categories });
   // Images and documents for WhatsApp campaigns (and any other attachment).
   handle('files:pick', () => pickFiles({ title: 'Attach images or documents' }));
+  initInbox();
   email.campaigns.on('completed', (e) => notice('campaign', 'Email campaign completed', `“${e.name}”: ${e.counts.sent} sent, ${e.counts.failed} failed.`));
   email.campaigns.on('failed', (e) => e.paused && notice('failed', 'Email campaign paused', e.error));
 
@@ -3089,6 +3255,8 @@ function initEmailAndAI() {
       },
       files: fileLibrary,
       email,
+      inbox,
+      inboxReply: (id, text) => inboxReply(id, text, 'assistant'),
       requirePlan,
       plan: planInfo,
       search: { status: searchInfo, pool: () => (autopilot ? autopilot.pool().map((t) => ({ keyword: t.keyword, countries: t.countries, category: t.category })) : []), stop: () => ({ ok: true, ...stopSearch() }), start: aiStartSearch, run: aiLeadSearch },

@@ -19,7 +19,7 @@ function leadFilter(raw) {
   for (const k of ['date', 'from', 'to']) if (typeof f[k] === 'string' && DATE.test(f[k])) out[k] = f[k];
   if (typeof f.search === 'string' && f.search.trim()) out.search = f.search.trim().slice(0, 100);
   if (['with', 'without'].includes(f.website)) out.website = f.website;
-  if (['maps', 'facebook', 'linkedin', 'podcast'].includes(f.source)) out.source = f.source;
+  if (['maps', 'facebook', 'linkedin', 'podcast', 'import'].includes(f.source)) out.source = f.source;
   if (Array.isArray(f.ids)) out.ids = f.ids.map(Number).filter(Number.isInteger).slice(0, 1000);
   return out;
 }

@@ -56,7 +56,7 @@ async function* imapInbox({ account, pass }, since, { allowInsecure = false } = 
         try {
           text = (await simpleParser(msg.source)).text || '';
         } catch {}
-        yield { from, subject: msg.envelope?.subject || '', text, date: msg.envelope?.date ? new Date(msg.envelope.date).getTime() : null };
+        yield { from, subject: msg.envelope?.subject || '', text, date: msg.envelope?.date ? new Date(msg.envelope.date).getTime() : null, messageId: msg.envelope?.messageId || `uid:${msg.uid}` };
       }
     } finally {
       lock.release();
@@ -69,8 +69,11 @@ async function* imapInbox({ account, pass }, since, { allowInsecure = false } = 
 class ReplyWatcher {
   // accounts: EmailAccounts; campaigns: EmailCampaigns; state: { get, set };
   // openInbox(login, since) -> async iterator (imapInbox; replaceable in tests).
-  constructor({ accounts, campaigns, state, openInbox = imapInbox, clock = () => Date.now(), log = () => {}, every = EVERY, first = FIRST }) {
-    Object.assign(this, { accounts, campaigns, state, openInbox, clock, log, every, first });
+  // onReply({ accountId, from, subject, text, messageId, date }): a reply from
+  // someone the account emailed (for the Inbox); onOther(same): any other
+  // message (the admin answering a reply alert).
+  constructor({ accounts, campaigns, state, openInbox = imapInbox, clock = () => Date.now(), log = () => {}, every = EVERY, first = FIRST, onReply = null, onOther = null }) {
+    Object.assign(this, { accounts, campaigns, state, openInbox, clock, log, every, first, onReply, onOther });
     this.timer = null;
     this.running = null;
   }
@@ -120,8 +123,13 @@ class ReplyWatcher {
     try {
       for await (const m of this.openInbox(login, since)) {
         const from = String(m.from || '').trim().toLowerCase();
-        if (!sent.has(from)) continue;
-        const r = this.campaigns.recordReply(from, { subject: m.subject, unsubscribe: isUnsubscribe(m.subject, m.text), at: m.date || this.clock() });
+        if (!sent.has(from)) {
+          await Promise.resolve(this.onOther?.({ accountId, from, subject: m.subject, text: ownText(m.text), messageId: m.messageId, date: m.date })).catch(() => {});
+          continue;
+        }
+        const unsubscribe = isUnsubscribe(m.subject, m.text);
+        const r = this.campaigns.recordReply(from, { subject: m.subject, unsubscribe, at: m.date || this.clock() });
+        if (!unsubscribe) await Promise.resolve(this.onReply?.({ accountId, from, subject: m.subject, text: ownText(m.text), messageId: m.messageId, date: m.date })).catch(() => {});
         if (r.first) replies++;
         if (r.unsubscribed) unsubscribed++;
       }

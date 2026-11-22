@@ -241,6 +241,7 @@ test('Several sending accounts: emails go out from each in turn, each with its o
   const { smtp, campaigns, accounts, account, time } = await setup(t);
   const smtp2 = await startSmtp();
   t.after(() => smtp2.close());
+  campaigns.random = () => 0.999; // a fixed order here (it is random otherwise)
   const second = accounts.add({ name: 'Second', senderName: 'Axora 2', email: 'second@example.com', host: '127.0.0.1', port: smtp2.port, password: 'pw2', encryption: 'none' }).account;
   const c = campaigns.create({ name: 'Rotation' });
   assert.ok(campaigns.update(c.id, { accountIds: [account.id], subject: 'Hi {name}', body: 'Hello', delaySeconds: 60 }).ok);
@@ -397,4 +398,13 @@ test('Write with AI: each email written from the prompt and the business details
   assert.equal(s.status, 'paused');
   assert.equal(s.pauseReason, 'ai');
   assert.equal(s.counts.queued, 1, 'the recipient is still waiting');
+});
+
+test('Category campaigns: a category with no emails left disappears, and its unused campaign is deleted', async (t) => {
+  const { campaigns } = await setup(t);
+  const cc = campaigns.categoryCampaign('3', 'Empty');
+  assert.ok(campaigns.row(cc.id));
+  const list = campaigns.categoryStats([{ id: 1, name: 'Real Estate' }, { id: 3, name: 'Empty' }]);
+  assert.ok(!list.some((x) => x.name === 'Empty'));
+  assert.equal(campaigns.row(cc.id), null, 'never sent anything: deleted');
 });

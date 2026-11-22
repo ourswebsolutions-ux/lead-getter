@@ -41,6 +41,7 @@
 //   setSettings(patch)                    saves them
 //   ai: { available(), reply(phone, text) } (optional) the Groq assistant for free text
 //   emailAccounts(text) (optional) adds email accounts written as "email app-password"
+//   inboxReply(id, text) (optional) "#12 message": the admin's answer to a reply alert
 
 const KEY = 'assistant.state';
 const TIMEOUT = 30 * 60_000;
@@ -208,6 +209,13 @@ class Assistant {
       await this.say(phone, 'The earlier question timed out, so nothing was started.', accountId);
     }
     if (c) c.accountId = accountId || c.accountId;
+    // "#12 your message": the admin's answer to a reply alert, sent to that client.
+    const relay = /^#(\d{1,7})\s+([\s\S]{1,4000})$/.exec(text);
+    if (relay && this.d.inboxReply) {
+      this.save(s);
+      const r = await this.d.inboxReply(Number(relay[1]), relay[2].trim());
+      return this.say(phone, r.ok ? `✅ Sent to ${r.to} (${r.channel === 'email' ? 'email' : 'WhatsApp'}).` : `❌ ${r.error}`, accountId);
+    }
     // A file (photo, voice note, document): for the AI, with its caption.
     if (media && this.d.ai?.available()) {
       this.save(s);

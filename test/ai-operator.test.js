@@ -341,3 +341,75 @@ test('A password saved in the history before the fix is wiped from it and never 
   await op.handle('app', 'status?');
   assert.ok(!JSON.stringify(w.state.get('ai.conversations')).includes('abcd efgh'), 'wiped from the saved history');
 });
+
+test('WhatsApp with AI: one message per contact written from the prompt and the business details, kept, then the attached files; a failing AI sends nothing', async (t) => {
+  const w = world(t);
+  const { leadFacts } = require('../src/ai/lead-facts');
+  w.lead('Ali Garments', { cat: w.cats.garments, phone: '03011111111', wa: true });
+  w.lead('Bilal Fabrics', { cat: w.cats.garments, phone: '03022222222', wa: true });
+  const asked = [];
+  let down = false;
+  w.outreach.facts = (c) => leadFacts(w.db.leadById(c.leadId));
+  w.outreach.writer = async (x) => {
+    asked.push(x);
+    if (down) throw Object.assign(new Error('Groq rejected the API key'), { code: 'invalid_key' });
+    return `Assalam-o-Alaikum! ${x.business.business_name} ke liye website? ${x.instructions}`;
+  };
+  const img = path.join(w.dir, 'offer.png');
+  fs.writeFileSync(img, Buffer.concat([Buffer.from('\x89PNG\r\n\x1a\n', 'latin1'), Buffer.alloc(32)]));
+  const file = w.files.add(img).file;
+  const id = w.outreach.create('AI garments').id;
+  assert.equal(w.outreach.configure(id, { aiWrite: true, aiPrompt: '', test: false }).ok, false, 'a prompt is needed');
+  assert.ok(w.outreach.configure(id, { aiWrite: true, aiPrompt: 'Free homepage design offer, Roman Urdu.', test: false, media: [file.id] }).ok);
+  const leads = w.db.listLeads({}).filter((l) => l.whatsapp === 'available');
+  w.outreach.addLeads(id, leads.map((l) => ({ phone: l.phone, leadId: l.id, name: null })));
+  assert.ok(w.outreach.start(id, { acknowledge: true }).ok);
+  for (let i = 0; i < 3; i++) {
+    await w.outreach.tick();
+    w.clock.t += 61_000;
+  }
+  assert.equal(w.sent.length, 2, 'the AI message, then the image');
+  assert.match(w.sent[0].text, /^Assalam-o-Alaikum! (Ali Garments|Bilal Fabrics) ke liye website\? Free homepage design offer/);
+  assert.equal(w.sent[1].file, 'offer.png');
+  assert.equal(asked[0].business.category, 'Garments');
+  const contact = w.outreach.store.contacts(id).find((c) => c.phone === w.sent[0].phone);
+  assert.equal(contact.state, 'done', 'one message per contact in AI mode');
+  assert.equal(w.outreach.aiTextOf(id, contact.phone), w.sent[0].text, 'what was sent is kept');
+  // The next contact: the AI fails, nothing is sent, the campaign pauses.
+  down = true;
+  w.clock.t += 60 * 60_000;
+  await w.outreach.tick();
+  assert.equal(w.sent.length, 2);
+  const st = w.outreach.load(id);
+  assert.equal(st.status, 'paused');
+  assert.equal(st.pauseReason, 'ai');
+});
+
+test('The assistant sets up a WhatsApp campaign with AI writing: the prompt instead of fixed messages, started after yes', async (t) => {
+  const w = world(t);
+  w.lead('Ali Garments', { cat: w.cats.garments, phone: '03011111111', wa: true });
+  w.outreach.writer = async (x) => `Salam ${x.business.business_name}!`;
+  w.outreach.facts = (c) => require('../src/ai/lead-facts').leadFacts(w.db.leadById(c.leadId));
+  let cid = null;
+  const groq = scriptedGroq([
+    tools(call('create_whatsapp_campaign', { name: 'AI garments', account_id: 'primary' })),
+    (m) => {
+      cid = lastTool(m).campaign.id;
+      return tools(call('update_whatsapp_campaign', { campaign_id: cid, ai_write: true, ai_prompt: 'Free website offer, Roman Urdu' }), call('add_whatsapp_recipients', { campaign_id: cid, category: 'Garments' }));
+    },
+    () => tools(call('start_campaign', { channel: 'whatsapp', campaign_id: cid })),
+    (m) => {
+      assert.match(lastTool(m).will_do, /one message per contact written by the AI/);
+      return say('Confirm?');
+    },
+    say('Started.'),
+  ]);
+  const op = w.make(groq);
+  await op.handle('app', 'garments ko WhatsApp campaign AI se, prompt: free website offer roman urdu');
+  await op.handle('app', 'haan');
+  const st = w.outreach.load(cid);
+  assert.equal(st.status, 'running');
+  assert.equal(st.config.aiWrite, true);
+  await w.outreach.tick();
+  assert.equal(w.sent[0].text, 'Salam Ali Garments!');
+});

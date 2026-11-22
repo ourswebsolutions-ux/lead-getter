@@ -31,7 +31,7 @@ function startImap({ messages = [], user = 'sender@example.com', pass = 'pw', mo
         const args = rest.join(' ');
         if (cmd === 'CAPABILITY') w('* CAPABILITY IMAP4rev1'), w(`${tag} OK done`);
         else if (cmd === 'LOGIN') {
-          const ok = mode === 'accept' && args.includes(user) && args.includes(pass);
+          const ok = mode === 'accept' && (user == null || (args.includes(user) && args.includes(pass)));
           w(ok ? `${tag} OK [CAPABILITY IMAP4rev1] logged in` : `${tag} NO [AUTHENTICATIONFAILED] Invalid credentials`);
         } else if (cmd === 'EXAMINE' || cmd === 'SELECT') {
           w(`* ${messages.length} EXISTS`);
@@ -45,8 +45,8 @@ function startImap({ messages = [], user = 'sender@example.com', pass = 'pw', mo
           w(`${tag} OK done`);
         } else if (cmd === 'UID' && /^FETCH/i.test(args)) {
           messages.forEach((m, k) => {
-            const raw = `From: ${m.from}\r\nTo: ${user}\r\nSubject: ${m.subject}\r\nDate: ${new Date(m.date || Date.now()).toUTCString()}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${m.text || ''}\r\n`;
-            const env = `(${q(new Date(m.date || Date.now()).toUTCString())} ${q(m.subject)} ${addr(m.from)} ${addr(m.from)} ${addr(m.from)} ${addr(user)} NIL NIL NIL ${q(`<m${k}@test>`)})`;
+            const raw = `From: ${m.from}\r\nTo: ${user || 'me@example.com'}\r\nSubject: ${m.subject}\r\nDate: ${new Date(m.date || Date.now()).toUTCString()}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${m.text || ''}\r\n`;
+            const env = `(${q(new Date(m.date || Date.now()).toUTCString())} ${q(m.subject)} ${addr(m.from)} ${addr(m.from)} ${addr(m.from)} ${addr(user || 'me@example.com')} NIL NIL NIL ${q(`<m${k}@test>`)})`;
             sock.write(`* ${k + 1} FETCH (UID ${k + 1} ENVELOPE ${env} BODY[]<0> {${Buffer.byteLength(raw)}}\r\n${raw})\r\n`);
           });
           w(`${tag} OK done`);

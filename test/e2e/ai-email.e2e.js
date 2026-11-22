@@ -162,7 +162,7 @@ test('Email campaigns, Groq settings, the Assistant and AI on WhatsApp, in the r
   await compose.getByRole('group', { name: 'Send from' }).getByLabel('Send from Local SMTP').check();
   await compose.getByRole('group', { name: 'Send from' }).getByLabel('Send from sales.one@gmail.com').check();
   await until(async () => (await win.evaluate(() => window.leadFinder.emailCampaign(1))).campaign.accountIds.length === 2);
-  await compose.getByLabel('Seconds between emails').fill('10');
+  await compose.getByLabel('Minutes between emails').fill('0.5');
   await compose.getByLabel('Subject').fill('Website for {business}');
   await compose.locator('textarea').fill('Hello {name},\n\nWe build websites for real estate businesses.');
   await compose.getByRole('button', { name: 'Save' }).click();
@@ -200,7 +200,11 @@ test('Email campaigns, Groq settings, the Assistant and AI on WhatsApp, in the r
   await catsCard.getByText('Restaurants').click();
   const comp2 = win.getByRole('region', { name: 'Email', exact: true });
   await comp2.getByRole('group', { name: 'Send from' }).getByLabel('Send from Local SMTP').check();
+  await comp2.getByText('Subject', { exact: true }).waitFor();
   await comp2.getByRole('switch', { name: 'Write each email with AI' }).click();
+  await comp2.getByText('Subject', { exact: true }).waitFor({ state: 'detached' }); // AI on: only the prompt (the AI writes the subject)
+  await comp2.getByText('Your prompt for the AI').waitFor();
+  assert.equal(await comp2.getByLabel('Minutes between emails').inputValue(), '1', 'the delay is shown in minutes');
   await comp2.locator('textarea').fill('We build websites for restaurants. Offer a free menu page.');
   await comp2.getByRole('button', { name: 'Save' }).click();
   await until(async () => (await win.evaluate(() => window.leadFinder.emailCampaigns())).campaigns.some((c) => c.category && c.aiWrite));
@@ -213,6 +217,24 @@ test('Email campaigns, Groq settings, the Assistant and AI on WhatsApp, in the r
   assert.match(aiMail.text, /Gulberg, Lahore has no website yet\. We build websites for restaurants/);
   assert.ok(groq.calls.some((m) => /owner@karachigrill\.pk/.test(m[1]?.content || '')), 'the business details went to the AI');
   await win.screenshot({ path: path.join(os.tmpdir(), 'lf-email-ai.png'), fullPage: true });
+
+  // --- WhatsApp: the same AI switch; on, only the prompt shows.
+  await win.getByRole('navigation', { name: 'Campaign channel' }).getByRole('button', { name: 'WhatsApp' }).click();
+  const wa = win.locator('.outreach').first();
+  const waRow = wa.getByRole('list', { name: 'Category campaigns' }).getByRole('listitem').filter({ hasText: 'Real Estate' });
+  await waRow.locator('.campaign-item').click();
+  await wa.getByRole('heading', { name: 'Real Estate', exact: true }).waitFor();
+  await wa.getByRole('tab', { name: /^Messages/ }).click();
+  await wa.getByRole('button', { name: 'Add Message' }).waitFor();
+  await wa.getByRole('switch', { name: 'Write each message with AI' }).click();
+  await wa.getByRole('button', { name: 'Add Message' }).waitFor({ state: 'detached' }); // AI on: the message editor is hidden
+  await wa.getByRole('region', { name: 'AI prompt' }).locator('textarea').fill('Free website offer, Roman Urdu, short.');
+  await win.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save settings' }).click();
+  const waId = (await win.evaluate(() => window.leadFinder.outreachOverview())).campaigns.find((c) => c.category).id;
+  await until(async () => (await win.evaluate((i) => window.leadFinder.outreachState(i), waId)).config.aiWrite === true);
+  assert.equal((await win.evaluate((i) => window.leadFinder.outreachState(i), waId)).config.aiPrompt, 'Free website offer, Roman Urdu, short.');
+  await win.screenshot({ path: path.join(os.tmpdir(), 'lf-wa-ai.png') });
+  await win.getByRole('navigation', { name: 'Campaign channel' }).getByRole('button', { name: 'Email' }).click();
   await nav().getByRole('button', { name: 'Assistant' }).click();
 
   // --- The Assistant: answers from the database; an action waits for Confirm.

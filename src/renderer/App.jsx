@@ -17,6 +17,8 @@ import { ChangePin } from './LockScreen.jsx';
 import SettingsView from './SettingsView.jsx';
 import EmailView from './EmailView.jsx';
 import AssistantView from './AssistantView.jsx';
+import InboxView from './InboxView.jsx';
+import LeadImport from './LeadImport.jsx';
 
 const ROWS_PER_PAGE = 500;
 
@@ -647,15 +649,24 @@ export default function App({ onLock }) {
   const [pastDate, setPastDate] = useState('');
   const [range, setRange] = useState({ from: '', to: '' });
   const [catFilter, setCatFilter] = useState('all'); // 'all' | 'none' | id
+  const [importing, setImporting] = useState(false); // Leads > Import dialog
   // Outreach: WhatsApp or Email campaigns.
   const [channel, setChannelState] = useState(() => {
     try {
-      return localStorage.getItem('outreach-channel') === 'email' ? 'email' : 'whatsapp';
+      const c = localStorage.getItem('outreach-channel');
+      return c === 'email' || c === 'inbox' ? c : 'whatsapp';
     } catch {
       return 'whatsapp';
     }
   });
   const [emailSeen, setEmailSeen] = useState(channel === 'email');
+  // Unread replies (the Inbox badge).
+  const [inboxUnread, setInboxUnread] = useState(0);
+  useEffect(() => {
+    const load = () => api.inboxThreads?.().then((r) => r?.ok && setInboxUnread(r.unread)).catch(() => {});
+    load();
+    return api.onInbox?.(load);
+  }, []);
   const setChannel = (c) => {
     setChannelState(c);
     if (c === 'email') setEmailSeen(true);
@@ -1128,15 +1139,31 @@ export default function App({ onLock }) {
             {[
               ['whatsapp', 'WhatsApp', 'chat'],
               ['email', 'Email', 'mail'],
+              ['inbox', 'Inbox', 'inbox'],
             ].map(([id, label, icon]) => (
-              <button key={id} type="button" className={channel === id ? 'on' : ''} aria-pressed={channel === id} onClick={() => setChannel(id)}>
+              <button key={id} type="button" className={channel === id ? 'on' : ''} aria-pressed={channel === id} aria-label={label} onClick={() => setChannel(id)}>
                 <Icon name={icon} size={14} /> {label}
+                {id === 'inbox' && inboxUnread > 0 && <span className="ib-badge">{inboxUnread}</span>}
               </button>
             ))}
           </nav>
           <OutreachView wa={wa} notify={notify} hidden={workspace !== 'outreach' || channel !== 'whatsapp'} />
           {(channel === 'email' || emailSeen) && <EmailView notify={notify} hidden={workspace !== 'outreach' || channel !== 'email'} />}
+          {channel === 'inbox' && <InboxView notify={notify} hidden={workspace !== 'outreach' || channel !== 'inbox'} />}
         </div>
+      )}
+      {importing && (
+        <LeadImport
+          categories={catData.categories}
+          notify={notify}
+          onClose={() => setImporting(false)}
+          onDone={() => {
+            loadCategories();
+            loadLeads();
+            setView('past');
+            setPastMode('all');
+          }}
+        />
       )}
       {visited.has('assistant') && <AssistantView notify={notify} hidden={workspace !== 'assistant'} onOpenSettings={() => setWorkspace('settings')} />}
       {visited.has('dialer') && <DialerView notify={notify} hidden={workspace !== 'dialer'} prefill={dialFill} />}
@@ -1518,6 +1545,9 @@ export default function App({ onLock }) {
               <span className="subtitle">{subtitle}</span>
             </div>
             <span className="spacer" />
+            <button type="button" className="btn" onClick={() => setImporting(true)} title="Import your own CSV or Excel file of leads">
+              <Icon name="file" /> Import
+            </button>
             <button type="button" className="btn" onClick={() => exportCsv('filtered')} disabled={!leads.length} title="Export the leads shown, using the current category and date filters">
               <Icon name="download" /> Export CSV ({leads.length})
             </button>
@@ -1579,6 +1609,7 @@ export default function App({ onLock }) {
                 <option value="facebook">Facebook</option>
                 <option value="linkedin">LinkedIn</option>
                 <option value="podcast">Podcasts</option>
+                <option value="import">Imported</option>
               </select>
             </label>
             <label className="table-search">

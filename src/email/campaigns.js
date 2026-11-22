@@ -26,6 +26,7 @@
 const { EventEmitter } = require('node:events');
 const { isEmail } = require('./accounts');
 const { extractName, cleanBusiness } = require('../whatsapp/templates');
+const { leadFacts } = require('../ai/lead-facts');
 
 // accountIds: the accounts it sends from, in turn (each with its own delay and daily limit).
 // aiWrite: each email written by the AI from the body (the user's instructions)
@@ -186,9 +187,9 @@ class EmailCampaigns extends EventEmitter {
   // leadById(id); canSend() -> Promise<bool> (an active plan).
   // writer({ instructions, subject, sender, business }) -> Promise<{ subject, body }>:
   // the AI that writes personalised emails (null: not available).
-  constructor({ db, accounts, files = null, leads = () => [], leadById = () => null, canSend = async () => true, clock = () => Date.now(), tickMs = 5000, writer = null }) {
+  constructor({ db, accounts, files = null, leads = () => [], leadById = () => null, canSend = async () => true, clock = () => Date.now(), tickMs = 5000, writer = null, random = Math.random }) {
     super();
-    Object.assign(this, { db, accounts, files, leads, leadById, canSend, clock, tickMs, writer });
+    Object.assign(this, { db, accounts, files, leads, leadById, canSend, clock, tickMs, writer, random });
     this.db.exec(SCHEMA);
     // Replies (read from the account's inbox by replies.js), the account that
     // sent each email, and the AI's text for each recipient.
@@ -649,7 +650,13 @@ class EmailCampaigns extends EventEmitter {
         // Each sending account in turn: its own delay and daily limit; one
         // email at a time per account (across campaigns).
         const why = new Set();
-        for (const acc of this.senders(c)) {
+        // The sending accounts in a random order each round (none is always first).
+        const order = this.senders(c);
+        for (let i = order.length - 1; i > 0; i--) {
+          const j = Math.floor(this.random() * (i + 1));
+          [order[i], order[j]] = [order[j], order[i]];
+        }
+        for (const acc of order) {
           if (!next.length) break;
           if (c.config.senderDown?.[acc]) {
             why.add('accounts_failing');
@@ -829,6 +836,14 @@ class EmailCampaigns extends EventEmitter {
       row.withEmail++;
       if (!emailed.has(e) && !this.isOptedOut(e)) row.notEmailed++;
     }
+    // Campaigns of categories with no emails left (or deleted categories):
+    // removed when they never sent anything and are not on; kept (hidden) otherwise.
+    for (const r of this.db.prepare('SELECT id, category FROM email_campaigns WHERE category IS NOT NULL').all()) {
+      if ((out.get(r.category)?.withEmail || 0) > 0) continue;
+      const c = this.row(r.id);
+      const n = this.counts(r.id);
+      if (!['running', 'paused'].includes(c.status) && !n.sent && !n.uncertain && !n.sending) this.remove(r.id);
+    }
     return [...out.values()]
       .filter((x) => x.withEmail > 0)
       .map((x) => {
@@ -849,23 +864,7 @@ class EmailCampaigns extends EventEmitter {
   // What the AI may use about a business (only what the lead has).
   leadDetails(r) {
     const l = r.lead_id != null ? this.leadById(r.lead_id) : null;
-    const pick = (v, n = 300) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, n) : undefined);
-    const d = {
-      business_name: pick(l?.name) || r.business || undefined,
-      contact_name: pick(l?.contactName) || r.name || undefined,
-      person_title: pick(l?.personTitle),
-      company: pick(l?.companyName),
-      category: pick(l?.category),
-      searched_as: pick(l?.keyword),
-      address: pick(l?.address),
-      phone: pick(l?.phone),
-      website: pick(l?.websiteUrl) || (l ? (l.websiteKind === 'with' ? 'has a website' : l.websiteKind === 'without' ? 'no website found' : undefined) : undefined),
-      description: pick(l?.description, 600),
-      job_title_hiring_for: pick(l?.jobTitle),
-      found_on: l?.source,
-      email: r.email,
-    };
-    return Object.fromEntries(Object.entries(d).filter(([, v]) => v !== undefined));
+    return leadFacts(l, { business: r.business, name: r.name, email: r.email });
   }
 
   // The AI's email for a recipient: written once, kept, reused on retries.
@@ -873,7 +872,7 @@ class EmailCampaigns extends EventEmitter {
     if (r.ai_body) return { subject: r.ai_subject || c.subject, body: r.ai_body };
     if (!this.writer) throw Object.assign(new Error('no AI key is saved'), { code: 'no_key' });
     const sender = this.accounts.get(this.senders(c)[0]);
-    const out = await this.writer({ instructions: c.body, subject: c.subject || '', sender: { name: sender?.senderName || sender?.name || '', email: sender?.email || '' }, business: this.leadDetails(r) });
+    const out = await this.writer({ instructions: c.body, subject: '', sender: { name: sender?.senderName || sender?.name || '', email: sender?.email || '' }, business: this.leadDetails(r) });
     const subject = String(out?.subject || c.subject || '').replace(/[\r\n]+/g, ' ').trim().slice(0, 200);
     const body = String(out?.body || '').trim().slice(0, 8000);
     if (!subject || body.length < 20) throw Object.assign(new Error('the AI did not write a usable email'), { code: 'ai_empty' });
@@ -882,6 +881,14 @@ class EmailCampaigns extends EventEmitter {
   }
 
   // --- replies -----------------------------------------------------------------------
+
+  // The latest campaign email to an address: { campaignId, campaignName, leadId, name, business, text, subject }.
+  lastSentTo(email) {
+    const r = this.db.prepare("SELECT r.*, c.name AS campaign_name, c.subject AS c_subject, c.body AS c_body FROM email_recipients r JOIN email_campaigns c ON c.id = r.campaign_id WHERE r.email = ? AND r.state IN ('sent', 'uncertain') ORDER BY r.sent_at DESC LIMIT 1").get(String(email || '').toLowerCase());
+    if (!r) return null;
+    const msg = r.ai_body ? { subject: r.ai_subject, text: r.ai_body } : compose({ subject: r.c_subject, body: r.c_body }, { name: r.name, business: r.business, email: r.email });
+    return { campaignId: r.campaign_id, campaignName: r.campaign_name, leadId: r.lead_id, name: r.name || r.business || null, business: r.business, subject: msg.subject, text: String(msg.text).split('\n--\n')[0] };
+  }
 
   // Addresses this account has emailed (for matching replies in its inbox).
   sentAddresses(accountId) {

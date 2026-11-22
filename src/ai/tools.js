@@ -111,7 +111,9 @@ function buildTools(d) {
       waiting_for: s.waiting || null,
       live: !cfg.test,
       account: { id: cfg.accountId, name: waAccountName(cfg.accountId) },
-      messages: cfg.templates.map((t, i) => ({ number: i + 1, text: t.variations?.[0]?.text ?? t.text })),
+      ai_writes_each_message: cfg.aiWrite || undefined,
+      ai_prompt: cfg.aiWrite ? cfg.aiPrompt : undefined,
+      messages: cfg.aiWrite ? 'written by the AI for each contact (one message)' : cfg.templates.map((t, i) => ({ number: i + 1, text: t.variations?.[0]?.text ?? t.text })),
       voice_files: cfg.voices.map((v) => v.name),
       files: (cfg.media || []).map((m) => ({ id: m.id, name: m.name, kind: m.kind })),
       minutes_between_contacts: cfg.interval,
@@ -139,7 +141,7 @@ function buildTools(d) {
       subject: c.subject || null,
       body: c.body ? c.body.slice(0, 1500) : null,
       attachments: (c.config.attachments || []).map((a) => ({ id: a.id, name: a.name })),
-      seconds_between_emails: c.config.delaySeconds,
+      minutes_between_emails: Math.round((c.config.delaySeconds / 60) * 10) / 10,
       daily_limit: c.config.dailyLimit,
       recipients: s.counts.total,
       sent: s.counts.sent,
@@ -314,6 +316,28 @@ function buildTools(d) {
       run: () => ({ ok: true, optouts: d.email.campaigns.optOuts().slice(0, 50) }),
     },
     {
+      name: 'list_replies',
+      kind: 'read',
+      description: 'The Inbox: leads who replied to a campaign (email or WhatsApp), latest first, with their last message and the conversation id (#).',
+      parameters: obj({ channel: { ...CHANNEL, description: 'whatsapp, email, or leave out for both' } }),
+      run: (a) => {
+        if (!d.inbox) return { ok: false, error: 'The Inbox is not available.' };
+        const list = d.inbox.threads().filter((t) => !a.channel || t.channel === a.channel).slice(0, 30);
+        return { ok: true, conversations: list.map((t) => ({ id: t.id, channel: t.channel, name: t.name, address: t.address, campaign: t.campaignName, unread: t.unread, last: t.last ? { from: t.last.direction === 'in' ? 'lead' : 'us', text: t.last.text.slice(0, 300) } : null })) };
+      },
+    },
+    {
+      name: 'read_conversation',
+      kind: 'read',
+      description: 'One Inbox conversation: every message between us and the lead.',
+      parameters: obj({ conversation_id: { type: 'integer' } }, ['conversation_id']),
+      run: (a) => {
+        const t = d.inbox?.thread(a.conversation_id);
+        if (!t) return { ok: false, error: `There is no conversation #${a.conversation_id}.` };
+        return { ok: true, conversation: { id: t.id, channel: t.channel, name: t.name, address: t.address, campaign: t.campaignName }, messages: d.inbox.messages(t.id).slice(-30).map((m) => ({ from: m.direction === 'in' ? 'lead' : 'us', text: m.text.slice(0, 1500) })) };
+      },
+    },
+    {
       name: 'preview_email',
       kind: 'read',
       description: 'The email of a campaign as its first recipient will get it (subject and text).',
@@ -358,8 +382,8 @@ function buildTools(d) {
     {
       name: 'update_whatsapp_campaign',
       kind: 'config',
-      description: 'Changes a WhatsApp campaign that is not running: name, account, minutes between contacts, daily limit, quiet hours.',
-      parameters: obj({ campaign_id: CAMPAIGN_ID, name: { type: 'string' }, account_id: { type: 'string' }, minutes_between_contacts: { type: 'integer' }, daily_limit: { type: 'integer' }, quiet_start_hour: { type: 'integer' }, quiet_end_hour: { type: 'integer' } }, ['campaign_id']),
+      description: 'Changes a WhatsApp campaign that is not running: name, account, minutes between contacts, daily limit, quiet hours, and AI writing (ai_write on: the AI writes one personal message per contact from ai_prompt and the business’s details, instead of the fixed messages).',
+      parameters: obj({ campaign_id: CAMPAIGN_ID, ai_write: { type: 'boolean' }, ai_prompt: { type: 'string', description: 'The user’s instructions for the AI: offer, tone, language' }, name: { type: 'string' }, account_id: { type: 'string' }, minutes_between_contacts: { type: 'integer' }, daily_limit: { type: 'integer' }, quiet_start_hour: { type: 'integer' }, quiet_end_hour: { type: 'integer' } }, ['campaign_id']),
       run: (a) => {
         const r = waCampaign(a.campaign_id);
         if (!r.ok) return r;
@@ -373,6 +397,14 @@ function buildTools(d) {
         if (a.daily_limit != null) patch.dailyCap = Number(a.daily_limit);
         if (a.quiet_start_hour != null) patch.quietStart = Number(a.quiet_start_hour);
         if (a.quiet_end_hour != null) patch.quietEnd = Number(a.quiet_end_hour);
+        if (typeof a.ai_write === 'boolean') patch.aiWrite = a.ai_write;
+        if (typeof a.ai_prompt === 'string') patch.aiPrompt = a.ai_prompt.slice(0, 4000);
+        // Turned on with no message of its own: the default first message stays as the (unused) fallback.
+        if (patch.aiWrite && r.c.config._aiFresh) {
+          const st = r.o.load(r.c.id);
+          delete st.config._aiFresh;
+          r.o.save(st);
+        }
         return waConfigure(r.c.id, patch);
       },
     },
@@ -503,7 +535,7 @@ function buildTools(d) {
       name: 'update_email_campaign',
       kind: 'config',
       description: 'Changes an email campaign that is not running: name, account, subject, body (plain text or HTML; placeholders {name}, {business}, {email}), seconds between emails, daily limit.',
-      parameters: obj({ campaign_id: CAMPAIGN_ID, ai_write: { type: 'boolean', description: 'On: the AI writes each email from the body (used as the instructions/prompt) and the business’s details' }, name: { type: 'string' }, account_id: { type: 'string' }, account_ids: { type: 'array', items: { type: 'string' }, description: 'All the accounts it sends from, in turn (replaces the list)' }, subject: { type: 'string' }, body: { type: 'string' }, seconds_between_emails: { type: 'integer' }, daily_limit: { type: 'integer', description: 'Emails per day per sending account' } }, ['campaign_id']),
+      parameters: obj({ campaign_id: CAMPAIGN_ID, ai_write: { type: 'boolean', description: 'On: the AI writes each email from the body (used as the instructions/prompt) and the business’s details' }, name: { type: 'string' }, account_id: { type: 'string' }, account_ids: { type: 'array', items: { type: 'string' }, description: 'All the accounts it sends from, in turn (replaces the list)' }, subject: { type: 'string' }, body: { type: 'string' }, seconds_between_emails: { type: 'integer' }, minutes_between_emails: { type: 'number' }, daily_limit: { type: 'integer', description: 'Emails per day per sending account' } }, ['campaign_id']),
       run: (a) => {
         const patch = {};
         if (Array.isArray(a.account_ids)) patch.accountIds = a.account_ids;
@@ -513,6 +545,7 @@ function buildTools(d) {
         if (a.subject != null) patch.subject = a.subject;
         if (a.body != null) patch.body = a.body;
         if (a.seconds_between_emails != null) patch.delaySeconds = a.seconds_between_emails;
+        if (a.minutes_between_emails != null) patch.delaySeconds = Math.round(Number(a.minutes_between_emails) * 60);
         if (a.daily_limit != null) patch.dailyLimit = a.daily_limit;
         const r = d.email.campaigns.update(Number(a.campaign_id), patch);
         return r.ok ? { ok: true, campaign: emView(d.email.campaigns.row(Number(a.campaign_id))) } : r;
@@ -665,6 +698,19 @@ function buildTools(d) {
 
     // ---------------- confirm (only after the user's explicit yes) ----------------
     {
+      name: 'reply_to_lead',
+      kind: 'confirm',
+      description: 'Sends a message to a lead who replied (an Inbox conversation), on the channel they used (email or WhatsApp). Write the message as the user wants it sent to the client. Needs the user’s confirmation.',
+      parameters: obj({ conversation_id: { type: 'integer' }, text: { type: 'string' } }, ['conversation_id', 'text']),
+      describe: (a) => {
+        const t = d.inbox?.thread(a.conversation_id);
+        if (!t) return { ok: false, error: `There is no conversation #${a.conversation_id}.` };
+        if (!String(a.text || '').trim()) return { ok: false, error: 'Write the message first.' };
+        return { ok: true, summary: `Send to ${t.name || t.address} (${t.channel === 'email' ? 'email' : 'WhatsApp'}): “${String(a.text).trim().slice(0, 300)}”` };
+      },
+      run: (a) => d.inboxReply(Number(a.conversation_id), String(a.text || '')),
+    },
+    {
       name: 'start_campaign',
       kind: 'confirm',
       description: 'Starts sending a campaign for real (WhatsApp messages or emails to its recipients). Needs the user’s confirmation.',
@@ -674,19 +720,20 @@ function buildTools(d) {
           const r = waCampaign(a.campaign_id);
           if (!r.ok) return r;
           const v = waView(r.c, r.o);
-          if (isPlaceholder(r.c)) return { ok: false, error: 'This campaign has no message yet.' };
+          if (isPlaceholder(r.c) && !r.c.config.aiWrite) return { ok: false, error: 'This campaign has no message yet.' };
+          if (r.c.config.aiWrite && !String(r.c.config.aiPrompt || '').trim()) return { ok: false, error: 'Write the prompt for the AI first.' };
           const acc = d.waAccounts().find((x) => x.id === r.c.config.accountId);
           if (!acc) return { ok: false, error: 'Choose a WhatsApp account for this campaign first.' };
           const queued = (v.by_state.queued || 0) + (v.by_state.active || 0);
           if (!queued) return { ok: false, error: 'This campaign has no recipients waiting: add recipients first.' };
-          return { ok: true, summary: `Start the WhatsApp campaign “${v.name}” from ${acc.label}${acc.state === 'open' ? '' : ' (not connected now: it will wait for it)'}: ${queued} recipient${queued === 1 ? '' : 's'}, ${v.messages.length} message${v.messages.length === 1 ? '' : 's'}${v.voice_files.length ? `, ${v.voice_files.length} voice file${v.voice_files.length === 1 ? '' : 's'}` : ''}${v.files.length ? `, ${v.files.length} file${v.files.length === 1 ? '' : 's'}` : ''}; one contact every ${v.minutes_between_contacts} minutes, at most ${v.daily_limit} a day. Confirming also accepts WhatsApp’s rules on automated messages.` };
+          return { ok: true, summary: `Start the WhatsApp campaign “${v.name}” from ${acc.label}${acc.state === 'open' ? '' : ' (not connected now: it will wait for it)'}: ${queued} recipient${queued === 1 ? '' : 's'}, ${r.c.config.aiWrite ? 'one message per contact written by the AI' : `${v.messages.length} message${v.messages.length === 1 ? '' : 's'}`}${v.voice_files.length ? `, ${v.voice_files.length} voice file${v.voice_files.length === 1 ? '' : 's'}` : ''}${v.files.length ? `, ${v.files.length} file${v.files.length === 1 ? '' : 's'}` : ''}; one contact every ${v.minutes_between_contacts} minutes, at most ${v.daily_limit} a day. Confirming also accepts WhatsApp’s rules on automated messages.` };
         }
         const r = emCampaign(a.campaign_id);
         if (!r.ok) return r;
         const v = emView(r.c);
         if (v.not_ready.length) return { ok: false, error: v.not_ready.join(' ') };
         if (!v.remaining && !r.c.category) return { ok: false, error: 'This campaign has nobody left to email: add recipients first.' };
-        return { ok: true, summary: `Start the email campaign “${v.name}” from ${v.sending_accounts.map((x) => x.email).join(', ')}: ${v.remaining} recipient${v.remaining === 1 ? '' : 's'}, subject “${v.subject}”${v.attachments.length ? `, ${v.attachments.length} attachment${v.attachments.length === 1 ? '' : 's'}` : ''}; one email every ${v.seconds_between_emails} seconds${v.sending_accounts.length > 1 ? ' per account' : ''}, at most ${v.daily_limit} a day${v.sending_accounts.length > 1 ? ' per account' : ''}.` };
+        return { ok: true, summary: `Start the email campaign “${v.name}” from ${v.sending_accounts.map((x) => x.email).join(', ')}: ${v.remaining} recipient${v.remaining === 1 ? '' : 's'}, subject “${v.subject}”${v.attachments.length ? `, ${v.attachments.length} attachment${v.attachments.length === 1 ? '' : 's'}` : ''}; one email every ${v.minutes_between_emails} minute${v.minutes_between_emails === 1 ? '' : 's'}${v.sending_accounts.length > 1 ? ' per account' : ''}, at most ${v.daily_limit} a day${v.sending_accounts.length > 1 ? ' per account' : ''}.` };
       },
       run: async (a) => {
         if (a.channel === 'whatsapp') {

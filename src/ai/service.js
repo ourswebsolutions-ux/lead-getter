@@ -120,6 +120,27 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
     return { subject: String(out.subject || subject || ''), body: out.body.replace(/\r\n/g, '\n') };
   }
 
+  // One personalised WhatsApp message: the user's prompt + the business's facts.
+  async function writeWhatsApp({ instructions, sender = {}, business = {} }) {
+    const system = [
+      'You write ONE short, personal WhatsApp message from the sender to one business, following the sender’s instructions (their offer, tone and language — write in the language of the instructions; Roman Urdu if they write Roman Urdu).',
+      'Use the business facts to make it specific (their name, category, area, whether they have a website). Never invent anything that is not in the facts or the instructions: no made-up names, numbers, reviews, prices or claims.',
+      'Greet the contact by first name only if contact_name is given and looks like a person’s name.',
+      'Plain text, 20 to 70 words, at most one emoji, no links unless the instructions give one, no placeholders like [Name], like a real person writing on WhatsApp (not an advert).',
+      'Reply with JSON only: {"message": "..."}',
+    ].join('\n');
+    const user = JSON.stringify({ instructions: String(instructions || '').slice(0, 4000), sender, business });
+    const { message } = await ai.chat([{ role: 'system', content: system }, { role: 'user', content: user }], []);
+    const text = String(message?.content || '');
+    let out = null;
+    try {
+      out = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
+    } catch {}
+    const msg = typeof out?.message === 'string' ? out.message : !text.includes('{') ? text : '';
+    if (!msg.trim()) throw Object.assign(new Error('the AI did not answer in the expected form'), { code: 'ai_empty' });
+    return msg.replace(/\r\n/g, '\n').trim();
+  }
+
   function registerIpc(handle, pickFiles) {
     handle('ai:settings', () => view());
     handle('ai:saveKey', (key, provider) => saveKey(key, provider));
@@ -158,7 +179,7 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
     return r.ok ? r.reply : `Sorry, I could not do that: ${r.error}`;
   }
 
-  return { groq, apis, operator, tools, view, test, saveKey, setMain, registerIpc, whatsappReply, writeEmail, available: () => ai.configured() };
+  return { groq, apis, operator, tools, view, test, saveKey, setMain, registerIpc, whatsappReply, writeEmail, writeWhatsApp, available: () => ai.configured() };
 }
 
 module.exports = { createAI };

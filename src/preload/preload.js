@@ -98,6 +98,9 @@ contextBridge.exposeInMainWorld('leadFinder', {
   getStatus: () => ipcRenderer.invoke('search:status'),
   // scope: 'filtered' (leads matching filter) or 'all'
   exportCsv: (scope, filter) => ipcRenderer.invoke('export:csv', scope === 'all' ? 'all' : 'filtered', filter),
+  importLeadsPick: () => ipcRenderer.invoke('leads:importPick'),
+  importLeads: (token, mapping, category) => ipcRenderer.invoke('leads:import', String(token ?? ''), mapping && typeof mapping === 'object' ? JSON.parse(JSON.stringify(mapping)) : {}, category && typeof category === 'object' ? JSON.parse(JSON.stringify(category)) : {}),
+  onLeadsImported: (cb) => subscribe('leads:imported', cb),
   openListing: (url) => ipcRenderer.invoke('lead:open', String(url ?? '')),
   // WhatsApp: linking state, background checks and one-at-a-time sending.
   whatsappState: () => ipcRenderer.invoke('whatsapp:state'),
@@ -156,6 +159,7 @@ contextBridge.exposeInMainWorld('leadFinder', {
   outreachAudioPick: () => ipcRenderer.invoke('outreach:audioPick'),
   outreachAudioData: (id) => ipcRenderer.invoke('outreach:audioData', String(id ?? '')),
   filesPick: () => ipcRenderer.invoke('files:pick'),
+  outreachAiPreview: (id, prompt) => ipcRenderer.invoke('outreach:aiPreview', Number(id), prompt == null ? null : String(prompt)),
   onOutreach: (cb) => subscribe('outreach:state', cb),
   onOutreachEvent: (cb) => subscribe('outreach:event', cb),
   // Email campaigns (SMTP accounts: passwords go in, never come back)
@@ -190,6 +194,12 @@ contextBridge.exposeInMainWorld('leadFinder', {
   emailRemoveOptOut: (email) => ipcRenderer.invoke('email:removeOptOut', String(email ?? '')),
   emailAttach: () => ipcRenderer.invoke('email:attach'),
   onEmail: (cb) => subscribe('email:state', cb),
+  // Inbox: leads who replied (email and WhatsApp)
+  inboxThreads: () => ipcRenderer.invoke('inbox:threads'),
+  inboxThread: (id) => ipcRenderer.invoke('inbox:thread', Number(id)),
+  inboxReply: (id, text) => ipcRenderer.invoke('inbox:reply', Number(id), String(text ?? '')),
+  inboxDelete: (id) => ipcRenderer.invoke('inbox:delete', Number(id)),
+  onInbox: (cb) => subscribe('inbox:state', cb),
   // The Groq assistant (the key goes in, never comes back)
   aiSettings: () => ipcRenderer.invoke('ai:settings'),
   aiSaveKey: (key, provider) => ipcRenderer.invoke('ai:saveKey', String(key ?? ''), provider === 'openrouter' ? 'openrouter' : 'groq'),

@@ -981,7 +981,8 @@ class LeadStore {
     }
     // Source: found on Google Maps (Facebook leads have a 'fb:' key) and/or
     // in a Facebook post.
-    if (filter.source === 'maps') clauses.push("b.place_key NOT LIKE 'fb:%' AND b.place_key NOT LIKE 'li:%' AND b.place_key NOT LIKE 'lp:%' AND b.place_key NOT LIKE 'pc:%'");
+    if (filter.source === 'maps') clauses.push("b.place_key NOT LIKE 'fb:%' AND b.place_key NOT LIKE 'li:%' AND b.place_key NOT LIKE 'lp:%' AND b.place_key NOT LIKE 'pc:%' AND b.place_key NOT LIKE 'im:%'");
+    else if (filter.source === 'import') clauses.push("b.place_key LIKE 'im:%'");
     else if (filter.source === 'facebook') clauses.push('b.fb_post_url IS NOT NULL');
     else if (filter.source === 'linkedin') clauses.push('(b.li_company_url IS NOT NULL OR b.li_job_url IS NOT NULL OR b.li_post_url IS NOT NULL OR b.li_profile_url IS NOT NULL)');
     else if (filter.source === 'podcast') clauses.push("b.place_key LIKE 'pc:%'");
@@ -1154,6 +1155,18 @@ class LeadStore {
         isNewLead: Boolean(saved.qualified) && !(existing && existing.qualified) && !fromFacebook,
       };
     }));
+  }
+
+  // --- Imported leads (the user's own CSV / Excel files) ------------------------
+
+  // { placeKey: 'im:…', name, phoneRaw, address, website, email, contactName,
+  // description, categoryId, keyword }. Always a lead. Returns { lead, isNewLead }.
+  importLead(r) {
+    const saved = this.save({ placeKey: r.placeKey, mapsUrl: r.website || '', name: r.name, phoneRaw: r.phoneRaw || null, address: r.address || null, websiteStatus: r.website ? 'has_website' : 'no_website', isLead: true, categoryId: r.categoryId ?? null, keyword: r.keyword || 'Imported' });
+    if (!saved.lead) return saved;
+    this.withRetry(() => this.db.prepare('UPDATE businesses SET contact_name = COALESCE(contact_name, ?), description = COALESCE(description, ?), website_url = COALESCE(website_url, ?) WHERE id = ?').run(r.contactName || null, r.description || null, r.website || null, saved.lead.id));
+    if (r.email) this.saveLeadEmails(saved.lead.id, { emails: [r.email], website: r.website || null });
+    return { ...saved, lead: this.leadById(saved.lead.id) };
   }
 
   // --- Facebook -----------------------------------------------------------------
@@ -2418,11 +2431,12 @@ function toLead(row) {
     // SMS status (texts sent through the phone), apart from WhatsApp and calls.
     smsStatus: row.sms_seen_at ? 'seen' : 'unseen',
     // Where the lead was found: Google Maps, a Facebook post and/or LinkedIn.
-    source: { fb: 'facebook', li: 'linkedin', lp: 'linkedin', pc: 'podcast' }[String(row.place_key).slice(0, 2)] || 'maps',
+    source: { fb: 'facebook', li: 'linkedin', lp: 'linkedin', pc: 'podcast', im: 'import' }[String(row.place_key).slice(0, 2)] || 'maps',
     // A person found with LinkedIn People search (not a business).
     kind: String(row.place_key).startsWith('lp:') ? 'person' : 'business',
     sources: [
-      ...(/^(fb|li|lp|pc):/.test(String(row.place_key)) ? [] : ['maps']),
+      ...(/^(fb|li|lp|pc|im):/.test(String(row.place_key)) ? [] : ['maps']),
+      ...(String(row.place_key).startsWith('im:') ? ['import'] : []),
       ...(String(row.place_key).startsWith('pc:') ? ['podcast'] : []),
       ...(row.fb_post_url ? ['facebook'] : []),
       ...(row.li_company_url || row.li_job_url || row.li_post_url || row.li_profile_url ? ['linkedin'] : []),

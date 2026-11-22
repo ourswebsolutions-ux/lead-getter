@@ -52,6 +52,8 @@ const DEFAULT_CONFIG = {
   links: [], // [{ title, url }], added below the message of attachStep
   voices: [], // [{ id, name, mime, size, ptt }], sent right after that message
   media: [], // [{ id, name, mime, size, kind: 'image' | 'document' }], sent after the voice files
+  aiWrite: false, // one message per contact, written by the AI from aiPrompt and the business's details
+  aiPrompt: '',
   attachStep: null, // the message links and voice files go with (null: the last one)
   quietStart: 21,
   quietEnd: 9,
@@ -74,6 +76,8 @@ const RETRY_AFTER = [60 * 60_000, 6 * 60 * 60_000];
 const ACK_KEY = 'outreach.ack';
 const DEFAULT_INTERVAL_KEY = 'outreach.defaultInterval';
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
+// Messages per contact: the campaign's messages, or one written by the AI.
+const stagesOf = (cfg) => (cfg.aiWrite ? 1 : cfg.templates.length);
 
 // Recipient time zone from the country calling code (one-zone countries).
 const ZONES = [
@@ -134,14 +138,32 @@ class Outreach extends EventEmitter {
   // canSend() -> Promise<bool> (an active plan; test campaigns don't need one).
   // leads(filter) -> LeadStore.listLeads(filter) rows (for category campaigns);
   // nameFor(lead) -> the name to use for a lead added automatically.
-  constructor({ store, state, transport, audio = { info: () => null }, files = { info: () => null }, details = () => ({}), canSend = async () => true, clock = () => Date.now(), random = Math.random, zoneOf = timeZoneOf, tickMs = 30_000, leads = () => [], nameFor = (lead) => extractName(lead.name) }) {
+  constructor({ store, state, transport, audio = { info: () => null }, files = { info: () => null }, facts = () => ({}), writer = null, details = () => ({}), canSend = async () => true, clock = () => Date.now(), random = Math.random, zoneOf = timeZoneOf, tickMs = 30_000, leads = () => [], nameFor = (lead) => extractName(lead.name) }) {
     super();
-    Object.assign(this, { store, state, transport, audio, files, details, canSend, clock, random, zoneOf, tickMs, leads, nameFor });
+    Object.assign(this, { store, state, transport, audio, files, facts, writer, details, canSend, clock, random, zoneOf, tickMs, leads, nameFor });
     this.syncedAt = new Map(); // campaign id -> last queue sync
     this.busyKeys = new Set(); // WhatsApp accounts (lanes) sending right now
     this.ticking = false;
     this.timer = null;
     this.waiting = new Map(); // campaign id -> reason
+    this.aiFailures = new Map();
+    // The AI's message for each contact: written once, kept, reused on retries.
+    this.store.db.exec('CREATE TABLE IF NOT EXISTS outreach_ai_texts (campaign_id INTEGER NOT NULL, phone TEXT NOT NULL, text TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (campaign_id, phone))');
+  }
+
+  aiTextOf(id, phone) {
+    return this.store.db.prepare('SELECT text FROM outreach_ai_texts WHERE campaign_id = ? AND phone = ?').get(id, phone)?.text || null;
+  }
+
+  // The AI's WhatsApp message for a contact (save: keep it for the send).
+  async aiMessage(st, contact, { save = true } = {}) {
+    const kept = save ? this.aiTextOf(st.id, contact.phone) : null;
+    if (kept) return kept;
+    if (!this.writer || (this.writerReady && !this.writerReady())) throw Object.assign(new Error('no AI key is saved (Settings > AI)'), { code: 'no_key' });
+    const text = String((await this.writer({ instructions: st.config.aiPrompt, business: this.facts(contact), sender: { name: this.senderName?.(st.config.accountId) || '' } })) || '').trim().slice(0, 3000);
+    if (text.length < 5) throw Object.assign(new Error('the AI did not write a usable message'), { code: 'ai_empty' });
+    if (save) this.store.db.prepare('INSERT INTO outreach_ai_texts (campaign_id, phone, text, created_at) VALUES (?, ?, ?, ?) ON CONFLICT (campaign_id, phone) DO NOTHING').run(st.id, contact.phone, text, this.clock());
+    return save ? this.aiTextOf(st.id, contact.phone) || text : text;
   }
 
   // --- campaigns -----------------------------------------------------------------
@@ -159,6 +181,8 @@ class Outreach extends EventEmitter {
     config.links = Array.isArray(config.links) ? config.links : [];
     config.voices = Array.isArray(config.voices) ? config.voices : [];
     config.media = Array.isArray(config.media) ? config.media : [];
+    config.aiWrite = Boolean(config.aiWrite);
+    config.aiPrompt = typeof config.aiPrompt === 'string' ? config.aiPrompt : '';
     return { ...c, config };
   }
 
@@ -320,6 +344,7 @@ class Outreach extends EventEmitter {
 
   static checkConfig(c) {
     const errors = validateTemplates(c.templates);
+    if (c.aiWrite && !String(c.aiPrompt || '').trim()) errors.push('Write the prompt for the AI (what you offer, the tone, the language).');
     const int = (v) => Number.isInteger(v);
     if (!int(c.interval) || c.interval < LIMITS.interval.min || c.interval > LIMITS.interval.max) errors.push(`The interval must be between ${LIMITS.interval.min} and ${LIMITS.interval.max} minutes.`);
     if (!int(c.dailyCap) || c.dailyCap < LIMITS.capMin || c.dailyCap > CAP_SANITY) errors.push('The daily limit must be a whole number of contacts, at least 1.');
@@ -373,6 +398,8 @@ class Outreach extends EventEmitter {
     config.accountId = typeof config.accountId === 'string' && config.accountId ? config.accountId.slice(0, 40) : 'primary';
     config.test = Boolean(config.test);
     config.allowPrevious = Boolean(config.allowPrevious);
+    config.aiWrite = Boolean(config.aiWrite);
+    config.aiPrompt = String(config.aiPrompt || '').slice(0, 4000);
     config.startDate = config.startDate || null;
     config.endDate = config.endDate || null;
     const f = config.filters || {};
@@ -386,9 +413,9 @@ class Outreach extends EventEmitter {
     const name = patch.name !== undefined ? String(patch.name).trim().slice(0, 60) : st.name;
     if (!name) return { ok: false, error: 'Give the campaign a name.' };
     delete config.name;
-    if (st.config.test && !config.test) this.store.clearTest(id, config.templates.length); // switching to live: forget simulated progress
+    if (st.config.test && !config.test) this.store.clearTest(id, stagesOf(config)); // switching to live: forget simulated progress
     // Fewer messages than a contact already got: their sequence is complete.
-    for (const c of this.store.contacts(id)) if (c.state === 'active' && c.stage >= config.templates.length) this.store.setContact(id, c.phone, { state: 'done' }, this.clock());
+    for (const c of this.store.contacts(id)) if (c.state === 'active' && c.stage >= stagesOf(config)) this.store.setContact(id, c.phone, { state: 'done' }, this.clock());
     this.save({ ...st, name, config });
     return { ok: true, snapshot: this.snapshot(id) };
   }
@@ -487,7 +514,7 @@ class Outreach extends EventEmitter {
     if (!c || !['excluded', 'failed', 'uncertain', 'replied', 'skipped'].includes(c.state)) return { ok: false, error: 'This contact can’t be resumed.' };
     if (this.store.isOptedOut(phone)) return { ok: false, error: 'This contact asked not to be messaged.' };
     if (c.stage === 0 && !this.load(id).config.allowPrevious && this.store.wasContacted(phone, id)) return { ok: false, error: 'Already contacted in another campaign. Allow previously contacted contacts in this campaign’s settings to message them again.' };
-    this.store.setContact(id, phone, { state: c.stage === 0 ? 'queued' : c.stage >= this.load(id).config.templates.length ? 'done' : 'active', note: null, attempts: 0, retryAt: null }, this.clock());
+    this.store.setContact(id, phone, { state: c.stage === 0 ? 'queued' : c.stage >= stagesOf(this.load(id).config) ? 'done' : 'active', note: null, attempts: 0, retryAt: null }, this.clock());
     this.emit('change', { id });
     return { ok: true };
   }
@@ -514,14 +541,22 @@ class Outreach extends EventEmitter {
     const entries = this.store.contactsByPhone(phone);
     if (isOptOut(text)) {
       this.store.optOut(phone, 'Asked not to be contacted', this.clock());
-      if (entries.length) this.emit('replied', { phone, optOut: true });
+      if (entries.length) this.emit('replied', { phone, optOut: true, text, ...this.replyContext(entries) });
     } else {
       if (!entries.length) return;
       const now = this.clock();
       for (const c of entries) this.store.setContact(c.campaignId, phone, { repliedAt: now }, now);
-      this.emit('replied', { phone, optOut: false });
+      this.emit('replied', { phone, optOut: false, text, ...this.replyContext(entries) });
     }
     this.emit('change', {});
+  }
+
+  // The campaign a reply belongs to (the latest one that messaged the number).
+  replyContext(entries) {
+    const e = [...entries].sort((a, b) => (b.lastSentAt || 0) - (a.lastSentAt || 0))[0];
+    const st = e && this.load(e.campaignId);
+    const sent = e ? this.store.sends({ campaignId: e.campaignId, test: false, limit: 50 }).filter((x) => x.phone === e.phone && x.kind === 'text' && x.body).map((x) => x.body) : [];
+    return { campaignId: e?.campaignId ?? null, campaignName: st?.name || null, accountId: st?.config.accountId || null, leadId: e?.leadId ?? null, name: e?.name || null, sent: sent.slice(-1)[0] || null };
   }
 
   // The user messaged a contact themselves (from the chat view).
@@ -578,7 +613,7 @@ class Outreach extends EventEmitter {
   current(st) {
     if (!st.current) return null;
     const c = this.store.contact(st.id, st.current);
-    return c && c.state === 'active' && c.stage >= 1 && c.stage < st.config.templates.length ? c : null;
+    return c && c.state === 'active' && c.stage >= 1 && c.stage < stagesOf(st.config) ? c : null;
   }
 
   // Picks the next message. The contact in progress comes first (their next
@@ -600,7 +635,7 @@ class Outreach extends EventEmitter {
       return { contact: cur, stage: cur.stage + 1, day };
     }
     const contacts = this.store.contacts(st.id);
-    const n = cfg.templates.length;
+    const n = stagesOf(cfg);
     const resumed = contacts.filter((c) => c.state === 'active' && c.stage >= 1 && c.stage < n).sort((a, b) => a.lastSentAt - b.lastSentAt);
     const fresh = contacts.filter((c) => c.state === 'queued' && c.stage === 0);
     const retries = contacts.filter((c) => c.state === 'failed' && c.attempts < MAX_ATTEMPTS && c.retryAt && c.retryAt <= now && c.stage < n);
@@ -734,7 +769,7 @@ class Outreach extends EventEmitter {
   // After a contact's message: their next one in 30-60 seconds, or (after
   // the third) the next contact in campaign’s interval.
   scheduleAfter(st, phone, stage, at) {
-    const last = stage >= st.config.templates.length;
+    const last = stage >= stagesOf(st.config);
     if (!last) {
       st.current = phone;
       st.nextDueAt = at + this.stageGap();
@@ -769,12 +804,33 @@ class Outreach extends EventEmitter {
       this.emit('change', { id });
       return;
     }
-    const { variant, text } = this.compose(st, contact, stage);
+    // Written by the AI first (nothing is reserved if that fails).
+    let aiText = null;
+    if (cfg.aiWrite) {
+      try {
+        aiText = await this.aiMessage(st, contact);
+        this.aiFailures.delete(id);
+      } catch (err) {
+        const n = (this.aiFailures.get(id) || 0) + 1;
+        this.aiFailures.set(id, n);
+        if (!this.keepLatestStatus(st)) return;
+        st.nextDueAt = now + 5 * MIN;
+        if (['no_key', 'invalid_key', 'credits'].includes(err.code) || n >= 3) {
+          this.aiFailures.delete(id);
+          st.status = 'paused';
+          st.pauseReason = 'ai';
+        }
+        this.save(st);
+        this.emit('failed', { campaignId: id, phone: contact.phone, stage, error: `AI: ${err.message}`, paused: st.status === 'paused' ? 'ai' : null });
+        return;
+      }
+    }
+    const { variant, text } = aiText != null ? { variant: null, text: withLinks(aiText, cfg.links) } : this.compose(st, contact, stage);
     const sendId = this.store.reserve({ campaignId: id, campaignName: st.name, phone: contact.phone, stage, variant, body: text, test: cfg.test, day, now });
     if (sendId === null) {
       // Already sent (or possibly sent) in an earlier run: bring the contact
       // up to date, never send it again.
-      this.store.setContact(id, contact.phone, { stage, state: stage >= cfg.templates.length ? 'done' : 'active', lastSentAt: contact.lastSentAt ?? now }, now);
+      this.store.setContact(id, contact.phone, { stage, state: stage >= stagesOf(cfg) ? 'done' : 'active', lastSentAt: contact.lastSentAt ?? now }, now);
       this.scheduleAfter(st, contact.phone, stage, contact.lastSentAt ?? now);
       this.save(st);
       return;
@@ -789,13 +845,13 @@ class Outreach extends EventEmitter {
       const res = cfg.test ? { id: `TEST-${sendId}` } : await this.transport.send(contact.phone, text, cfg.accountId || 'primary');
       const at = this.clock();
       this.store.markSent(sendId, res.id, at);
-      this.store.setContact(id, contact.phone, { stage, state: stage >= cfg.templates.length ? 'done' : 'active', lastSentAt: at, note: null, attempts: 0, retryAt: null }, at);
+      this.store.setContact(id, contact.phone, { stage, state: stage >= stagesOf(cfg) ? 'done' : 'active', lastSentAt: at, note: null, attempts: 0, retryAt: null }, at);
       st.failures = 0;
       const exists = this.keepLatestStatus(st);
       this.scheduleAfter(st, contact.phone, stage, at);
       if (exists) this.save(st);
       this.emit('sent', { campaignId: id, phone: contact.phone, stage, text, waId: res.id, test: cfg.test, at });
-      if (stage === cfg.attachStep && (cfg.voices.length || cfg.media?.length)) await this.sendVoices(st, contact, stage, day);
+      if (stage === (cfg.aiWrite ? 1 : cfg.attachStep) && (cfg.voices.length || cfg.media?.length)) await this.sendVoices(st, contact, stage, day);
     } catch (err) {
       const msg = errorText(err);
       if (err?.code === 'not_connected') {
@@ -896,7 +952,7 @@ class Outreach extends EventEmitter {
   upcoming(st) {
     const now = this.clock();
     const contacts = this.store.contacts(st.id).filter((c) => !this.store.isOptedOut(c.phone));
-    const n = st.config.templates.length;
+    const n = stagesOf(st.config);
     const resumed = contacts.filter((c) => c.state === 'active' && c.stage >= 1 && c.stage < n && c.phone !== st.current).sort((a, b) => a.lastSentAt - b.lastSentAt);
     const retries = contacts.filter((c) => c.state === 'failed' && c.attempts < MAX_ATTEMPTS && c.retryAt && c.stage < n).sort((a, b) => a.retryAt - b.retryAt);
     const fresh = contacts.filter((c) => c.state === 'queued' && c.stage === 0);
@@ -926,7 +982,7 @@ class Outreach extends EventEmitter {
     const contacts = this.store.contacts(c.id);
     const counts = contacts.reduce((m, x) => ((m[x.state] = (m[x.state] || 0) + 1), m), {});
     const now = this.clock();
-    const n = this.load(c.id).config.templates.length;
+    const n = stagesOf(this.load(c.id).config);
     const work = contacts.some((x) => x.state === 'queued' || (x.state === 'active' && x.stage < n) || (x.state === 'failed' && x.attempts < MAX_ATTEMPTS && x.retryAt && x.stage < n));
     const waiting = c.status === 'running' ? this.waiting.get(c.id) || null : null;
     // OFF / Paused / Running / Completed (on, everything sent; new leads

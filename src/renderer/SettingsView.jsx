@@ -292,6 +292,28 @@ function AdminNumber({ value, onSave }) {
   );
 }
 
+function AdminEmail({ value, onSave }) {
+  const [v, setV] = useState(value || '');
+  useEffect(() => setV(value || ''), [value]);
+  const dirty = v.trim().toLowerCase() !== (value || '');
+  return (
+    <form
+      className="st-inline"
+      onSubmit={(e) => {
+        e.preventDefault();
+        onSave(v.trim().toLowerCase());
+      }}
+    >
+      <input aria-label="Admin email" type="email" placeholder="you@company.com" value={v} onChange={(e) => setV(e.target.value)} maxLength={254} />
+      {dirty && (
+        <button type="submit" className="btn btn-primary btn-sm">
+          Save
+        </button>
+      )}
+    </form>
+  );
+}
+
 export default function SettingsView({ hidden, notify, categories = [] }) {
   const [s, setS] = useState(null);
   const [pilot, setPilot] = useState({ engine: 'stopped', tasks: [] });
@@ -414,6 +436,9 @@ export default function SettingsView({ hidden, notify, categories = [] }) {
                 </Row>
                 <Row icon="chat" label="Admin WhatsApp number" help="Receives updates, sends commands">
                   <AdminNumber value={s.adminNumber} onSave={(v) => change({ adminNumber: v })} />
+                </Row>
+                <Row icon="mail" label="Admin email" help="Gets WhatsApp replies, can answer">
+                  <AdminEmail value={s.adminEmail} onSave={(v) => change({ adminEmail: v })} />
                 </Row>
                 <Row icon="bell" label="Notifications" help="Important events only">
                   <Switch label="Notifications" on={s.notifications} onChange={(v) => change({ notifications: v })} />

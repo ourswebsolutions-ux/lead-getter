@@ -447,7 +447,7 @@ function Editor({ snap, accounts, categories, notify, reload }) {
   const sendersKey = snap.accountIds.join(',');
   useEffect(() => setSenderIds(sendersKey ? sendersKey.split(',') : []), [sendersKey]);
   useEffect(() => {
-    if (!dirty) setD({ name: snap.name, aiWrite: snap.aiWrite, subject: snap.subject, body: snap.body, delaySeconds: snap.delaySeconds, dailyLimit: snap.dailyLimit, allowPrevious: snap.allowPrevious });
+    if (!dirty) setD({ name: snap.name, aiWrite: snap.aiWrite, delayMinutes: Math.round((snap.delaySeconds / 60) * 10) / 10, subject: snap.subject, body: snap.body, delaySeconds: snap.delaySeconds, dailyLimit: snap.dailyLimit, allowPrevious: snap.allowPrevious });
   }, [snap, dirty]);
   if (!d) return null;
   const running = snap.status === 'running';
@@ -459,7 +459,8 @@ function Editor({ snap, accounts, categories, notify, reload }) {
   const pct = n.total ? Math.round(((n.sent + n.failed + n.skipped + n.uncertain) / n.total) * 100) : 0;
 
   async function save() {
-    const r = await api.emailUpdate(snap.id, { ...d, delaySeconds: Number(d.delaySeconds), dailyLimit: Number(d.dailyLimit) });
+    const { delayMinutes, ...rest } = d;
+    const r = await api.emailUpdate(snap.id, { ...rest, delaySeconds: Math.round(Number(delayMinutes) * 60), dailyLimit: Number(d.dailyLimit) });
     if (!r.ok) {
       notify({ type: 'error', text: r.error });
       return false;
@@ -634,8 +635,8 @@ function Editor({ snap, accounts, categories, notify, reload }) {
         </div>
         <div className="em-row3">
           <label>
-            <span>Seconds between emails</span>
-            <input type="number" min={10} max={3600} value={d.delaySeconds} disabled={running} onChange={(e) => set('delaySeconds', e.target.value)} />
+            <span>Minutes between emails</span>
+            <input type="number" min={0.5} max={60} step={0.5} value={d.delayMinutes} disabled={running} onChange={(e) => set('delayMinutes', e.target.value)} />
           </label>
           <label>
             <span>Daily limit{snap.accountIds.length > 1 ? ' per account' : ''}</span>
@@ -654,14 +655,16 @@ function Editor({ snap, accounts, categories, notify, reload }) {
             <span className="switch-knob" />
           </button>
         </div>
-        <label className="em-field">
-          <span>{d.aiWrite ? 'Subject (optional: empty = the AI writes one per business)' : 'Subject'}</span>
-          <input value={d.subject} disabled={running} maxLength={250} placeholder={d.aiWrite ? 'Leave empty, or e.g. Website for {business}' : 'Websites for {business}'} onChange={(e) => set('subject', e.target.value)} />
-        </label>
+        {!d.aiWrite && (
+          <label className="em-field">
+            <span>Subject</span>
+            <input value={d.subject} disabled={running} maxLength={250} placeholder="Websites for {business}" onChange={(e) => set('subject', e.target.value)} />
+          </label>
+        )}
         <label className="em-field">
           <span className="em-field-head">
-            {d.aiWrite ? 'Your prompt for the AI' : 'Email'}
-            <span className="em-vars">
+            {d.aiWrite ? 'Your prompt for the AI (it writes the subject and the email)' : 'Email'}
+            <span className="em-vars" hidden={d.aiWrite}>
               {VARS.map((v) => (
                 <button key={v} type="button" className="em-chip" disabled={running} onClick={() => insertVar(v)}>
                   {v}
