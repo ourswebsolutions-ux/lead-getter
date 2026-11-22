@@ -28,7 +28,10 @@ const { isEmail } = require('./accounts');
 const { extractName, cleanBusiness } = require('../whatsapp/templates');
 
 // accountIds: the accounts it sends from, in turn (each with its own delay and daily limit).
-const DEFAULTS = { delaySeconds: 60, dailyLimit: 100, allowPrevious: false, attachments: [], html: null, accountIds: [], senderNext: {}, senderDown: {} };
+// aiWrite: each email written by the AI from the body (the user's instructions)
+// and the business's details; the text is kept on the recipient.
+const DEFAULTS = { delaySeconds: 60, dailyLimit: 100, allowPrevious: false, attachments: [], html: null, accountIds: [], senderNext: {}, senderDown: {}, aiWrite: false };
+const SYNC_EVERY = 60_000; // category campaigns look for new leads with an email
 const LIMITS = { delay: { min: 10, max: 3600 }, daily: { min: 1, max: 2000 }, attachments: 10, attachmentBytes: 20 * 1024 * 1024, recipients: 20_000 };
 const MAX_ATTEMPTS = 3;
 const RETRY_AFTER = 30 * 60_000;
@@ -181,16 +184,25 @@ class EmailCampaigns extends EventEmitter {
   // db: node:sqlite DatabaseSync (the lead database); accounts: EmailAccounts;
   // files: FileLibrary (attachments); leads(filter) -> LeadStore.listLeads rows;
   // leadById(id); canSend() -> Promise<bool> (an active plan).
-  constructor({ db, accounts, files = null, leads = () => [], leadById = () => null, canSend = async () => true, clock = () => Date.now(), tickMs = 5000 }) {
+  // writer({ instructions, subject, sender, business }) -> Promise<{ subject, body }>:
+  // the AI that writes personalised emails (null: not available).
+  constructor({ db, accounts, files = null, leads = () => [], leadById = () => null, canSend = async () => true, clock = () => Date.now(), tickMs = 5000, writer = null }) {
     super();
-    Object.assign(this, { db, accounts, files, leads, leadById, canSend, clock, tickMs });
+    Object.assign(this, { db, accounts, files, leads, leadById, canSend, clock, tickMs, writer });
     this.db.exec(SCHEMA);
-    // Replies (read from the account's inbox by replies.js).
-    for (const col of ['replied_at INTEGER', 'reply_subject TEXT', 'sent_account TEXT']) {
+    // Replies (read from the account's inbox by replies.js), the account that
+    // sent each email, and the AI's text for each recipient.
+    for (const col of ['replied_at INTEGER', 'reply_subject TEXT', 'sent_account TEXT', 'ai_subject TEXT', 'ai_body TEXT']) {
       try {
         this.db.exec(`ALTER TABLE email_recipients ADD COLUMN ${col}`);
       } catch {} // already there
     }
+    // A category campaign: the category's leads with an email, added as they come.
+    try {
+      this.db.exec('ALTER TABLE email_campaigns ADD COLUMN category TEXT');
+    } catch {}
+    this.syncedAt = new Map();
+    this.aiFailures = new Map();
     this.busy = new Set(); // SMTP accounts sending right now
     this.timer = null;
     this.ticking = false;
@@ -206,7 +218,7 @@ class EmailCampaigns extends EventEmitter {
     try {
       config = JSON.parse(r.config || '{}');
     } catch {}
-    return { id: r.id, name: r.name, status: r.status, pauseReason: r.pause_reason, accountId: r.account_id, subject: r.subject, body: r.body, config: { ...DEFAULTS, ...config }, nextDueAt: r.next_due_at, failures: r.failures, createdAt: r.created_at, updatedAt: r.updated_at, startedAt: r.started_at, finishedAt: r.finished_at };
+    return { id: r.id, category: r.category || null, name: r.name, status: r.status, pauseReason: r.pause_reason, accountId: r.account_id, subject: r.subject, body: r.body, config: { ...DEFAULTS, ...config }, nextDueAt: r.next_due_at, failures: r.failures, createdAt: r.created_at, updatedAt: r.updated_at, startedAt: r.started_at, finishedAt: r.finished_at };
   }
 
   ids() {
@@ -335,6 +347,7 @@ class EmailCampaigns extends EventEmitter {
       config.dailyLimit = d;
     }
     if (patch.allowPrevious !== undefined) config.allowPrevious = Boolean(patch.allowPrevious);
+    if (patch.aiWrite !== undefined) config.aiWrite = Boolean(patch.aiWrite);
     if (patch.attachments !== undefined) {
       const list = [];
       let bytes = 0;
@@ -428,10 +441,11 @@ class EmailCampaigns extends EventEmitter {
     return { ok: true, ready: a.ready.length, noEmail: a.noEmail, optedOut: a.optedOut, previous: a.previous, already: a.already, sample: a.ready.slice(0, 10).map(({ lead, email }) => ({ id: lead.id, name: lead.name, email })) };
   }
 
-  addLeads(id, filter = {}) {
+  // internal: a running category campaign picking up its new leads.
+  addLeads(id, filter = {}, { internal = false } = {}) {
     const c = this.row(id);
     if (!c) return { ok: false, error: 'That email campaign no longer exists.' };
-    if (c.status === 'running') return { ok: false, error: 'Pause the campaign before adding recipients.' };
+    if (c.status === 'running' && !internal) return { ok: false, error: 'Pause the campaign before adding recipients.' };
     const a = this.audience(id, this.leads(filter));
     const room = LIMITS.recipients - this.counts(id).total;
     const take = a.ready.slice(0, Math.max(0, room));
@@ -450,7 +464,7 @@ class EmailCampaigns extends EventEmitter {
       throw err;
     }
     if (added) this.log(c.id, 'info', `${added} recipient${added === 1 ? '' : 's'} added`);
-    if (c.status === 'completed' && added) this.setFields(c.id, { status: 'paused', pauseReason: 'new_recipients' });
+    if (c.status === 'completed' && added && !c.category) this.setFields(c.id, { status: 'paused', pauseReason: 'new_recipients' });
     this.emit('change', { id: c.id });
     return { ok: true, added, noEmail: a.noEmail, optedOut: a.optedOut, previous: a.previous, already: a.already, overLimit: a.ready.length - take.length, campaign: this.summary(c.id) };
   }
@@ -493,8 +507,13 @@ class EmailCampaigns extends EventEmitter {
       const noPass = senders.filter((id) => !this.accounts.public(this.accounts.get(id)).hasPassword);
       if (noPass.length === senders.length) errs.push('The password of its email account is not saved on this computer.');
     }
-    if (!c.subject.trim()) errs.push('Write the subject.');
-    if (!c.body.trim()) errs.push('Write the email.');
+    if (c.config.aiWrite) {
+      if (!this.writer || (this.writerReady && !this.writerReady())) errs.push('Writing with AI needs a Groq or OpenRouter key in Settings > AI.');
+      if (!c.body.trim()) errs.push('Write the instructions for the AI (what you offer, the tone, the language).');
+    } else {
+      if (!c.subject.trim()) errs.push('Write the subject.');
+      if (!c.body.trim()) errs.push('Write the email.');
+    }
     return errs;
   }
 
@@ -504,8 +523,9 @@ class EmailCampaigns extends EventEmitter {
     if (c.status === 'running') return { ok: true, campaign: this.summary(id) };
     const errs = this.problems(c);
     if (errs.length) return { ok: false, error: errs.join(' ') };
+    if (c.category) this.syncQueue(c, true);
     const n = this.counts(id);
-    if (!n.queued && !n.remaining) return { ok: false, error: 'There is nobody left to email in this campaign: add recipients first.' };
+    if (!c.category && !n.queued && !n.remaining) return { ok: false, error: 'There is nobody left to email in this campaign: add recipients first.' };
     if (!(await this.canSend())) return { ok: false, error: 'Sending emails needs an active plan.' };
     this.setFields(id, { status: 'running', pauseReason: null, failures: 0, nextDueAt: this.clock(), startedAt: c.startedAt || this.clock(), finishedAt: null, config: { ...c.config, senderDown: {}, senderNext: {} } });
     this.log(id, 'info', c.status === 'paused' ? 'Resumed' : 'Started');
@@ -554,7 +574,12 @@ class EmailCampaigns extends EventEmitter {
     const address = String(to || this.accounts.get(from).email).trim().toLowerCase();
     if (!isEmail(address)) return { ok: false, error: 'Enter a valid email address for the test.' };
     const r = this.db.prepare('SELECT * FROM email_recipients WHERE campaign_id = ? ORDER BY added_at LIMIT 1').get(c.id);
-    const msg = compose(c, { name: r?.name || null, business: r?.business || null, email: r?.email || address });
+    let msg;
+    try {
+      msg = c.config.aiWrite ? compose(await this.aiText(c, r || { email: address, name: null, business: null }, { save: false }), { name: r?.name || null, business: r?.business || null, email: r?.email || address }) : compose(c, { name: r?.name || null, business: r?.business || null, email: r?.email || address });
+    } catch (err) {
+      return { ok: false, error: `The AI could not write the test email: ${err.message}.` };
+    }
     try {
       await this.accounts.send(from, { to: address, subject: `[Test] ${msg.subject}`, text: msg.text, html: msg.html, attachments: this.attachments(c) });
       this.log(c.id, 'info', `Test email sent to ${address}`);
@@ -601,11 +626,17 @@ class EmailCampaigns extends EventEmitter {
       const running = this.db.prepare("SELECT id FROM email_campaigns WHERE status = 'running' ORDER BY COALESCE(next_due_at, 0), id").all().map((r) => this.row(r.id));
       const now = this.clock();
       for (const c of running) {
+        if (c.category) this.syncQueue(c);
         const next = this.nextRecipients(c, now, 50);
-        // Nobody left: completed at once (no delay to wait for).
+        // Nobody left: completed at once (no delay to wait for). A category
+        // campaign stays on and waits for the category's new leads.
         if (!next.length) {
           if (this.db.prepare("SELECT 1 FROM email_recipients WHERE campaign_id = ? AND state = 'sending' LIMIT 1").get(c.id)) continue;
           const n = this.counts(c.id);
+          if (!n.remaining && c.category) {
+            this.waiting.set(c.id, 'new_leads');
+            continue;
+          }
           if (!n.remaining) {
             this.setFields(c.id, { status: 'completed', pauseReason: null, finishedAt: now });
             this.log(c.id, 'info', `Completed: ${n.sent} sent, ${n.failed} failed${n.uncertain ? `, ${n.uncertain} uncertain` : ''}, ${n.skipped} skipped`);
@@ -680,12 +711,31 @@ class EmailCampaigns extends EventEmitter {
     if (this.isOptedOut(r.email)) return set({ state: 'skipped', error: 'Unsubscribed' });
     if (!c.config.allowPrevious && this.wasEmailed(r.email, c.id)) return set({ state: 'skipped', error: 'Already emailed by another campaign' });
     if (!(await this.canSend())) return this.pause(c.id, 'subscription');
+    // Written by the AI first (nothing is reserved if that fails).
+    let text = null;
+    if (c.config.aiWrite) {
+      try {
+        text = await this.aiText(c, r);
+        this.aiFailures.delete(c.id);
+      } catch (err) {
+        const n = (this.aiFailures.get(c.id) || 0) + 1;
+        this.aiFailures.set(c.id, n);
+        this.log(c.id, 'error', `AI could not write the email for ${r.email}: ${err.message}`);
+        this.patchConfig(c.id, (cfg) => (cfg.senderNext = { ...(cfg.senderNext || {}), [accountId]: now + Math.max(30, c.config.delaySeconds) * 1000 }));
+        if (['no_key', 'invalid_key', 'credits'].includes(err.code) || n >= 3) {
+          this.aiFailures.delete(c.id);
+          this.pause(c.id, 'ai');
+        }
+        this.emit('change', { id: c.id });
+        return;
+      }
+    }
     // Reserved: from here on, it is never sent twice.
     const reserved = this.db.prepare("UPDATE email_recipients SET state = 'sending', attempts = attempts + 1, updated_at = ? WHERE campaign_id = ? AND email = ? AND state IN ('queued', 'failed')").run(now, c.id, r.email).changes;
     if (!reserved) return;
     this.patchConfig(c.id, (cfg) => (cfg.senderNext = { ...(cfg.senderNext || {}), [accountId]: now + c.config.delaySeconds * 1000 }));
     this.setFields(c.id, { nextDueAt: now + c.config.delaySeconds * 1000 });
-    const msg = compose(c, { name: r.name, business: r.business, email: r.email });
+    const msg = text ? compose({ subject: text.subject, body: text.body }, { name: r.name, business: r.business, email: r.email }) : compose(c, { name: r.name, business: r.business, email: r.email });
     const account = this.accounts.get(accountId);
     try {
       const res = await this.accounts.send(accountId, {
@@ -738,6 +788,99 @@ class EmailCampaigns extends EventEmitter {
     }
   }
 
+  // --- category campaigns ------------------------------------------------------------
+
+  // The category's leads with an email that are not in its campaign yet.
+  syncQueue(c, force = false) {
+    const now = this.clock();
+    if (!force && now - (this.syncedAt.get(c.id) || 0) < SYNC_EVERY) return 0;
+    this.syncedAt.set(c.id, now);
+    const r = this.addLeads(c.id, { category: c.category }, { internal: true });
+    return r.added || 0;
+  }
+
+  campaignForCategory(key) {
+    const r = this.db.prepare('SELECT id FROM email_campaigns WHERE category = ? ORDER BY id LIMIT 1').get(String(key));
+    return r ? this.row(r.id) : null;
+  }
+
+  // The category's campaign, created (off) the first time it is opened.
+  categoryCampaign(key, name) {
+    const existing = this.campaignForCategory(key);
+    if (existing) return { ok: true, id: existing.id };
+    const r = this.create({ name: `${name} · email` });
+    if (!r.ok) return r;
+    this.db.prepare('UPDATE email_campaigns SET category = ? WHERE id = ?').run(String(key), r.id);
+    this.emit('change', { id: r.id });
+    return { ok: true, id: r.id };
+  }
+
+  // Every category with leads that have an email: { key, name, withEmail, notEmailed, campaign }.
+  categoryStats(categories) {
+    const leads = this.leads({});
+    const emailed = new Set(this.db.prepare("SELECT DISTINCT email FROM email_recipients WHERE state IN ('sent', 'uncertain', 'sending')").all().map((r) => r.email));
+    const out = new Map(categories.map((c) => [String(c.id), { key: String(c.id), name: c.name, withEmail: 0, notEmailed: 0 }]));
+    out.set('none', { key: 'none', name: 'Uncategorized', withEmail: 0, notEmailed: 0 });
+    for (const l of leads) {
+      const e = emailOf(l);
+      if (!e) continue;
+      const row = out.get(l.categoryId == null ? 'none' : String(l.categoryId));
+      if (!row) continue;
+      row.withEmail++;
+      if (!emailed.has(e) && !this.isOptedOut(e)) row.notEmailed++;
+    }
+    return [...out.values()]
+      .filter((x) => x.withEmail > 0)
+      .map((x) => {
+        const c = this.campaignForCategory(x.key);
+        return { ...x, campaign: c ? this.summary(c) : null };
+      });
+  }
+
+  // ON: the campaign runs and keeps adding the category's new leads; OFF: stopped.
+  async setCategoryEnabled(key, name, on) {
+    const cc = this.categoryCampaign(key, name);
+    if (!cc.ok) return cc;
+    return on ? this.start(cc.id) : this.stop(cc.id);
+  }
+
+  // --- AI-written emails -------------------------------------------------------------
+
+  // What the AI may use about a business (only what the lead has).
+  leadDetails(r) {
+    const l = r.lead_id != null ? this.leadById(r.lead_id) : null;
+    const pick = (v, n = 300) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, n) : undefined);
+    const d = {
+      business_name: pick(l?.name) || r.business || undefined,
+      contact_name: pick(l?.contactName) || r.name || undefined,
+      person_title: pick(l?.personTitle),
+      company: pick(l?.companyName),
+      category: pick(l?.category),
+      searched_as: pick(l?.keyword),
+      address: pick(l?.address),
+      phone: pick(l?.phone),
+      website: pick(l?.websiteUrl) || (l ? (l.websiteKind === 'with' ? 'has a website' : l.websiteKind === 'without' ? 'no website found' : undefined) : undefined),
+      description: pick(l?.description, 600),
+      job_title_hiring_for: pick(l?.jobTitle),
+      found_on: l?.source,
+      email: r.email,
+    };
+    return Object.fromEntries(Object.entries(d).filter(([, v]) => v !== undefined));
+  }
+
+  // The AI's email for a recipient: written once, kept, reused on retries.
+  async aiText(c, r, { save = true } = {}) {
+    if (r.ai_body) return { subject: r.ai_subject || c.subject, body: r.ai_body };
+    if (!this.writer) throw Object.assign(new Error('no AI key is saved'), { code: 'no_key' });
+    const sender = this.accounts.get(this.senders(c)[0]);
+    const out = await this.writer({ instructions: c.body, subject: c.subject || '', sender: { name: sender?.senderName || sender?.name || '', email: sender?.email || '' }, business: this.leadDetails(r) });
+    const subject = String(out?.subject || c.subject || '').replace(/[\r\n]+/g, ' ').trim().slice(0, 200);
+    const body = String(out?.body || '').trim().slice(0, 8000);
+    if (!subject || body.length < 20) throw Object.assign(new Error('the AI did not write a usable email'), { code: 'ai_empty' });
+    if (save) this.db.prepare('UPDATE email_recipients SET ai_subject = ?, ai_body = ? WHERE campaign_id = ? AND email = ?').run(subject, body, c.id, r.email);
+    return { subject, body };
+  }
+
   // --- replies -----------------------------------------------------------------------
 
   // Addresses this account has emailed (for matching replies in its inbox).
@@ -785,6 +928,8 @@ class EmailCampaigns extends EventEmitter {
       accountName: senders.length > 1 ? `${senders.length} accounts` : account?.name || senders[0]?.name || null,
       accountIds: senders.map((x) => x.id),
       senders,
+      category: c.category,
+      aiWrite: Boolean(c.config.aiWrite),
       subject: c.subject,
       delaySeconds: c.config.delaySeconds,
       dailyLimit: c.config.dailyLimit,
@@ -811,7 +956,7 @@ class EmailCampaigns extends EventEmitter {
       body: c.body,
       allowPrevious: c.config.allowPrevious,
       problems: this.problems(c),
-      recipients: this.db.prepare('SELECT email, lead_id AS leadId, name, business, state, attempts, error, sent_at AS sentAt, retry_at AS retryAt, replied_at AS repliedAt FROM email_recipients WHERE campaign_id = ? ORDER BY CASE state WHEN \'sending\' THEN 0 WHEN \'failed\' THEN 1 WHEN \'uncertain\' THEN 2 WHEN \'queued\' THEN 3 ELSE 4 END, updated_at DESC LIMIT ?').all(c.id, recipients),
+      recipients: this.db.prepare('SELECT email, lead_id AS leadId, name, business, state, attempts, error, sent_at AS sentAt, retry_at AS retryAt, replied_at AS repliedAt, ai_subject AS aiSubject, ai_body AS aiBody FROM email_recipients WHERE campaign_id = ? ORDER BY CASE state WHEN \'sending\' THEN 0 WHEN \'failed\' THEN 1 WHEN \'uncertain\' THEN 2 WHEN \'queued\' THEN 3 ELSE 4 END, updated_at DESC LIMIT ?').all(c.id, recipients),
       log: this.db.prepare('SELECT at, level, text FROM email_log WHERE campaign_id = ? ORDER BY id DESC LIMIT 100').all(c.id),
       limits: LIMITS,
     };
@@ -822,10 +967,20 @@ class EmailCampaigns extends EventEmitter {
   }
 
   // Preview of the email for the first recipient (or a sample lead).
-  render(id, { subject, body } = {}) {
+  // With AI writing on: the AI's email for the first recipient (not kept).
+  async render(id, { subject, body } = {}) {
     const c = this.row(id);
     if (!c) return { ok: false, error: 'That email campaign no longer exists.' };
-    const r = this.db.prepare('SELECT * FROM email_recipients WHERE campaign_id = ? ORDER BY added_at LIMIT 1').get(c.id);
+    const r = this.db.prepare("SELECT * FROM email_recipients WHERE campaign_id = ? ORDER BY CASE WHEN state = 'queued' THEN 0 ELSE 1 END, added_at LIMIT 1").get(c.id);
+    if (c.config.aiWrite) {
+      if (!r) return { ok: false, error: 'Add recipients first: the AI writes for a real business.' };
+      try {
+        const t = await this.aiText({ ...c, subject: subject ?? c.subject, body: body ?? c.body }, { ...r, ai_body: null }, { save: false });
+        return { ok: true, to: r.email, ai: true, ...compose(t, { name: r.name, business: r.business, email: r.email }) };
+      } catch (err) {
+        return { ok: false, error: `The AI could not write it: ${err.message}.` };
+      }
+    }
     const msg = compose({ subject: subject ?? c.subject, body: body ?? c.body }, { name: r?.name || null, business: r?.business || null, email: r?.email || 'recipient@example.com' });
     return { ok: true, to: r?.email || null, ...msg };
   }
@@ -835,6 +990,7 @@ const PAUSE_TEXT = {
   user: 'paused by you',
   login: 'the email account rejected the login; check its password',
   accounts_failing: 'its email accounts are failing',
+  ai: 'the AI could not write the emails (check Settings > AI)',
   connection: 'the email server could not be reached',
   errors: 'three emails in a row failed',
   subscription: 'sending needs an active plan',

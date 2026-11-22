@@ -101,7 +101,7 @@ function world(t) {
     settings: { get: () => ({ continuous_search: false }), set: () => ({ ok: true }) },
     showLeads: () => {},
   };
-  const make = (groq) => new Operator({ groq, tools: buildTools(deps), state, context: () => 'test', credentials: (text) => email.addFromText(text, { test: false }) });
+  const make = (groq) => new Operator({ groq, tools: buildTools(deps), state, context: () => 'test', credentials: (text) => email.addFromText(text, { test: false }), redact: (text) => require('../src/email/credentials').extractAccounts(text).redacted });
   t.after(async () => {
     outreach.dispose();
     await new Promise((r) => setTimeout(r, 30)); // a kick still on its way
@@ -272,7 +272,7 @@ test('An email account written in the chat: added by the app, the password never
   const groq = scriptedGroq([
     (m) => {
       const all = JSON.stringify(m);
-      assert.ok(!/abcd ?efgh|abcdefghijklmnop/.test(all), 'no password in what the AI gets');
+      assert.ok(!/abcd ?efgh|abcdefghijklmnop/.test(all), 'no password in what the AI gets: ' + all.slice(0, 1500));
       assert.match(m.at(-1).content, /ali@gmail\.com: added, connected \(account id ([a-f0-9]+)\)/);
       accId = /account id ([a-f0-9]+)/.exec(m.at(-1).content)[1];
       return say('Gmail account add ho gaya.');
@@ -326,4 +326,18 @@ test('Any lead search by conversation: LinkedIn My connections, a LinkedIn page 
   await op.handle('app', 'Lahore mein real estate agencies Google Maps par dhoondo');
   await op.handle('app', 'yes');
   assert.deepEqual([w.searches[1].sources, w.searches[1].business, w.searches[1].countries], [['maps'], 'real estate agency', ['Lahore']]);
+});
+
+test('A password saved in the history before the fix is wiped from it and never sent to the AI again', async (t) => {
+  const w = world(t);
+  w.state.set('ai.conversations', { app: { messages: [{ role: 'user', content: 'axoraweb.services@gmail.com\nabcd efgh ijkl mnop' }, { role: 'assistant', content: 'I cannot add it.' }], display: [{ role: 'user', text: 'axoraweb.services@gmail.com\nabcd efgh ijkl mnop', at: 1 }] } });
+  const groq = scriptedGroq([
+    (m) => {
+      assert.ok(!/abcd efgh/.test(JSON.stringify(m)), 'the old password is not in the history sent');
+      return say('ok');
+    },
+  ]);
+  const op = w.make(groq);
+  await op.handle('app', 'status?');
+  assert.ok(!JSON.stringify(w.state.get('ai.conversations')).includes('abcd efgh'), 'wiped from the saved history');
 });

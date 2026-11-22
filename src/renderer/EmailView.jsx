@@ -447,7 +447,7 @@ function Editor({ snap, accounts, categories, notify, reload }) {
   const sendersKey = snap.accountIds.join(',');
   useEffect(() => setSenderIds(sendersKey ? sendersKey.split(',') : []), [sendersKey]);
   useEffect(() => {
-    if (!dirty) setD({ name: snap.name, subject: snap.subject, body: snap.body, delaySeconds: snap.delaySeconds, dailyLimit: snap.dailyLimit, allowPrevious: snap.allowPrevious });
+    if (!dirty) setD({ name: snap.name, aiWrite: snap.aiWrite, subject: snap.subject, body: snap.body, delaySeconds: snap.delaySeconds, dailyLimit: snap.dailyLimit, allowPrevious: snap.allowPrevious });
   }, [snap, dirty]);
   if (!d) return null;
   const running = snap.status === 'running';
@@ -499,8 +499,12 @@ function Editor({ snap, accounts, categories, notify, reload }) {
     requestAnimationFrame(() => el?.focus());
   }
   async function showPreview() {
+    setBusy('preview');
+    if (dirty && d.aiWrite !== snap.aiWrite) await save();
     const r = await api.emailRender(snap.id, d.subject, d.body);
+    setBusy('');
     if (r.ok) setPreview(r);
+    else notify({ type: 'error', text: r.error });
   }
   async function sendTest() {
     if (dirty && !(await save())) return;
@@ -529,7 +533,7 @@ function Editor({ snap, accounts, categories, notify, reload }) {
           </div>
           <div className="em-controls">
             {['draft', 'stopped', 'completed'].includes(snap.status) && (
-              <button type="button" className="btn btn-primary btn-sm" disabled={busy === 'start' || !n.remaining} onClick={() => act('start')}>
+              <button type="button" className="btn btn-primary btn-sm" disabled={busy === 'start' || (!n.remaining && !snap.category)} onClick={() => act('start')}>
                 <Icon name="play" size={13} /> Start
               </button>
             )}
@@ -638,13 +642,25 @@ function Editor({ snap, accounts, categories, notify, reload }) {
             <input type="number" min={1} max={2000} value={d.dailyLimit} disabled={running} onChange={(e) => set('dailyLimit', e.target.value)} />
           </label>
         </div>
+        <div className={`em-ai ${d.aiWrite ? 'on' : ''}`}>
+          <span className="em-ai-icon">
+            <Icon name="sparkle" size={15} />
+          </span>
+          <span className="em-ai-text">
+            <strong>Write each email with AI</strong>
+            <span>The AI gets each business’s details and writes a personal email from your prompt.</span>
+          </span>
+          <button type="button" role="switch" aria-checked={Boolean(d.aiWrite)} aria-label="Write each email with AI" className={`switch ${d.aiWrite ? 'on' : ''}`} disabled={running} onClick={() => set('aiWrite', !d.aiWrite)}>
+            <span className="switch-knob" />
+          </button>
+        </div>
         <label className="em-field">
-          <span>Subject</span>
-          <input value={d.subject} disabled={running} maxLength={250} placeholder="Websites for {business}" onChange={(e) => set('subject', e.target.value)} />
+          <span>{d.aiWrite ? 'Subject (optional: empty = the AI writes one per business)' : 'Subject'}</span>
+          <input value={d.subject} disabled={running} maxLength={250} placeholder={d.aiWrite ? 'Leave empty, or e.g. Website for {business}' : 'Websites for {business}'} onChange={(e) => set('subject', e.target.value)} />
         </label>
         <label className="em-field">
           <span className="em-field-head">
-            Email
+            {d.aiWrite ? 'Your prompt for the AI' : 'Email'}
             <span className="em-vars">
               {VARS.map((v) => (
                 <button key={v} type="button" className="em-chip" disabled={running} onClick={() => insertVar(v)}>
@@ -653,8 +669,15 @@ function Editor({ snap, accounts, categories, notify, reload }) {
               ))}
             </span>
           </span>
-          <textarea ref={bodyRef} rows={9} value={d.body} disabled={running} placeholder={'Hello {name},\n\nWe help businesses like {business} with…'} onChange={(e) => set('body', e.target.value)} />
-          <small className="muted">Plain text or HTML. An unsubscribe line is added to every email.</small>
+          <textarea
+            ref={bodyRef}
+            rows={9}
+            value={d.body}
+            disabled={running}
+            placeholder={d.aiWrite ? 'e.g. We are Axora Web, we build fast websites and online stores. Offer a free homepage design. Friendly, short, English. Mention it if they have no website. Sign as Ali.' : 'Hello {name},\n\nWe help businesses like {business} with…'}
+            onChange={(e) => set('body', e.target.value)}
+          />
+          <small className="muted">{d.aiWrite ? 'Each business’s name, category, area, website, phone and description go to the AI with this prompt. Every written email is kept and shown with its recipient.' : 'Plain text or HTML. An unsubscribe line is added to every email.'}</small>
         </label>
         <div className="em-attach">
           {snap.attachments.map((a) => (
@@ -677,8 +700,8 @@ function Editor({ snap, accounts, categories, notify, reload }) {
             <span>Also people emailed by other campaigns</span>
           </label>
           <span className="grow" />
-          <button type="button" className="btn btn-ghost btn-sm" onClick={showPreview}>
-            <Icon name="eye" size={13} /> Preview
+          <button type="button" className="btn btn-ghost btn-sm" disabled={busy === 'preview'} onClick={showPreview}>
+            <Icon name={d.aiWrite ? 'sparkle' : 'eye'} size={13} /> {busy === 'preview' ? 'Writing…' : d.aiWrite ? 'Preview AI email' : 'Preview'}
           </button>
           <button type="button" className="btn btn-primary btn-sm" disabled={!dirty || running} onClick={save}>
             <Icon name="check" size={13} /> Save
@@ -718,9 +741,13 @@ function Editor({ snap, accounts, categories, notify, reload }) {
               <Icon name="refresh" size={13} /> Retry failed
             </button>
           )}
-          <button type="button" className="btn btn-sm btn-primary" disabled={running} onClick={() => setPicker(true)}>
-            <Icon name="plus" size={13} /> Add recipients
-          </button>
+          {snap.category ? (
+            <span className="muted small">New leads of this category with an email are added by themselves</span>
+          ) : (
+            <button type="button" className="btn btn-sm btn-primary" disabled={running} onClick={() => setPicker(true)}>
+              <Icon name="plus" size={13} /> Add recipients
+            </button>
+          )}
         </div>
         {!snap.recipients.length ? (
           <p className="muted small">No recipients yet. Add leads with an email address.</p>
@@ -749,6 +776,13 @@ function Editor({ snap, accounts, categories, notify, reload }) {
                       {r.error && <span className="em-err-text">{r.error}</span>}
                       {r.sentAt && <span className="muted small"> {when(r.sentAt)}</span>}
                       {r.repliedAt && <span className="em-state s-replied">Replied</span>}
+                      {r.aiBody && (
+                        <details className="em-ai-sent">
+                          <summary>AI email</summary>
+                          <strong>{r.aiSubject}</strong>
+                          <pre>{r.aiBody}</pre>
+                        </details>
+                      )}
                     </td>
                     <td>
                       {['queued', 'failed', 'skipped'].includes(r.state) && !running && (
@@ -845,12 +879,49 @@ function OptOuts({ notify }) {
   );
 }
 
+// Every lead category with emails is a campaign, like WhatsApp's: choose
+// its sending accounts, subject and email (or the AI prompt), then ON.
+function CategoryCampaigns({ list, selected, onOpen, onToggle, toggling }) {
+  if (!list.length) return null;
+  return (
+    <section className="panel em-card" aria-label="Category campaigns">
+      <div className="or-card-head">
+        <h3>
+          <Icon name="tag" size={14} /> Categories <span className="or-count">{list.length}</span>
+        </h3>
+      </div>
+      <ul className="em-cats">
+        {list.map((c) => {
+          const on = ['running', 'paused'].includes(c.campaign?.status);
+          return (
+            <li key={c.key} className={selected && c.campaign?.id === selected ? 'on' : ''}>
+              <button type="button" className="em-cat-main" onClick={() => onOpen(c)}>
+                <span className="em-c-name">{c.name}</span>
+                <span className="em-c-meta">
+                  {c.withEmail} with email · {c.notEmailed} not emailed{c.campaign?.counts.sent ? ` · ${c.campaign.counts.sent} sent` : ''}
+                  {c.campaign?.aiWrite ? ' · AI' : ''}
+                </span>
+              </button>
+              <button type="button" role="switch" aria-checked={on} aria-label={`${c.name} email campaign`} className={`switch ${on ? 'on' : ''}`} disabled={toggling === c.key} onClick={() => onToggle(c, !on)}>
+                <span className="switch-knob" />
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
 export default function EmailView({ notify, hidden }) {
   const [accounts, setAccounts] = useState({ accounts: [], persistent: true });
   const [campaigns, setCampaigns] = useState([]);
   const [selected, setSelected] = useState(null);
   const [snap, setSnap] = useState(null);
   const [cats, setCats] = useState([]);
+  const [catList, setCatList] = useState([]);
+  const [toggling, setToggling] = useState(null);
+  const loadCats = useCallback(() => api.emailCategories().then((r) => r.ok && setCatList(r.categories)).catch(() => {}), []);
 
   const loadAccounts = useCallback(() => api.emailAccounts().then((r) => r.ok && setAccounts(r)), []);
   const loadCampaigns = useCallback(() => api.emailCampaigns().then((r) => r.ok && setCampaigns(r.campaigns)), []);
@@ -863,8 +934,9 @@ export default function EmailView({ notify, hidden }) {
     if (hidden) return;
     loadAccounts();
     loadCampaigns();
+    loadCats();
     api.listCategories().then((c) => setCats(c.categories || [])).catch(() => {});
-  }, [hidden, loadAccounts, loadCampaigns]);
+  }, [hidden, loadAccounts, loadCampaigns, loadCats]);
   useEffect(() => {
     loadSnap(selected);
   }, [selected, loadSnap]);
@@ -873,9 +945,10 @@ export default function EmailView({ notify, hidden }) {
       api.onEmail((e) => {
         if (e.accounts) return loadAccounts();
         loadCampaigns();
+        loadCats();
         if (selected && (e.id == null || e.id === selected)) loadSnap(selected);
       }),
-    [selected, loadCampaigns, loadSnap, loadAccounts],
+    [selected, loadCampaigns, loadSnap, loadAccounts, loadCats],
   );
   useEffect(() => {
     if (!selected && campaigns.length) setSelected(campaigns[0].id);
@@ -887,8 +960,28 @@ export default function EmailView({ notify, hidden }) {
     await loadCampaigns();
     setSelected(r.id);
   }
+  async function openCategory(c) {
+    const r = await api.emailCategoryCampaign(c.key);
+    if (!r.ok) return notify({ type: 'error', text: r.error });
+    await loadCampaigns();
+    loadCats();
+    setSelected(r.id);
+  }
+  async function toggleCategory(c, on) {
+    setToggling(c.key);
+    const r = await api.emailSetCategory(c.key, on);
+    setToggling(null);
+    loadCats();
+    loadCampaigns();
+    if (!r.ok) {
+      // Not ready yet: its campaign opens to be completed.
+      await openCategory(c);
+      notify({ type: 'error', text: r.error });
+    } else if (on && r.campaign) setSelected(r.campaign.id);
+  }
   const reload = (next) => {
     loadCampaigns();
+    loadCats();
     if (next === null) setSelected(null);
     else loadSnap(selected);
     loadAccounts();
@@ -898,20 +991,21 @@ export default function EmailView({ notify, hidden }) {
     <section className="outreach or-grid em-view" hidden={hidden} aria-label="Email campaigns">
       <aside className="or-side">
         <Accounts accounts={accounts.accounts} persistent={accounts.persistent} onChange={loadAccounts} notify={notify} />
+        <CategoryCampaigns list={catList} selected={selected} onOpen={openCategory} onToggle={toggleCategory} toggling={toggling} />
         <section className="panel em-card" aria-label="Campaign list">
           <div className="or-card-head">
             <h3>
-              <Icon name="send" size={14} /> Campaigns <span className="or-count">{campaigns.length}</span>
+              <Icon name="send" size={14} /> Campaigns <span className="or-count">{campaigns.filter((c) => !c.category).length}</span>
             </h3>
             <button type="button" className="btn btn-sm btn-primary" onClick={create}>
               <Icon name="plus" size={13} /> New
             </button>
           </div>
-          {!campaigns.length ? (
-            <p className="muted small">No email campaigns yet.</p>
+          {!campaigns.filter((c) => !c.category).length ? (
+            <p className="muted small">Your own campaigns (any leads you choose).</p>
           ) : (
             <ul className="em-campaigns">
-              {campaigns.map((c) => (
+              {campaigns.filter((c) => !c.category).map((c) => (
                 <li key={c.id}>
                   <button type="button" className={selected === c.id ? 'on' : ''} onClick={() => setSelected(c.id)}>
                     <span className="em-c-name">{c.name}</span>

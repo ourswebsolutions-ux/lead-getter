@@ -134,6 +134,8 @@ function buildTools(d) {
       waiting_for: s.waiting,
       account: c.accountId ? { id: c.accountId, name: s.accountName } : null,
       sending_accounts: s.senders.map((x) => ({ id: x.id, name: x.name, email: x.email, sent_today: x.sentToday, failing: x.down || undefined })),
+      category_campaign: c.category ? true : undefined,
+      ai_writes_each_email: Boolean(c.config.aiWrite),
       subject: c.subject || null,
       body: c.body ? c.body.slice(0, 1500) : null,
       attachments: (c.config.attachments || []).map((a) => ({ id: a.id, name: a.name })),
@@ -501,10 +503,11 @@ function buildTools(d) {
       name: 'update_email_campaign',
       kind: 'config',
       description: 'Changes an email campaign that is not running: name, account, subject, body (plain text or HTML; placeholders {name}, {business}, {email}), seconds between emails, daily limit.',
-      parameters: obj({ campaign_id: CAMPAIGN_ID, name: { type: 'string' }, account_id: { type: 'string' }, account_ids: { type: 'array', items: { type: 'string' }, description: 'All the accounts it sends from, in turn (replaces the list)' }, subject: { type: 'string' }, body: { type: 'string' }, seconds_between_emails: { type: 'integer' }, daily_limit: { type: 'integer', description: 'Emails per day per sending account' } }, ['campaign_id']),
+      parameters: obj({ campaign_id: CAMPAIGN_ID, ai_write: { type: 'boolean', description: 'On: the AI writes each email from the body (used as the instructions/prompt) and the business’s details' }, name: { type: 'string' }, account_id: { type: 'string' }, account_ids: { type: 'array', items: { type: 'string' }, description: 'All the accounts it sends from, in turn (replaces the list)' }, subject: { type: 'string' }, body: { type: 'string' }, seconds_between_emails: { type: 'integer' }, daily_limit: { type: 'integer', description: 'Emails per day per sending account' } }, ['campaign_id']),
       run: (a) => {
         const patch = {};
         if (Array.isArray(a.account_ids)) patch.accountIds = a.account_ids;
+        if (typeof a.ai_write === 'boolean') patch.aiWrite = a.ai_write;
         if (a.name != null) patch.name = a.name;
         if (a.account_id != null) patch.accountId = a.account_id;
         if (a.subject != null) patch.subject = a.subject;
@@ -514,6 +517,25 @@ function buildTools(d) {
         const r = d.email.campaigns.update(Number(a.campaign_id), patch);
         return r.ok ? { ok: true, campaign: emView(d.email.campaigns.row(Number(a.campaign_id))) } : r;
       },
+    },
+    {
+      name: 'email_category_campaign',
+      kind: 'config',
+      description: 'The email campaign of a lead category (every category with emails has one, like WhatsApp’s): opens it (created the first time) so its accounts, subject, body or AI prompt can be set with update_email_campaign. Its recipients are the category’s leads with an email, added automatically.',
+      parameters: obj({ category: FILTER_PROPS.category }, ['category']),
+      run: (a) => {
+        const cat = categoryOf(a.category);
+        if (!cat.ok || cat.id == null) return cat.ok ? { ok: false, error: 'Say which category.' } : cat;
+        const r = d.email.campaigns.categoryCampaign(String(cat.id), cat.name);
+        return r.ok ? { ok: true, campaign: emView(d.email.campaigns.row(r.id)) } : r;
+      },
+    },
+    {
+      name: 'list_email_category_campaigns',
+      kind: 'read',
+      description: 'Lead categories with emails, how many can still be emailed, and their email campaign (on/off, sent).',
+      parameters: obj({}),
+      run: () => ({ ok: true, categories: d.email.campaigns.categoryStats(d.store.listCategories().categories).map((c) => ({ category: c.name, with_email: c.withEmail, not_emailed_yet: c.notEmailed, campaign: c.campaign ? { id: c.campaign.id, status: STATUS_WORDS[c.campaign.status] || c.campaign.status, sent: c.campaign.counts.sent, ai: c.campaign.aiWrite } : null })) }),
     },
     {
       name: 'add_email_sender',
@@ -663,7 +685,7 @@ function buildTools(d) {
         if (!r.ok) return r;
         const v = emView(r.c);
         if (v.not_ready.length) return { ok: false, error: v.not_ready.join(' ') };
-        if (!v.remaining) return { ok: false, error: 'This campaign has nobody left to email: add recipients first.' };
+        if (!v.remaining && !r.c.category) return { ok: false, error: 'This campaign has nobody left to email: add recipients first.' };
         return { ok: true, summary: `Start the email campaign “${v.name}” from ${v.sending_accounts.map((x) => x.email).join(', ')}: ${v.remaining} recipient${v.remaining === 1 ? '' : 's'}, subject “${v.subject}”${v.attachments.length ? `, ${v.attachments.length} attachment${v.attachments.length === 1 ? '' : 's'}` : ''}; one email every ${v.seconds_between_emails} seconds${v.sending_accounts.length > 1 ? ' per account' : ''}, at most ${v.daily_limit} a day${v.sending_accounts.length > 1 ? ' per account' : ''}.` };
       },
       run: async (a) => {

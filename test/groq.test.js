@@ -123,3 +123,26 @@ test('Main AI with a stand-in: Groq rate-limited, OpenRouter answers; the main o
   assert.deepEqual(ai.ordered().map((p) => p.label), ['OpenRouter']);
   assert.equal(ai.configured(), true);
 });
+
+test('The email writer: instructions and business facts go to the AI; its JSON answer (even inside a code block) becomes subject and body', async () => {
+  const { createAI } = require('../src/ai/service');
+  const { Vault } = require('../src/main/vault');
+  const m = new Map();
+  const store = { getState: (k) => m.get(k), setState: (k, v) => m.set(k, v) };
+  const vault = new Vault({ store, key: 's', cipher: null });
+  vault.set('groq', KEY);
+  let sent = null;
+  const fetchImpl = async (url, init) => {
+    sent = JSON.parse(init.body);
+    return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ choices: [{ message: { role: 'assistant', content: '```json\n{"subject": "A website for Zahid Properties", "body": "Hi Zahid,\\n\\nI noticed Zahid Properties has no website yet..."}\n```' } }] }) };
+  };
+  const ai = createAI({ store, vault, toolDeps: { email: null, files: null, store: null }, fetchImpl });
+  const out = await ai.writeEmail({ instructions: 'We build websites. Friendly, English.', subject: '', sender: { name: 'Ali', email: 'ali@axora.pk' }, business: { business_name: 'Zahid Properties', website: 'no website found', address: 'DHA Lahore' } });
+  assert.equal(out.subject, 'A website for Zahid Properties');
+  assert.match(out.body, /^Hi Zahid,\n\nI noticed/);
+  const userMsg = JSON.parse(sent.messages[1].content);
+  assert.equal(userMsg.business.address, 'DHA Lahore');
+  assert.equal(userMsg.instructions, 'We build websites. Friendly, English.');
+  assert.match(sent.messages[0].content, /Never invent/);
+  assert.equal(sent.tools, undefined, 'no tools for writing');
+});

@@ -8,6 +8,7 @@
 const { Groq, OpenRouter, Providers } = require('./groq');
 const { buildTools } = require('./tools');
 const { Operator } = require('./operator');
+const { extractAccounts } = require('../email/credentials');
 
 // Per provider: where its status is kept and its key's name in the vault.
 const PROVIDERS = {
@@ -46,6 +47,7 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
     },
     onEvent: (e) => send('ai:event', e),
     credentials: toolDeps.email?.addFromText ? (text) => toolDeps.email.addFromText(text) : null,
+    redact: (text) => extractAccounts(text).redacted,
   });
 
   const providerView = (id) => {
@@ -94,6 +96,30 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
     return { ok: true, settings: view() };
   }
 
+  // One personalised email: the user's instructions + the business's facts.
+  // Resolves { subject, body } (plain text; the app adds the unsubscribe line).
+  async function writeEmail({ instructions, subject = '', sender = {}, business = {} }) {
+    const system = [
+      'You write ONE personalised outreach email from the sender to one business, following the sender’s instructions (their offer, tone and language — write in the language of the instructions).',
+      'Use the business facts given to make it specific and relevant (their category, area, whether they have a website, what they do). Never invent anything that is not in the facts or the instructions: no made-up names, numbers, reviews, prices or claims.',
+      'Greet the contact by first name only if contact_name is given and looks like a person’s name; otherwise use a neutral greeting.',
+      'Plain text only: no markdown, no placeholders like [Name], no subject line inside the body. 60 to 170 words. Sign off with the sender’s name if given.',
+      'Do not add an unsubscribe line (the app adds one).',
+      subject ? `Subject: use exactly this subject, filling {name} / {business} from the facts (drop a placeholder whose value is unknown): ${subject}` : 'Write a short, specific subject (at most 9 words, no clickbait, no ALL CAPS).',
+      'Reply with JSON only: {"subject": "...", "body": "..."}',
+    ].join('\n');
+    const user = JSON.stringify({ instructions: String(instructions || '').slice(0, 4000), sender, business });
+    const { message } = await ai.chat([{ role: 'system', content: system }, { role: 'user', content: user }], []);
+    const text = String(message?.content || '');
+    const json = text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1);
+    let out = null;
+    try {
+      out = JSON.parse(json);
+    } catch {}
+    if (!out || typeof out.body !== 'string') throw Object.assign(new Error('the AI did not answer in the expected form'), { code: 'ai_empty' });
+    return { subject: String(out.subject || subject || ''), body: out.body.replace(/\r\n/g, '\n') };
+  }
+
   function registerIpc(handle, pickFiles) {
     handle('ai:settings', () => view());
     handle('ai:saveKey', (key, provider) => saveKey(key, provider));
@@ -132,7 +158,7 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
     return r.ok ? r.reply : `Sorry, I could not do that: ${r.error}`;
   }
 
-  return { groq, apis, operator, tools, view, test, saveKey, setMain, registerIpc, whatsappReply, available: () => ai.configured() };
+  return { groq, apis, operator, tools, view, test, saveKey, setMain, registerIpc, whatsappReply, writeEmail, available: () => ai.configured() };
 }
 
 module.exports = { createAI };

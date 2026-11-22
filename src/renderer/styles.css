@@ -2408,9 +2408,9 @@ td.details-cell { max-width: 260px; }
 .em-compose { display: flex; flex-direction: column; gap: 12px; }
 .em-compose label > span, .em-field-head, .em-form-grid label > span, .em-row3 label > span { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; color: var(--text-2); margin-bottom: 5px; }
 .em-row3 { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 10px; }
-.em-compose input, .em-compose select, .em-compose textarea, .em-form-grid input, .em-form-grid select, .em-filters input, .em-filters select, .em-test input, .em-optout-add input { width: 100%; min-height: 36px; padding: 7px 10px; border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); color: var(--text); font: inherit; font-size: 13.5px; }
+.em-compose input:not([type='checkbox']), .em-compose select, .em-compose textarea, .em-form-grid input:not([type='checkbox']), .em-form-grid select, .em-filters input, .em-filters select, .em-test input, .em-optout-add input { width: 100%; min-height: 36px; padding: 7px 10px; border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); color: var(--text); font: inherit; font-size: 13.5px; }
 .em-compose textarea { resize: vertical; min-height: 160px; line-height: 1.5; }
-.em-compose input:focus, .em-compose select:focus, .em-compose textarea:focus, .em-form-grid input:focus, .em-form-grid select:focus { outline: none; border-color: var(--accent); box-shadow: var(--focus); }
+.em-compose input:not([type='checkbox']):focus, .em-compose select:focus, .em-compose textarea:focus, .em-form-grid input:focus, .em-form-grid select:focus { outline: none; border-color: var(--accent); box-shadow: var(--focus); }
 .em-field { display: flex; flex-direction: column; }
 .em-vars { display: inline-flex; gap: 4px; margin-left: auto; }
 .em-chip { display: inline-flex; align-items: center; height: 26px; padding: 0 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-2); color: var(--text-2); font: 500 12px var(--font); cursor: pointer; }
@@ -2571,3 +2571,20 @@ td.details-cell { max-width: 260px; }
 .st-main-ai { flex-direction: row; align-items: center; gap: 12px; flex-wrap: wrap; }
 .st-main-ai .st-groq-field { flex: none; min-width: 0; }
 .st-main-ai .segmented button { padding: 0 14px; }
+.em-cats { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.em-cats li { display: flex; align-items: center; gap: 8px; padding: 4px 6px 4px 0; border-radius: 10px; border: 1px solid transparent; }
+.em-cats li.on { background: var(--accent-soft); border-color: var(--accent-line); }
+.em-cat-main { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 6px 10px; border: 0; background: transparent; color: var(--text); cursor: pointer; font: inherit; text-align: left; border-radius: 8px; }
+.em-cat-main:hover { background: var(--surface-2); }
+.em-ai { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
+.em-ai.on { border-color: var(--accent-line); background: var(--accent-soft); }
+.em-ai-icon { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 10px; background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 55%, #b08c46)); color: var(--accent-text); flex: none; }
+.em-ai-text { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.em-ai-text strong { font-size: 13.5px; }
+.em-ai-text span { font-size: 12px; color: var(--text-2); }
+.em-ai-sent { margin-top: 4px; font-size: 12px; }
+.em-ai-sent summary { cursor: pointer; color: var(--accent); font-weight: 600; }
+.em-ai-sent strong { display: block; margin: 4px 0 2px; }
+.em-ai-sent pre { margin: 0; white-space: pre-wrap; font: 12px/1.5 var(--font); color: var(--text-2); max-width: 420px; }
+
+.em-sender input[type='checkbox'] { min-height: 0; margin: 0; flex: none; }

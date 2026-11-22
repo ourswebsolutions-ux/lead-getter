@@ -86,7 +86,7 @@ function createEmail({ store, vault, files, canSend, allowInsecure = false, log 
 }
 
 // IPC: handle(channel, fn) is main.js's ipcMain.handle wrapper.
-function registerEmailIpc({ handle, email, requirePlan, pickFiles, send }) {
+function registerEmailIpc({ handle, email, requirePlan, pickFiles, send, listCategories = () => [] }) {
   const { accounts, campaigns } = email;
   const id = (v) => (Number.isInteger(Number(v)) && Number(v) > 0 ? Number(v) : null);
   const withCampaign = (fn) => (raw, ...rest) => {
@@ -126,6 +126,26 @@ function registerEmailIpc({ handle, email, requirePlan, pickFiles, send }) {
   });
 
   handle('email:campaigns', () => ({ ok: true, campaigns: campaigns.list(), optOuts: campaigns.optOuts().length }));
+  // Category campaigns: every lead category with emails, like WhatsApp's.
+  const categoryOf = (key) => {
+    if (key === 'none') return { key: 'none', name: 'Uncategorized' };
+    const cat = listCategories().find((c) => String(c.id) === String(key));
+    return cat ? { key: String(cat.id), name: cat.name } : null;
+  };
+  handle('email:categories', () => ({ ok: true, categories: campaigns.categoryStats(listCategories()) }));
+  handle('email:categoryCampaign', (key) => {
+    const cat = categoryOf(str(key));
+    return cat ? campaigns.categoryCampaign(cat.key, cat.name) : { ok: false, error: 'That category no longer exists.' };
+  });
+  handle('email:setCategory', async (key, on) => {
+    const cat = categoryOf(str(key));
+    if (!cat) return { ok: false, error: 'That category no longer exists.' };
+    if (on) {
+      const plan = requirePlan();
+      if (!plan.ok) return plan;
+    }
+    return campaigns.setCategoryEnabled(cat.key, cat.name, on === true);
+  });
   handle('email:campaign', withCampaign((cid) => ({ ok: true, campaign: campaigns.snapshot(cid) })));
   handle('email:create', (name) => campaigns.create({ name: str(name) }));
   handle('email:update', withCampaign((cid, patch) => {
@@ -134,6 +154,7 @@ function registerEmailIpc({ handle, email, requirePlan, pickFiles, send }) {
     for (const k of ['name', 'accountId', 'subject', 'body']) if (typeof p[k] === 'string') clean[k] = p[k];
     for (const k of ['delaySeconds', 'dailyLimit']) if (p[k] != null) clean[k] = Number(p[k]);
     if (typeof p.allowPrevious === 'boolean') clean.allowPrevious = p.allowPrevious;
+    if (typeof p.aiWrite === 'boolean') clean.aiWrite = p.aiWrite;
     if (Array.isArray(p.accountIds)) clean.accountIds = p.accountIds.map(String).slice(0, 50);
     if (Array.isArray(p.attachments)) clean.attachments = p.attachments.map((a) => (typeof a === 'string' ? a : str(a?.id))).slice(0, 20);
     return campaigns.update(cid, clean);

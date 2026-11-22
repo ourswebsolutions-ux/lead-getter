@@ -56,7 +56,7 @@ function passwordIn(line, email) {
   const app = APP_PASSWORD.exec(zone);
   if (app && (la || lb || /^\s*[,;:\t|]?\s*$/.test(zone.slice(0, app.index)))) return { password: app.slice(1).join(''), raw: app[0], name: null };
   if (la || lb) {
-    const tok = /^\s*["'“]?([^\s"'”,;]{6,200})/.exec(zone);
+    const tok = /^\s*["'“]?([^\s"'”,;]{6,200})/.exec(skipFiller(zone));
     return tok ? { password: tok[1], raw: tok[1], name: null } : null;
   }
   // "email, password[, sender name]" / "email:password" / "email password".
@@ -67,11 +67,43 @@ function passwordIn(line, email) {
   return null;
 }
 
+// Words between a label and the password ("app password ye hai: ...").
+const FILLER = /^\s*(?:(?:ye|yeh|ye\s+hai|hai|hy|he|is|ka|ki|ke|mera|meri|my|the|of|for|this|account|gmail|email)\b[\s:=-]*)+/i;
+const skipFiller = (z) => z.replace(FILLER, '');
+const ANY_LABEL = /\bapp[\s-]*pass(?:word)?\b|\bpass(?:word|wd)?\b|\bpwd\b|پاس ?ورڈ/i;
+
+// One address in the message and its password elsewhere in it (another
+// line, before the address): Google's 16-letter app password when the
+// message speaks of a password or it stands on its own line; else a
+// labelled one.
+function acrossMessage(text) {
+  const emails = [...new Set((text.match(new RegExp(EMAIL.source, 'g')) || []).map((e) => e.toLowerCase()))];
+  if (emails.length !== 1) return null;
+  const email = emails[0];
+  const rest = text.replace(new RegExp(EMAIL.source, 'gi'), ' ');
+  const labelled = ANY_LABEL.test(rest);
+  const app = new RegExp(APP_PASSWORD.source, 'gi');
+  for (let m; (m = app.exec(rest)); ) {
+    const line = rest.slice(rest.lastIndexOf('\n', m.index) + 1, rest.indexOf('\n', m.index) === -1 ? undefined : rest.indexOf('\n', m.index));
+    if (labelled || line.replace(/^\s*(app\s*)?(password|pass)?\s*[:=-]?\s*/i, '').trim() === m[0].trim()) return { email, password: m.slice(1, 5).join(''), raw: m[0], name: null };
+  }
+  if (labelled) {
+    const flat = rest.replace(/\s+/g, ' ');
+    const la = LABEL.exec(flat);
+    if (la) {
+      const tok = /^\s*["'“]?([^\s"'”,;]{6,200})/.exec(skipFiller(flat.slice(la.index + la[0].length)));
+      if (tok && /[\d\W_]/.test(tok[1]) && /[A-Za-z]/.test(tok[1])) return { email, password: tok[1], raw: tok[1], name: null };
+    }
+  }
+  return null;
+}
+
 // { accounts: [{ email, password, name }], redacted } — redacted is the text
 // with every password replaced.
 function extractAccounts(text) {
   const accounts = [];
-  let redacted = String(text || '');
+  // Copied app passwords often carry non-breaking or other unicode spaces.
+  let redacted = String(text || '').replace(/[\u00a0\u2000-\u200b\u202f\u205f\u3000]/g, ' ');
   for (const line of redacted.split(/\r?\n/)) {
     const found = line.match(new RegExp(EMAIL.source, 'g')) || [];
     for (const email of found) {
@@ -80,6 +112,10 @@ function extractAccounts(text) {
       if (accounts.some((a) => a.email === email.toLowerCase())) continue;
       accounts.push({ email: email.toLowerCase(), password: p.password, name: p.name, raw: p.raw });
     }
+  }
+  if (!accounts.length) {
+    const one = acrossMessage(redacted);
+    if (one) accounts.push(one);
   }
   for (const a of accounts) redacted = redacted.split(a.raw).join('[password saved securely]');
   return { accounts: accounts.map(({ raw, ...a }) => a), redacted };

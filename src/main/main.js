@@ -3053,7 +3053,7 @@ function initEmailAndAI() {
     allowInsecure: !app.isPackaged && process.env.LEAD_FINDER_TEST_SMTP_INSECURE === '1',
     log: autoLog,
   });
-  registerEmailIpc({ handle, email, requirePlan, pickFiles, send });
+  registerEmailIpc({ handle, email, requirePlan, pickFiles, send, listCategories: () => store.listCategories().categories });
   // Images and documents for WhatsApp campaigns (and any other attachment).
   handle('files:pick', () => pickFiles({ title: 'Attach images or documents' }));
   email.campaigns.on('completed', (e) => notice('campaign', 'Email campaign completed', `“${e.name}”: ${e.counts.sent} sent, ${e.counts.failed} failed.`));
@@ -3109,6 +3109,9 @@ function initEmailAndAI() {
     },
   });
   ai.registerIpc(handle, pickFiles);
+  // Emails written by the AI (the campaign's "Write with AI" switch).
+  email.campaigns.writer = (x) => ai.writeEmail(x);
+  email.campaigns.writerReady = () => ai.available();
 }
 
 module.exports = { validateKeyword };

@@ -39,7 +39,7 @@ How you work:
 - Sending, deleting and settings changes need confirmation: call the tool when everything is ready; the app then asks the user to confirm and runs it only if they say yes. Tell the user what will happen and ask them to confirm. Do not claim it started before the result says so.
 - Placeholders: WhatsApp messages can use {name} and {business}; emails {name}, {business} and {email}. Keep the user's text as they wrote it.
 - Files: the user attaches images, documents and audio with the paperclip in Lead Finder's Assistant tab, or sends them on WhatsApp; attached files appear in the conversation with their file_id. If they want a voice message, ask them to attach the recording (MP3, M4A, AAC, Ogg/Opus, AMR). You cannot record or generate voice; say so if asked.
-- Email accounts: the user can write their email address and app password in this chat (for Gmail: an App Password); the app adds and tests the account itself and tells you the result in a note — you never see passwords, so never ask them to repeat one and never write one. Several accounts can be imported in Outreach > Email > Accounts > Import. A campaign can send from several accounts in turn (account_ids); accounts can be added to a running campaign. WhatsApp accounts are linked by QR code in Outreach.
+- Email accounts: the user can write their email address and app password in this chat (for Gmail: an App Password); the app adds and tests the account itself and tells you the result in a note — you never see passwords and never write one. Adding accounts in this chat IS supported: never say otherwise. If the user clearly tried to add an account but no note from the app came with the message, say the app could not read it and ask them to send it again as: email app-password (for example: name@gmail.com xxxx xxxx xxxx xxxx). Several accounts can be imported in Outreach > Email > Accounts > Import. A campaign can send from several accounts in turn (account_ids); accounts can be added to a running campaign. WhatsApp accounts are linked by QR code in Outreach.
 - Respect unsubscribes and opt-outs; never try to message people who opted out.
 - You cannot run programs, read files on the computer or access anything outside these tools.`;
 
@@ -55,8 +55,10 @@ class Operator {
   // credentials(text): email accounts written in the message are added by
   // the app itself; resolves { found, results, redacted } (the text without
   // the passwords, which is all the AI and the history ever get).
-  constructor({ groq, tools, state, context = () => '', now = () => Date.now(), log = () => {}, onEvent = () => {}, credentials = null }) {
-    Object.assign(this, { groq, state, context, now, log, onEvent, credentials });
+  // redact(text): the text without email passwords, applied to the saved
+  // history too (nothing typed before a fix stays there or reaches the AI again).
+  constructor({ groq, tools, state, context = () => '', now = () => Date.now(), log = () => {}, onEvent = () => {}, credentials = null, redact = (t) => t }) {
+    Object.assign(this, { groq, state, context, now, log, onEvent, credentials, redact });
     this.tools = new Map(tools.map((t) => [t.name, t]));
     this.specs = toolSpecs(tools);
     this.queues = new Map(); // channel -> promise (one message at a time per conversation)
@@ -69,6 +71,9 @@ class Operator {
 
   conversation(channel) {
     const c = this.all()[channel] || {};
+    const clean = (m) => (m && m.role === 'user' && typeof (m.content ?? m.text) === 'string' ? { ...m, ...(m.content != null ? { content: this.redact(m.content) } : {}), ...(m.text != null ? { text: this.redact(m.text) } : {}) } : m);
+    if (Array.isArray(c.messages)) c.messages = c.messages.map(clean);
+    if (Array.isArray(c.display)) c.display = c.display.map(clean);
     return { messages: Array.isArray(c.messages) ? c.messages : [], display: Array.isArray(c.display) ? c.display : [], pending: c.pending || null, focus: c.focus || {}, files: Array.isArray(c.files) ? c.files : [], updatedAt: c.updatedAt || null };
   }
 

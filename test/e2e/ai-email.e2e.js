@@ -30,6 +30,9 @@ function seed(file) {
   const [a, b] = s.listLeads({}).filter((l) => l.name !== 'No Mail Realty');
   s.saveLeadEmails(a.id, { emails: [`${a.name.split(' ')[0].toLowerCase()}@realty.pk`] });
   s.saveLeadEmails(b.id, { emails: [`${b.name.split(' ')[0].toLowerCase()}@realty.pk`] });
+  const food = s.ensureCategory('Restaurants');
+  s.save({ placeKey: '0x4:0x9', mapsUrl: 'https://www.google.com/maps/place/F1', name: 'Karachi Grill', phoneRaw: '03007654329', address: 'Gulberg, Lahore', websiteStatus: 'no_website', categoryId: food.id });
+  s.saveLeadEmails(s.listLeads({}).find((l) => l.name === 'Karachi Grill').id, { emails: ['owner@karachigrill.pk'] });
   // The admin, with no automatic offers (they would open a question).
   s.setState('assistant.settings', { admins: [ADMIN], suggestions: false, shutdownComputer: false, poolAuto: false });
   s.close();
@@ -48,6 +51,11 @@ async function fakeGroq() {
       if (req.url.endsWith('/models')) return send(200, { data: [{ id: 'openai/gpt-oss-120b' }] });
       const { messages } = JSON.parse(body);
       calls.push(messages);
+      // The email writer (no tools): a JSON email from the business facts.
+      if (/You write ONE personalised outreach email/.test(messages[0].content)) {
+        const u = JSON.parse(messages[1].content);
+        return send(200, { choices: [{ message: { role: 'assistant', content: JSON.stringify({ subject: `AI idea for ${u.business.business_name}`, body: `Salam,\n\n${u.business.business_name} in ${u.business.address} has no website yet. ${u.instructions}\n\n${u.sender.name}` }) } }] });
+      }
       const last = messages.at(-1);
       const reply = (content) => send(200, { choices: [{ message: { role: 'assistant', content } }] });
       const tool = (name, args) => send(200, { choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: `t${calls.length}`, type: 'function', function: { name, arguments: JSON.stringify(args) } }] } }] });
@@ -186,12 +194,32 @@ test('Email campaigns, Groq settings, the Assistant and AI on WhatsApp, in the r
   await win.screenshot({ path: path.join(os.tmpdir(), 'lf-groq.png') });
   assert.ok(!JSON.stringify(await win.evaluate(() => window.leadFinder.aiSettings())).includes(KEY), 'the key never comes back');
 
-  // --- The Assistant: answers from the database; an action waits for Confirm.
+  // --- A category campaign written by the AI: switch ON, each email personal.
+  await nav().getByRole('button', { name: 'Outreach' }).click();
+  const catsCard = win.getByRole('region', { name: 'Category campaigns' });
+  await catsCard.getByText('Restaurants').click();
+  const comp2 = win.getByRole('region', { name: 'Email', exact: true });
+  await comp2.getByRole('group', { name: 'Send from' }).getByLabel('Send from Local SMTP').check();
+  await comp2.getByRole('switch', { name: 'Write each email with AI' }).click();
+  await comp2.locator('textarea').fill('We build websites for restaurants. Offer a free menu page.');
+  await comp2.getByRole('button', { name: 'Save' }).click();
+  await until(async () => (await win.evaluate(() => window.leadFinder.emailCampaigns())).campaigns.some((c) => c.category && c.aiWrite));
+  const before = smtp.messages.length;
+  await catsCard.getByRole('switch', { name: 'Restaurants email campaign' }).click();
+  await until(() => smtp.messages.length > before);
+  const aiMail = smtp.messages.at(-1);
+  assert.deepEqual(aiMail.to, ['owner@karachigrill.pk']);
+  assert.match(aiMail.text, /Subject: AI idea for Karachi Grill/);
+  assert.match(aiMail.text, /Gulberg, Lahore has no website yet\. We build websites for restaurants/);
+  assert.ok(groq.calls.some((m) => /owner@karachigrill\.pk/.test(m[1]?.content || '')), 'the business details went to the AI');
+  await win.screenshot({ path: path.join(os.tmpdir(), 'lf-email-ai.png'), fullPage: true });
   await nav().getByRole('button', { name: 'Assistant' }).click();
+
+  // --- The Assistant: answers from the database; an action waits for Confirm.
   const box = win.getByRole('textbox', { name: 'Message' });
   await box.fill('Kitne leads available hain?');
   await box.press('Enter');
-  await win.getByText('Total 3 leads hain, 2 ke paas email hai.').waitFor();
+  await win.getByText('Total 4 leads hain, 3 ke paas email hai.').waitFor();
   // An account written in the chat: added by the app; the AI never sees the password.
   await box.fill('mera gmail chat.user@gmail.com hai, app password qwer tyui opas dfgh');
   await box.press('Enter');
@@ -229,7 +257,7 @@ test('Email campaigns, Groq settings, the Assistant and AI on WhatsApp, in the r
     }
     throw new Error(`no reply matching ${re}; got ${JSON.stringify(toAdmin().slice(-2))}`);
   };
-  await ask('Email campaigns ki progress batao', /Email campaigns: Email campaign 1 \(2 sent\)/);
+  await ask('Email campaigns ki progress batao', /Email campaigns: .*Email campaign 1 \(2 sent\)/);
   await ask('status', /Lead Finder status/);
   // A photo sent on WhatsApp reaches the assistant as an attached file.
   const n0 = toAdmin().length;
@@ -245,7 +273,7 @@ test('Email campaigns, Groq settings, the Assistant and AI on WhatsApp, in the r
   win = await app.firstWindow();
   await unlock(win);
   await win.getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: 'Assistant' }).click();
-  await win.getByText('Total 3 leads hain, 2 ke paas email hai.').waitFor();
+  await win.getByText('Total 4 leads hain, 3 ke paas email hai.').waitFor();
   const after = await win.evaluate(() => window.leadFinder.emailCampaign(1));
   assert.equal(after.campaign.counts.sent, 2);
   assert.ok(after.campaign.log.some((l) => /Completed: 2 sent/.test(l.text)), JSON.stringify(after.campaign.log));

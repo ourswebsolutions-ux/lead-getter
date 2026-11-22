@@ -320,3 +320,81 @@ test('Adding accounts from text: created with the provider settings, passwords o
   assert.equal(email.accounts.list().length, 1);
   assert.equal(vault.get(`smtp:${acc.id}`), 'qwertyuiopasdfgh');
 });
+
+test('Accounts from text: the password on its own line, before the address, or copied with non-breaking spaces', () => {
+  for (const t of [
+    'axoraweb.services@gmail.com\nabcd efgh ijkl mnop',
+    'email: axoraweb.services@gmail.com\napp password: abcd efgh ijkl mnop',
+    'axoraweb.services@gmail.com abcd efgh ijkl mnop',
+    'abcd efgh ijkl mnop ye app password hai axoraweb.services@gmail.com ka',
+    'axoraweb.services@gmail.com\napp password\nabcd efgh ijkl mnop',
+  ]) {
+    const r = extractAccounts(t);
+    assert.deepEqual(r.accounts.map((a) => [a.email, a.password]), [['axoraweb.services@gmail.com', 'abcdefghijklmnop']], t);
+    assert.ok(!/abcd/.test(r.redacted), t);
+  }
+  for (const t of ['ali@gmail.com pe kaam karo abhi sath', 'ali@gmail.com ko email bhejo aur kaam karo abhi jaldi']) assert.equal(extractAccounts(t).accounts.length, 0, t);
+});
+
+test('Category campaigns: every category with emails is listed; ON sends to its leads and picks up new ones by itself; it never completes', async (t) => {
+  const { smtp, campaigns, account, time } = await setup(t);
+  const cats = [{ id: 1, name: 'Real Estate' }, { id: 2, name: 'People' }, { id: 3, name: 'Empty' }];
+  const stats = campaigns.categoryStats(cats);
+  assert.deepEqual(stats.map((x) => [x.name, x.withEmail, x.notEmailed]), [['Real Estate', 3, 3], ['People', 1, 1]], 'a category without emails is not listed');
+  const cc = campaigns.categoryCampaign('1', 'Real Estate');
+  assert.equal(campaigns.categoryCampaign('1', 'Real Estate').id, cc.id, 'one campaign per category');
+  assert.equal((await campaigns.setCategoryEnabled('1', 'Real Estate', true)).ok, false, 'not ready: no account, subject or email');
+  campaigns.update(cc.id, { accountIds: [account.id], subject: 'Hi {business}', body: 'Hello {name}', delaySeconds: 10 });
+  assert.ok((await campaigns.setCategoryEnabled('1', 'Real Estate', true)).ok);
+  assert.equal(campaigns.counts(cc.id).total, 2, 'its leads with an email, added by themselves');
+  await campaigns.tick();
+  time.now += 11_000;
+  await campaigns.tick();
+  time.now += 11_000;
+  await campaigns.tick();
+  assert.equal(smtp.messages.length, 2);
+  assert.equal(campaigns.summary(cc.id).status, 'running', 'stays on, waiting for new leads');
+  assert.equal(campaigns.summary(cc.id).waiting, 'new_leads');
+  LEADS.push({ id: 9, name: 'New Realty', email: 'new@realty.pk', categoryId: 1, kind: 'business' });
+  t.after(() => LEADS.pop());
+  time.now += 61_000;
+  await campaigns.tick();
+  assert.equal(smtp.messages.length, 3, 'a new lead of the category was emailed');
+  assert.ok((await campaigns.setCategoryEnabled('1', 'Real Estate', false)).ok);
+  assert.equal(campaigns.summary(cc.id).status, 'stopped');
+});
+
+test('Write with AI: each email written from the prompt and the business details, kept on the recipient; a failing AI sends nothing and pauses', async (t) => {
+  const { smtp, campaigns, account, time } = await setup(t);
+  const asked = [];
+  campaigns.writer = async (x) => {
+    asked.push(x);
+    if (campaigns.aiDown) throw Object.assign(new Error('Groq rejected the API key'), { code: 'invalid_key' });
+    return { subject: `Idea for ${x.business.business_name}`, body: `Hi there,\n\nI saw ${x.business.business_name} has no site yet. ${x.instructions}\n\nAli` };
+  };
+  const c = campaigns.create({ name: 'AI' });
+  campaigns.update(c.id, { accountIds: [account.id], subject: '', body: 'We build websites. Offer a free homepage design.', aiWrite: true, delaySeconds: 10 });
+  campaigns.addLeads(c.id, { category: 1 });
+  const preview = await campaigns.render(c.id);
+  assert.ok(preview.ok && preview.ai);
+  assert.match(preview.text, /Offer a free homepage design/);
+  assert.ok((await campaigns.start(c.id)).ok, 'no subject needed: the AI writes it');
+  await campaigns.tick();
+  assert.equal(smtp.messages.length, 1);
+  assert.match(smtp.messages[0].text, /Subject: Idea for (Zahid Properties|Noor Estate)/);
+  assert.match(smtp.messages[0].text, /unsubscribe/, 'the unsubscribe line is still added');
+  const first = asked.at(-1);
+  assert.equal(first.instructions, 'We build websites. Offer a free homepage design.');
+  assert.equal(first.sender.email, 'sender@example.com');
+  assert.ok(first.business.business_name && first.business.email);
+  const sent = campaigns.snapshot(c.id).recipients.find((r) => r.state === 'sent');
+  assert.match(sent.aiBody, /^Hi there/, 'what was sent is kept');
+  campaigns.aiDown = true;
+  time.now += 11_000;
+  await campaigns.tick();
+  assert.equal(smtp.messages.length, 1, 'nothing sent without the AI’s text');
+  const s = campaigns.summary(c.id);
+  assert.equal(s.status, 'paused');
+  assert.equal(s.pauseReason, 'ai');
+  assert.equal(s.counts.queued, 1, 'the recipient is still waiting');
+});
