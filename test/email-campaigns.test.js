@@ -221,7 +221,72 @@ test('Replies from the inbox: only people the account emailed; a reply is record
 });
 
 const { startImap } = require('./fake-imap');
-const { imapInbox } = require('../src/email/replies');
+const { imapInbox, watchInbox, ownText } = require('../src/email/replies');
+
+test('Replies found by the email they answer (another address of the business, a reply to a test email); Gmail’s wrapped "On … wrote:"', async (t) => {
+  const { state, db, campaigns, accounts, account, time } = await setup(t);
+  const c = campaigns.create({ name: 'R' });
+  campaigns.update(c.id, { accountId: account.id, subject: 'Hi', body: 'Hello', delaySeconds: 10 });
+  campaigns.addLeads(c.id, { category: 1 });
+  await campaigns.start(c.id);
+  await campaigns.tick();
+  const sent = db.prepare("SELECT email, message_id FROM email_recipients WHERE state = 'sent'").get();
+  assert.match(sent.message_id, /^<.+@.+>$/);
+  assert.ok((await campaigns.sendTest(c.id, 'me@axora.pk')).ok);
+  const testId = db.prepare('SELECT message_id FROM email_test_sends').get().message_id;
+  assert.ok(campaigns.hasTestSends(account.id));
+  const replies = [];
+  const others = [];
+  const watcher = new ReplyWatcher({ accounts, campaigns, state: { get: state.getState, set: state.setState }, clock: () => time.now, onReply: (r) => replies.push(r), onOther: (r) => others.push(r), openInbox: async function* () {
+    yield { from: 'owner@gmail.com', subject: 'Re: Hi', text: 'Call me please.\n\nOn Sat, Nov 22, 2026 at 5:43 PM Axora <\nsender@example.com> wrote:\n> Hello', messageId: '<r1@gmail>', references: ['<older@x>', sent.message_id] };
+    yield { from: 'me@axora.pk', subject: 'Re: [Test] Hi', text: 'No', messageId: '<r2@x>', inReplyTo: testId };
+    yield { from: 'stranger@x.com', subject: 'hello', text: 'hi', messageId: '<r3@x>' };
+  } });
+  const r = await watcher.check(account.id);
+  assert.equal(r.replies, 1);
+  assert.deepEqual(replies.map((x) => [x.from, x.recipient, x.text, x.match.test, x.unsubscribe]), [['owner@gmail.com', sent.email, 'Call me please.', false, false], ['me@axora.pk', 'me@axora.pk', 'No', true, false]]);
+  assert.equal(replies[1].match.campaignName, 'R');
+  assert.match(replies[1].match.subject, /^\[Test\] Hi/);
+  assert.equal(campaigns.summary(c.id).replies, 1, 'recorded on the person emailed');
+  assert.ok(!campaigns.isOptedOut('me@axora.pk'), 'a reply to a test never unsubscribes');
+  assert.deepEqual(others.map((x) => x.from), ['stranger@x.com']);
+  assert.equal(ownText('Thanks\n\nOn Mon, Nov 3, 2026 at 10:00 AM Axora Web Solutions <\ninfo@axoraweb.com> wrote:\n\n> Hello'), 'Thanks');
+  assert.equal(ownText('Ok\n________________________________\nFrom: Axora'), 'Ok');
+  campaigns.dispose();
+});
+
+test('Live inbox watching (IMAP IDLE): a reply that arrives is read within seconds, without waiting for the regular check', { timeout: 30_000 }, async (t) => {
+  const { state, campaigns, accounts, account, time } = await setup(t);
+  const c = campaigns.create({ name: 'Live' });
+  campaigns.update(c.id, { accountId: account.id, subject: 'Hi', body: 'Hello', delaySeconds: 10 });
+  campaigns.addLeads(c.id, { category: 1 });
+  await campaigns.start(c.id);
+  await campaigns.tick();
+  campaigns.dispose();
+  const to = campaigns.db.prepare("SELECT email FROM email_recipients WHERE state = 'sent'").get().email;
+  const messages = [];
+  const imap = await startImap({ messages, user: null });
+  accounts.update(account.id, { ...accounts.list()[0], imapOn: true, imapHost: '127.0.0.1', imapPort: imap.port, password: '' });
+  const replies = [];
+  const watcher = new ReplyWatcher({ accounts, campaigns, state: { get: state.getState, set: state.setState }, clock: () => time.now, first: 3_600_000, onReply: (r) => replies.push(r), openInbox: (login, since) => imapInbox(login, since, { allowInsecure: true }), openWatch: (login, on) => watchInbox(login, on, { allowInsecure: true }) });
+  t.after(async () => {
+    watcher.stop();
+    await imap.close();
+  });
+  watcher.start();
+  const until = async (fn, ms, what) => {
+    for (const end = Date.now() + ms; Date.now() < end; await new Promise((r) => setTimeout(r, 100))) if (fn()) return;
+    throw new Error(`timed out waiting for ${what}`);
+  };
+  await until(() => imap.idling() > 0, 10_000, 'the inbox to be watched');
+  messages.push({ from: to, subject: 'Re: Hi', text: 'Haan, details bhejo.' });
+  const at = Date.now();
+  imap.notify();
+  await until(() => replies.length > 0, 10_000, 'the reply');
+  assert.ok(Date.now() - at < 8_000, 'read within seconds');
+  assert.equal(replies[0].text, 'Haan, details bhejo.');
+  assert.equal(campaigns.summary(c.id).replies, 1);
+});
 
 test('The inbox over IMAP (imapflow): logs in, examines INBOX read-only, reads senders, subjects and text; a wrong password fails', async (t) => {
   const imap = await startImap({ messages: [{ from: 'info@noor.pk', subject: 'Re: Hi', text: 'Please unsubscribe me.' }, { from: 'zahid@realty.pk', subject: 'Re: Hi', text: 'Price?' }] });

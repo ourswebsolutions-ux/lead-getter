@@ -98,6 +98,15 @@ CREATE TABLE IF NOT EXISTS email_clicks (
   bot INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS email_clicks_campaign ON email_clicks (campaign_id, email);
+CREATE TABLE IF NOT EXISTS email_test_sends (
+  message_id TEXT PRIMARY KEY,
+  campaign_id INTEGER NOT NULL,
+  account TEXT NOT NULL,
+  email TEXT NOT NULL,
+  subject TEXT,
+  text TEXT,
+  at INTEGER NOT NULL
+);
 `;
 
 // A link scanner opens links seconds after delivery; a person does not.
@@ -192,7 +201,9 @@ function emailOf(lead) {
 function valuesOf(lead) {
   const person = lead.kind === 'person' || lead.source === 'linkedin' && lead.profileUrl;
   const name = person ? extractName(lead.name) : extractName(lead.contactName) || extractName(lead.podcastHost) || null;
-  const business = cleanBusiness(person ? lead.companyName : lead.name) || null;
+  const b = cleanBusiness(person ? lead.companyName : lead.name);
+  // A lead known only by its address or a person's name (imported emails) has no business name.
+  const business = b && !b.includes('@') && !(!person && lead.contactName && b === cleanBusiness(lead.contactName)) ? b : null;
   return { name, business };
 }
 
@@ -209,12 +220,14 @@ class EmailCampaigns extends EventEmitter {
     // Replies (read from the account's inbox by replies.js), the account that
     // sent each email, and the AI's text for each recipient.
     // Clicks: the recipient's tracking id (in their links), first click and count.
-    for (const col of ['replied_at INTEGER', 'reply_subject TEXT', 'sent_account TEXT', 'ai_subject TEXT', 'ai_body TEXT', 'track_id TEXT', 'clicked_at INTEGER', 'clicks INTEGER NOT NULL DEFAULT 0']) {
+    // priority 1: imported by hand, sent before the rest of the waiting list.
+    for (const col of ['replied_at INTEGER', 'reply_subject TEXT', 'sent_account TEXT', 'ai_subject TEXT', 'ai_body TEXT', 'track_id TEXT', 'clicked_at INTEGER', 'clicks INTEGER NOT NULL DEFAULT 0', 'priority INTEGER NOT NULL DEFAULT 0']) {
       try {
         this.db.exec(`ALTER TABLE email_recipients ADD COLUMN ${col}`);
       } catch {} // already there
     }
     this.db.exec('CREATE INDEX IF NOT EXISTS email_recipients_track ON email_recipients (track_id)');
+    this.db.exec('CREATE INDEX IF NOT EXISTS email_recipients_msgid ON email_recipients (message_id)');
     this.tracker = null; // ClickTracker (service.js)
     // A category campaign: the category's leads with an email, added as they come.
     try {
@@ -395,6 +408,7 @@ class EmailCampaigns extends EventEmitter {
     this.db.prepare('DELETE FROM email_recipients WHERE campaign_id = ?').run(c.id);
     this.db.prepare('DELETE FROM email_log WHERE campaign_id = ?').run(c.id);
     this.db.prepare('DELETE FROM email_clicks WHERE campaign_id = ?').run(c.id);
+    this.db.prepare('DELETE FROM email_test_sends WHERE campaign_id = ?').run(c.id);
     this.db.prepare('DELETE FROM email_campaigns WHERE id = ?').run(c.id);
     this.emit('change', { id: c.id });
     return { ok: true };
@@ -463,7 +477,8 @@ class EmailCampaigns extends EventEmitter {
   }
 
   // internal: a running category campaign picking up its new leads.
-  addLeads(id, filter = {}, { internal = false } = {}) {
+  // first: put at the top of the waiting list (sent before the others).
+  addLeads(id, filter = {}, { internal = false, first = false } = {}) {
     const c = this.row(id);
     if (!c) return { ok: false, error: 'That email campaign no longer exists.' };
     if (c.status === 'running' && !internal) return { ok: false, error: 'Pause the campaign before adding recipients.' };
@@ -471,13 +486,13 @@ class EmailCampaigns extends EventEmitter {
     const room = LIMITS.recipients - this.counts(id).total;
     const take = a.ready.slice(0, Math.max(0, room));
     const now = this.clock();
-    const ins = this.db.prepare('INSERT INTO email_recipients (campaign_id, email, lead_id, name, business, state, added_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (campaign_id, email) DO NOTHING');
+    const ins = this.db.prepare('INSERT INTO email_recipients (campaign_id, email, lead_id, name, business, state, priority, added_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (campaign_id, email) DO NOTHING');
     let added = 0;
     this.db.exec('BEGIN');
     try {
       for (const { lead, email } of take) {
         const v = valuesOf(lead);
-        added += ins.run(c.id, email, lead.id ?? null, v.name, v.business, 'queued', now, now).changes;
+        added += ins.run(c.id, email, lead.id ?? null, v.name, v.business, 'queued', first ? 1 : 0, now, now).changes;
       }
       this.db.exec('COMMIT');
     } catch (err) {
@@ -488,6 +503,16 @@ class EmailCampaigns extends EventEmitter {
     if (c.status === 'completed' && added && !c.category) this.setFields(c.id, { status: 'paused', pauseReason: 'new_recipients' });
     this.emit('change', { id: c.id });
     return { ok: true, added, noEmail: a.noEmail, optedOut: a.optedOut, previous: a.previous, already: a.already, overLimit: a.ready.length - take.length, campaign: this.summary(c.id) };
+  }
+
+  // Addresses already on the waiting list moved to its top -> how many moved.
+  putFirst(id, emails) {
+    const up = this.db.prepare("UPDATE email_recipients SET priority = 1, updated_at = ? WHERE campaign_id = ? AND email = ? AND state = 'queued' AND priority = 0");
+    const now = this.clock();
+    let moved = 0;
+    for (const e of emails) moved += up.run(now, Number(id), String(e).toLowerCase()).changes;
+    if (moved) this.emit('change', { id: Number(id) });
+    return moved;
   }
 
   // Only recipients not emailed yet can be removed.
@@ -604,8 +629,14 @@ class EmailCampaigns extends EventEmitter {
     // Its links are tracked too: a click shows in the campaign's history.
     if (this.tracking(c)) msg = { ...msg, ...this.tracker.rewrite(msg, `test-${c.id}`) };
     try {
-      await this.accounts.send(from, { to: address, subject: `[Test] ${msg.subject}`, text: msg.text, html: msg.html, attachments: this.attachments(c) });
+      const res = await this.accounts.send(from, { to: address, subject: `[Test] ${msg.subject}`, text: msg.text, html: msg.html, attachments: this.attachments(c) });
+      // Kept so a reply to it reaches the Inbox (the last 200 tests).
+      if (res?.messageId) {
+        this.db.prepare('INSERT OR REPLACE INTO email_test_sends (message_id, campaign_id, account, email, subject, text, at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(res.messageId, c.id, from, address, `[Test] ${msg.subject}`, String(msg.text || '').slice(0, 8000), this.clock());
+        this.db.prepare('DELETE FROM email_test_sends WHERE message_id NOT IN (SELECT message_id FROM email_test_sends ORDER BY at DESC LIMIT 200)').run();
+      }
       this.log(c.id, 'info', `Test email sent to ${address}`);
+      this.emit('change', { id: c.id });
       return { ok: true, to: address };
     } catch (err) {
       this.log(c.id, 'error', `Test email to ${address} failed: ${err.message}`);
@@ -717,14 +748,14 @@ class EmailCampaigns extends EventEmitter {
 
   nextRecipients(c, now, n) {
     return [
-      ...this.db.prepare("SELECT * FROM email_recipients WHERE campaign_id = ? AND state = 'queued' ORDER BY added_at, email LIMIT ?").all(c.id, n),
+      ...this.db.prepare("SELECT * FROM email_recipients WHERE campaign_id = ? AND state = 'queued' ORDER BY priority DESC, added_at, email LIMIT ?").all(c.id, n),
       ...this.db.prepare("SELECT * FROM email_recipients WHERE campaign_id = ? AND state = 'failed' AND attempts < ? AND retry_at IS NOT NULL AND retry_at <= ? ORDER BY retry_at LIMIT ?").all(c.id, MAX_ATTEMPTS, now, n),
     ].slice(0, n);
   }
 
   nextRecipient(c, now) {
     return (
-      this.db.prepare("SELECT * FROM email_recipients WHERE campaign_id = ? AND state = 'queued' ORDER BY added_at, email LIMIT 1").get(c.id) ||
+      this.db.prepare("SELECT * FROM email_recipients WHERE campaign_id = ? AND state = 'queued' ORDER BY priority DESC, added_at, email LIMIT 1").get(c.id) ||
       this.db.prepare("SELECT * FROM email_recipients WHERE campaign_id = ? AND state = 'failed' AND attempts < ? AND retry_at IS NOT NULL AND retry_at <= ? ORDER BY retry_at LIMIT 1").get(c.id, MAX_ATTEMPTS, now) ||
       null
     );
@@ -917,6 +948,23 @@ class EmailCampaigns extends EventEmitter {
     return { campaignId: r.campaign_id, campaignName: r.campaign_name, leadId: r.lead_id, name: r.name || r.business || null, business: r.business, subject: msg.subject, text: String(msg.text).split('\n--\n')[0] };
   }
 
+  // Test emails were sent from this account (a reply to one goes to the Inbox).
+  hasTestSends(accountId) {
+    return Boolean(this.db.prepare('SELECT 1 FROM email_test_sends WHERE account = ? LIMIT 1').get(accountId));
+  }
+
+  // The campaign (or test) email one of these Message-IDs names (a reply's
+  // In-Reply-To / References): { email, campaignId, campaignName, test, ... } or null.
+  sentByMessageId(ids) {
+    for (const id of [...(ids || [])].reverse()) {
+      const r = this.db.prepare("SELECT r.email, r.campaign_id AS campaignId, c.name AS campaignName FROM email_recipients r JOIN email_campaigns c ON c.id = r.campaign_id WHERE r.message_id = ? AND r.state IN ('sent', 'uncertain') LIMIT 1").get(id);
+      if (r) return { ...r, test: false };
+      const t = this.db.prepare('SELECT t.email, t.campaign_id AS campaignId, c.name AS campaignName, t.subject, t.text FROM email_test_sends t LEFT JOIN email_campaigns c ON c.id = t.campaign_id WHERE t.message_id = ?').get(id);
+      if (t) return { ...t, test: true };
+    }
+    return null;
+  }
+
   // Addresses this account has emailed (for matching replies in its inbox).
   sentAddresses(accountId) {
     return new Set(this.db.prepare("SELECT DISTINCT r.email FROM email_recipients r JOIN email_campaigns c ON c.id = r.campaign_id WHERE COALESCE(r.sent_account, c.account_id) = ? AND r.state IN ('sent', 'uncertain')").all(accountId).map((r) => r.email));
@@ -1034,7 +1082,7 @@ class EmailCampaigns extends EventEmitter {
       body: c.body,
       allowPrevious: c.config.allowPrevious,
       problems: this.problems(c),
-      recipients: this.db.prepare('SELECT email, lead_id AS leadId, name, business, state, attempts, error, sent_at AS sentAt, retry_at AS retryAt, replied_at AS repliedAt, clicked_at AS clickedAt, clicks, ai_subject AS aiSubject, ai_body AS aiBody FROM email_recipients WHERE campaign_id = ? ORDER BY CASE state WHEN \'sending\' THEN 0 WHEN \'failed\' THEN 1 WHEN \'uncertain\' THEN 2 WHEN \'queued\' THEN 3 ELSE 4 END, updated_at DESC LIMIT ?').all(c.id, recipients),
+      recipients: this.db.prepare('SELECT email, lead_id AS leadId, name, business, state, attempts, error, sent_at AS sentAt, retry_at AS retryAt, replied_at AS repliedAt, clicked_at AS clickedAt, clicks, priority, ai_subject AS aiSubject, ai_body AS aiBody FROM email_recipients WHERE campaign_id = ? ORDER BY CASE state WHEN \'sending\' THEN 0 WHEN \'failed\' THEN 1 WHEN \'uncertain\' THEN 2 WHEN \'queued\' THEN 3 ELSE 4 END, CASE WHEN state = \'queued\' THEN -priority ELSE 0 END, CASE WHEN state = \'queued\' THEN added_at ELSE -updated_at END, email LIMIT ?').all(c.id, recipients),
       log: this.db.prepare('SELECT at, level, text FROM email_log WHERE campaign_id = ? ORDER BY id DESC LIMIT 100').all(c.id),
       limits: LIMITS,
     };
@@ -1049,7 +1097,7 @@ class EmailCampaigns extends EventEmitter {
   async render(id, { subject, body } = {}) {
     const c = this.row(id);
     if (!c) return { ok: false, error: 'That email campaign no longer exists.' };
-    const r = this.db.prepare("SELECT * FROM email_recipients WHERE campaign_id = ? ORDER BY CASE WHEN state = 'queued' THEN 0 ELSE 1 END, added_at LIMIT 1").get(c.id);
+    const r = this.db.prepare("SELECT * FROM email_recipients WHERE campaign_id = ? ORDER BY CASE WHEN state = 'queued' THEN 0 ELSE 1 END, priority DESC, added_at LIMIT 1").get(c.id);
     if (c.config.aiWrite) {
       if (!r) return { ok: false, error: 'Add recipients first: the AI writes for a real business.' };
       try {

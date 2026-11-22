@@ -146,9 +146,10 @@ test('Email campaigns, Groq settings, the Assistant and AI on WhatsApp, in the r
   await accounts.getByRole('button', { name: 'Test Local SMTP' }).click();
   await until(async () => (await win.evaluate(() => window.leadFinder.emailAccounts())).accounts.find((a) => a.name === 'Local SMTP')?.status === 'ok');
 
-  // --- Import: several accounts at once, each set up and tested.
-  await accounts.getByRole('button', { name: 'Import' }).click();
-  const imp = win.getByRole('dialog', { name: 'Import email accounts' });
+  // --- Several accounts at once (Add > Add several accounts), each set up and tested.
+  await accounts.getByRole('button', { name: 'Add', exact: true }).click();
+  await win.getByRole('button', { name: 'Add several accounts' }).click();
+  const imp = win.getByRole('dialog', { name: 'Add several sending accounts' });
   await imp.getByLabel('Accounts to import').fill('sales.one@gmail.com, abcd efgh ijkl mnop, Sales One\nsales.two@outlook.com, Pa55word!x');
   await imp.getByRole('button', { name: 'Import', exact: true }).click();
   await imp.getByRole('list', { name: 'Import results' }).getByText('sales.two@outlook.com').waitFor();

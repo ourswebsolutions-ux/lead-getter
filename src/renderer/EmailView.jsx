@@ -28,7 +28,7 @@ function useEsc(fn) {
   }, [fn]);
 }
 
-function AccountForm({ account, onClose, onSaved }) {
+function AccountForm({ account, onClose, onSaved, onSeveral }) {
   const [f, setF] = useState(() => ({ name: account?.name || '', senderName: account?.senderName || '', email: account?.email || '', host: account?.host || '', port: account?.port || 465, username: account?.username || '', password: '', encryption: account?.encryption || 'ssl', imapOn: account ? account.imapOn !== false : true, imapHost: account?.imapHost || '' }));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -138,6 +138,12 @@ function AccountForm({ account, onClose, onSaved }) {
           </p>
         )}
         <footer className="em-modal-foot">
+          {!account && onSeveral && (
+            <button type="button" className="btn btn-ghost" onClick={onSeveral}>
+              <Icon name="users" size={13} /> Add several accounts
+            </button>
+          )}
+          <span className="grow" />
           <button type="button" className="btn btn-ghost" onClick={onClose}>
             Cancel
           </button>
@@ -180,13 +186,13 @@ function ImportAccounts({ onClose, onDone }) {
   }
   return (
     <div className="modal-scrim" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="em-modal" role="dialog" aria-modal="true" aria-label="Import email accounts">
+      <div className="em-modal" role="dialog" aria-modal="true" aria-label="Add several sending accounts">
         <header className="em-modal-head">
           <span className="em-mark">
             <Icon name="download" size={16} />
           </span>
           <div>
-            <h2>Import email accounts</h2>
+            <h2>Add several sending accounts</h2>
             <p>One per line: email, app password, sender name (optional)</p>
           </div>
           <button type="button" className="icon-btn" aria-label="Close" onClick={onClose}>
@@ -229,7 +235,115 @@ function ImportAccounts({ onClose, onDone }) {
   );
 }
 
-function Accounts({ accounts, persistent, onChange, notify }) {
+const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g;
+
+// People to email (one or many), in Lead Finder or not: typed, pasted or
+// from a CSV / Excel file, into one of the user's campaigns or a new one.
+function ImportRecipients({ campaigns, defaultId, onClose, onDone, notify }) {
+  // Every campaign (category ones too); the one open, else the one with the
+  // longest waiting list.
+  const own = [...campaigns].sort((a, b) => (b.counts?.queued || 0) - (a.counts?.queued || 0));
+  const start = own.find((c) => c.id === defaultId) || own[0];
+  const [text, setText] = useState('');
+  const [target, setTarget] = useState(start ? String(start.id) : '__new');
+  const [name, setName] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [result, setResult] = useState(null);
+  useEsc(onClose);
+  const count = useMemo(() => new Set((text.match(EMAIL_RE) || []).map((e) => e.toLowerCase())).size, [text]);
+  async function openFile() {
+    setError('');
+    const r = await api.emailRecipientsFile();
+    if (r.canceled) return;
+    if (!r.ok) return setError(r.error);
+    setText((t) => (t.trim() ? `${t.trim()}\n${r.text}` : r.text));
+    notify({ type: 'ok', text: `${r.count} address${r.count === 1 ? '' : 'es'} read from ${r.file}.` });
+  }
+  async function run() {
+    setBusy(true);
+    setError('');
+    const r = await api.emailImportRecipients(text, target === '__new' ? { name } : { id: Number(target) });
+    setBusy(false);
+    if (!r.ok) return setError(r.error);
+    setResult(r);
+    onDone(r.campaignId);
+  }
+  return (
+    <div className="modal-scrim" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="em-modal" role="dialog" aria-modal="true" aria-label="Import people to email">
+        <header className="em-modal-head">
+          <span className="em-mark">
+            <Icon name="users" size={16} />
+          </span>
+          <div>
+            <h2>Import people to email</h2>
+            <p>Added to the top of the waiting list: sent before the others</p>
+          </div>
+          <button type="button" className="icon-btn" aria-label="Close" onClick={onClose}>
+            <Icon name="x" size={14} />
+          </button>
+        </header>
+        {result ? (
+          <div className="li-result" role="status">
+            <p>
+              <strong>{result.added}</strong> {result.added === 1 ? 'person' : 'people'} added to “{result.campaign.name}”, at the top of the waiting list: they are emailed first.
+            </p>
+            {result.movedUp > 0 && <p className="muted">{result.movedUp} already waiting in this campaign: moved to the top.</p>}
+            {result.newLeads > 0 && <p className="muted">{result.newLeads} new {result.newLeads === 1 ? 'contact was' : 'contacts were'} saved in Leads (Imported).</p>}
+            {result.already > 0 && <p className="muted">{result.already} already in this campaign.</p>}
+            {result.previous > 0 && <p className="muted">{result.previous} already emailed by another campaign (allow it with “Also people emailed by other campaigns”, then import again).</p>}
+            {result.optedOut > 0 && <p className="muted">{result.optedOut} unsubscribed: never emailed.</p>}
+            {result.invalid > 0 && <p className="muted">{result.invalid} address{result.invalid === 1 ? '' : 'es'} not valid.</p>}
+          </div>
+        ) : (
+          <>
+            <textarea className="em-import" rows={8} spellCheck={false} aria-label="People to email" placeholder={'client@company.com\nahmed@gmail.com, Ahmed Khan, Khan Traders\nSara <sara@brighthomes.pk>'} value={text} onChange={(e) => setText(e.target.value)} />
+            <p className="em-note">
+              <Icon name="mail" size={12} /> One per line: email, name, business (name and business are optional). {count > 0 && <strong>{count} address{count === 1 ? '' : 'es'} found.</strong>}
+            </p>
+            <div className="li-cat" role="group" aria-label="Add them to">
+              <span>Add to</span>
+              <select aria-label="Campaign" value={target} onChange={(e) => setTarget(e.target.value)}>
+                {own.map((c) => (
+                  <option key={c.id} value={String(c.id)}>
+                    {c.name}
+                    {c.counts?.queued ? ` · ${c.counts.queued} waiting` : ''}
+                  </option>
+                ))}
+                <option value="__new">New campaign…</option>
+              </select>
+              {target === '__new' && <input aria-label="New campaign name" placeholder="e.g. My clients" value={name} maxLength={80} onChange={(e) => setName(e.target.value)} />}
+            </div>
+          </>
+        )}
+        {error && (
+          <p className="em-error" role="alert">
+            <Icon name="alert" size={13} /> {error}
+          </p>
+        )}
+        <footer className="em-modal-foot">
+          {!result && (
+            <button type="button" className="btn btn-ghost" onClick={openFile}>
+              <Icon name="file" size={13} /> Open CSV / Excel
+            </button>
+          )}
+          <span className="grow" />
+          <button type="button" className="btn btn-ghost" onClick={onClose}>
+            {result ? 'Done' : 'Cancel'}
+          </button>
+          {!result && (
+            <button type="button" className="btn btn-primary" disabled={busy || !count || (target === '__new' && name.trim().length < 2)} onClick={run}>
+              <Icon name="check" size={13} /> {busy ? 'Adding…' : `Add ${count || ''} ${count === 1 ? 'person' : 'people'}`.replace('  ', ' ')}
+            </button>
+          )}
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+function Accounts({ accounts, persistent, onChange, notify, onImportPeople }) {
   const [form, setForm] = useState(null); // null | 'new' | account
   const [importing, setImporting] = useState(false);
   const [testing, setTesting] = useState(null);
@@ -259,7 +373,7 @@ function Accounts({ accounts, persistent, onChange, notify }) {
         <h3>
           <Icon name="mail" size={14} /> Email accounts <span className="or-count">{accounts.length}</span>
         </h3>
-        <button type="button" className="btn btn-ghost btn-sm" onClick={() => setImporting(true)}>
+        <button type="button" className="btn btn-ghost btn-sm" title="Import people to email (one or many)" onClick={onImportPeople}>
           <Icon name="download" size={13} /> Import
         </button>
         <button type="button" className="btn btn-sm" onClick={() => setForm('new')}>
@@ -306,6 +420,10 @@ function Accounts({ accounts, persistent, onChange, notify }) {
         <AccountForm
           account={form === 'new' ? null : form}
           onClose={() => setForm(null)}
+          onSeveral={() => {
+            setForm(null);
+            setImporting(true);
+          }}
           onSaved={(acc, keepOpen) => {
             onChange();
             if (!keepOpen) {
@@ -434,7 +552,7 @@ function RecipientPicker({ campaign, categories, onClose, onAdded, notify }) {
   );
 }
 
-function Editor({ snap, accounts, categories, notify, reload }) {
+function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) {
   const [d, setD] = useState(null);
   const [dirty, setDirty] = useState(false);
   const [picker, setPicker] = useState(false);
@@ -753,11 +871,21 @@ function Editor({ snap, accounts, categories, notify, reload }) {
             </button>
           )}
           {snap.category ? (
-            <span className="muted small">New leads of this category with an email are added by themselves</span>
+            <>
+              <span className="muted small">New leads of this category are added by themselves</span>
+              <button type="button" className="btn btn-sm" onClick={onImportPeople}>
+                <Icon name="download" size={13} /> Import emails
+              </button>
+            </>
           ) : (
-            <button type="button" className="btn btn-sm btn-primary" disabled={running} onClick={() => setPicker(true)}>
-              <Icon name="plus" size={13} /> Add recipients
-            </button>
+            <>
+              <button type="button" className="btn btn-sm" onClick={onImportPeople}>
+                <Icon name="download" size={13} /> Import emails
+              </button>
+              <button type="button" className="btn btn-sm btn-primary" disabled={running} onClick={() => setPicker(true)}>
+                <Icon name="plus" size={13} /> Add recipients
+              </button>
+            </>
           )}
         </div>
         {!snap.recipients.length ? (
@@ -784,6 +912,11 @@ function Editor({ snap, accounts, categories, notify, reload }) {
                       <span className={`em-state s-${r.state}`} title={r.error || ''}>
                         {STATE[r.state]}
                       </span>
+                      {r.state === 'queued' && r.priority > 0 && (
+                        <span className="em-state s-first" title="Imported: emailed before the rest of the waiting list">
+                          Sent first
+                        </span>
+                      )}
                       {r.error && <span className="em-err-text">{r.error}</span>}
                       {r.sentAt && <span className="muted small"> {when(r.sentAt)}</span>}
                       {r.repliedAt && <span className="em-state s-replied">Replied</span>}
@@ -1083,6 +1216,7 @@ export default function EmailView({ notify, hidden }) {
   const [cats, setCats] = useState([]);
   const [catList, setCatList] = useState([]);
   const [toggling, setToggling] = useState(null);
+  const [importPeople, setImportPeople] = useState(false);
   const loadCats = useCallback(() => api.emailCategories().then((r) => r.ok && setCatList(r.categories)).catch(() => {}), []);
 
   const loadAccounts = useCallback(() => api.emailAccounts().then((r) => r.ok && setAccounts(r)), []);
@@ -1152,7 +1286,7 @@ export default function EmailView({ notify, hidden }) {
   return (
     <section className="outreach or-grid em-view" hidden={hidden} aria-label="Email campaigns">
       <aside className="or-side">
-        <Accounts accounts={accounts.accounts} persistent={accounts.persistent} onChange={loadAccounts} notify={notify} />
+        <Accounts accounts={accounts.accounts} persistent={accounts.persistent} onChange={loadAccounts} notify={notify} onImportPeople={() => setImportPeople(true)} />
         <ClickTracking notify={notify} />
         <CategoryCampaigns list={catList} selected={selected} onOpen={openCategory} onToggle={toggleCategory} toggling={toggling} />
         <section className="panel em-card" aria-label="Campaign list">
@@ -1198,9 +1332,23 @@ export default function EmailView({ notify, hidden }) {
             )}
           </div>
         ) : (
-          <Editor key={snap.id} snap={snap} accounts={accounts.accounts} categories={cats} notify={notify} reload={reload} />
+          <Editor key={snap.id} snap={snap} accounts={accounts.accounts} categories={cats} notify={notify} reload={reload} onImportPeople={() => setImportPeople(true)} />
         )}
       </div>
+      {importPeople && (
+        <ImportRecipients
+          campaigns={campaigns}
+          defaultId={snap ? snap.id : null}
+          notify={notify}
+          onClose={() => setImportPeople(false)}
+          onDone={async (id) => {
+            await loadCampaigns();
+            loadCats();
+            setSelected(id);
+            loadSnap(id);
+          }}
+        />
+      )}
     </section>
   );
 }

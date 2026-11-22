@@ -6,9 +6,11 @@
 
 const { EmailAccounts } = require('./accounts');
 const { EmailCampaigns } = require('./campaigns');
-const { ReplyWatcher, imapInbox } = require('./replies');
+const { ReplyWatcher, imapInbox, watchInbox } = require('./replies');
 const { extractAccounts, providerFor } = require('./credentials');
 const { ClickTracker } = require('./tracking');
+const { parseRecipients, tableToLines } = require('./recipients-import');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -50,7 +52,17 @@ function createEmail({ store, vault, files, canSend, allowInsecure = false, log 
   tracker.onClick = (c) => campaigns.recordClick(c);
   campaigns.tracker = tracker;
   // Replies and unsubscribes, from each account's own inbox.
-  const replies = new ReplyWatcher({ accounts, campaigns, state: { get: (k) => store.getState(k), set: (k, v) => store.setState(k, v) }, openInbox: (login, since) => imapInbox(login, since, { allowInsecure }), log });
+  const replies = new ReplyWatcher({ accounts, campaigns, state: { get: (k) => store.getState(k), set: (k, v) => store.setState(k, v) }, openInbox: (login, since) => imapInbox(login, since, { allowInsecure }), openWatch: (login, on) => watchInbox(login, on, { allowInsecure }), log });
+  // An account's first campaign (or test) email: its inbox is watched from then on.
+  let liveSync = null;
+  campaigns.on('change', () => {
+    if (liveSync) return;
+    liveSync = setTimeout(() => {
+      liveSync = null;
+      replies.syncLive();
+    }, 3_000);
+    liveSync.unref?.();
+  });
   // Accounts given as text (pasted, imported, or written to the assistant):
   // each is added (or its password updated), with its provider's settings,
   // and its login tested. The passwords never leave this function except
@@ -92,11 +104,61 @@ function createEmail({ store, vault, files, canSend, allowInsecure = false, log 
     return { found: found.length, results, redacted };
   }
 
-  return { accounts, campaigns, replies, tracker, addFromText };
+  // People to email, given as text (one or many, in Lead Finder or not):
+  // each address not saved yet becomes a lead (source "Imported", so
+  // replies, the Inbox and AI writing work for them too), then all of them
+  // are added to the campaign: target { id } or { name } (a new campaign).
+  function importRecipients(text, target = {}) {
+    const { list, invalid } = parseRecipients(text);
+    if (!list.length) return { ok: false, error: invalid ? 'Those email addresses are not valid.' : 'No email address found. Write one per line: email, name, business (name and business are optional).' };
+    let cid = Number(target.id) || null;
+    if (cid) {
+      const c = campaigns.row(cid);
+      if (!c) return { ok: false, error: 'That email campaign no longer exists.' };
+    } else {
+      const name = String(target.name || '').trim();
+      if (name.length < 2) return { ok: false, error: 'Give the new campaign a name.' };
+      const r = campaigns.create({ name });
+      if (!r.ok) return r;
+      cid = r.id;
+    }
+    // Leads already saved with that address are used as they are.
+    const byEmail = new Map();
+    for (const l of store.listLeads({})) for (const e of [l.email, ...(l.emails || []).map((x) => (typeof x === 'string' ? x : x?.email))]) if (e && !byEmail.has(String(e).toLowerCase())) byEmail.set(String(e).toLowerCase(), l.id);
+    const ids = [];
+    let newLeads = 0;
+    for (const r of list) {
+      let id = byEmail.get(r.email);
+      if (!id) {
+        const key = crypto.createHash('sha1').update(`email|${r.email}`).digest('hex').slice(0, 24);
+        const saved = store.importLead({ placeKey: `im:${key}`, name: (r.business || r.name || r.email).slice(0, 200), contactName: r.name || '', email: r.email, categoryId: null, keyword: 'Imported emails' });
+        if (!saved?.lead) continue;
+        id = saved.lead.id;
+        if (saved.isNewLead) newLeads++;
+        byEmail.set(r.email, id);
+      }
+      ids.push(id);
+    }
+    const out = { added: 0, already: 0, optedOut: 0, previous: 0, overLimit: 0 };
+    for (let i = 0; i < ids.length; i += 1000) {
+      // Also into a running campaign (category ones too): these people were
+      // chosen one by one, so they go to the top of the waiting list.
+      const r = campaigns.addLeads(cid, { ids: ids.slice(i, i + 1000) }, { internal: true, first: true });
+      if (!r.ok) return r;
+      for (const k of Object.keys(out)) out[k] += r[k] || 0;
+    }
+    // Already waiting in this campaign: moved to the top too.
+    out.movedUp = campaigns.putFirst(cid, list.map((r) => r.email));
+    out.already -= out.movedUp;
+    log(`email recipients imported: ${out.added} added to campaign ${cid}, ${newLeads} new leads`); // never the addresses
+    return { ok: true, campaignId: cid, found: list.length, invalid, newLeads, ...out, campaign: campaigns.summary(cid) };
+  }
+
+  return { accounts, campaigns, replies, tracker, addFromText, importRecipients };
 }
 
 // IPC: handle(channel, fn) is main.js's ipcMain.handle wrapper.
-function registerEmailIpc({ handle, email, requirePlan, pickFiles, send, listCategories = () => [], saveFile = null }) {
+function registerEmailIpc({ handle, email, requirePlan, pickFiles, send, listCategories = () => [], saveFile = null, pickTable = null }) {
   const { accounts, campaigns } = email;
   const id = (v) => (Number.isInteger(Number(v)) && Number(v) > 0 ? Number(v) : null);
   const withCampaign = (fn) => (raw, ...rest) => {
@@ -127,7 +189,7 @@ function registerEmailIpc({ handle, email, requirePlan, pickFiles, send, listCat
     if (!r.found) return { ok: false, error: 'No account found. Write one per line: email, app password (optionally , sender name).' };
     return { ok: true, results: r.results };
   });
-  // Reads the account's inbox for replies now (also done every 10 minutes).
+  // Reads the account's inbox for replies now (also live, and every 3 minutes).
   handle('email:checkReplies', async (aid) => {
     const r = await email.replies.check(str(aid));
     changed(r);
@@ -194,6 +256,18 @@ function registerEmailIpc({ handle, email, requirePlan, pickFiles, send, listCat
   handle('email:optOut', (address) => campaigns.optOut(str(address)));
   handle('email:removeOptOut', (address) => campaigns.removeOptOut(str(address)));
   handle('email:attach', async () => pickFiles({ title: 'Attach files to the email' }));
+  // People to email: pasted / typed, or read from a CSV or Excel file first.
+  handle('email:recipientsFile', async () => {
+    if (!pickTable) return { ok: false, error: 'Opening files is not available.' };
+    const t = await pickTable({ title: 'Import people to email' });
+    if (!t.ok) return t;
+    const r = tableToLines(t.columns, t.rows);
+    return r.ok ? { ok: true, file: t.file, text: r.lines.join('\n'), count: r.lines.length } : r;
+  });
+  handle('email:importRecipients', (text, target) => {
+    const tg = target && typeof target === 'object' ? { id: id(target.id), name: str(target.name).slice(0, 80) } : {};
+    return email.importRecipients(str(text).slice(0, 2_000_000), tg);
+  });
 
   // Click tracking: the tracking address, its files, clicks now.
   const { tracker } = email;

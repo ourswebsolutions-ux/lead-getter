@@ -31,7 +31,7 @@ test('Inbox: threads per lead and channel, the campaign message first, duplicate
   assert.equal(inbox.messages(a.thread.id).at(-1).via, 'admin-whatsapp');
 });
 
-test('Reply watcher: replies go to the Inbox with their text (quoted text left out); unsubscribes do not; other senders are handed on', async () => {
+test('Reply watcher: replies go to the Inbox with their text (quoted text left out), unsubscribe requests too; other senders are handed on', async () => {
   const replies = [];
   const others = [];
   const accounts = { inbox: () => ({ account: {}, pass: 'x' }), setImapStatus: () => {} };
@@ -50,6 +50,6 @@ test('Reply watcher: replies go to the Inbox with their text (quoted text left o
     },
   });
   await w.check('acc1');
-  assert.deepEqual(replies.map((r) => [r.from, r.text, r.messageId]), [['zahid@realty.pk', 'Price kya hai?', '<1>']]);
+  assert.deepEqual(replies.map((r) => [r.from, r.text, r.messageId, r.unsubscribe]), [['zahid@realty.pk', 'Price kya hai?', '<1>', false], ['noor@estate.pk', 'unsubscribe', '<2>', true]]);
   assert.deepEqual(others.map((r) => [r.from, r.subject]), [['boss@axora.pk', 'Re: [#4] Email reply']]);
 });

@@ -193,6 +193,8 @@ contextBridge.exposeInMainWorld('leadFinder', {
   emailOptOut: (email) => ipcRenderer.invoke('email:optOut', String(email ?? '')),
   emailRemoveOptOut: (email) => ipcRenderer.invoke('email:removeOptOut', String(email ?? '')),
   emailAttach: () => ipcRenderer.invoke('email:attach'),
+  emailRecipientsFile: () => ipcRenderer.invoke('email:recipientsFile'),
+  emailImportRecipients: (text, target) => ipcRenderer.invoke('email:importRecipients', String(text ?? ''), target && typeof target === 'object' ? { id: target.id == null ? null : Number(target.id), name: String(target.name ?? '') } : {}),
   onEmail: (cb) => subscribe('email:state', cb),
   // Click tracking (the user's tracking address; the signing key stays in the main process)
   emailTracking: () => ipcRenderer.invoke('email:tracking'),

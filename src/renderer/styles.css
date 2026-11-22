@@ -2651,6 +2651,7 @@ td.details-cell { max-width: 260px; }
 
 /* Email > Click tracking */
 .em-state.s-clicked { margin-left: 6px; background: color-mix(in srgb, #1f9d6b 14%, transparent); color: #1f9d6b; }
+.em-state.s-first { margin-left: 6px; background: color-mix(in srgb, #7c4dcc 14%, transparent); color: #7c4dcc; }
 .em-track-status { display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
 .em-track-status .em-acc-ok { display: inline-flex; align-items: center; gap: 4px; word-break: break-all; }
 .em-steps { margin: 4px 0 12px; padding-left: 20px; display: flex; flex-direction: column; gap: 10px; font-size: 13px; line-height: 1.5; }
@@ -2661,3 +2662,4 @@ td.details-cell { max-width: 260px; }
 .em-worker { position: relative; margin-bottom: 10px; }
 .em-worker .btn { position: absolute; top: 6px; right: 6px; }
 .em-worker pre { max-height: 220px; overflow: auto; margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); font-size: 11px; line-height: 1.45; white-space: pre; }
+.em-modal-foot .grow { flex: 1; }

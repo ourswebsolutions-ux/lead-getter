@@ -680,7 +680,7 @@ function buildTools(d) {
     {
       name: 'check_email_replies',
       kind: 'config',
-      description: 'Reads the inboxes of the email accounts now for replies to campaigns; people asking to unsubscribe are opted out. (Also done every 10 minutes.)',
+      description: 'Reads the inboxes of the email accounts now for replies to campaigns; people asking to unsubscribe are opted out. (Also done by itself: new replies are read within seconds.)',
       parameters: obj({}),
       run: async () => {
         const r = await d.email.replies.checkAll();

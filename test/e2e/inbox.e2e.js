@@ -123,6 +123,11 @@ test('Inbox: replies from WhatsApp and email, alerts to the admin, answers relay
   await conv.getByLabel('Your answer').fill('Shukriya! Kal 11 baje call karunga.');
   await conv.getByRole('button', { name: 'Send' }).click();
   await until(() => toClient().includes('Shukriya! Kal 11 baje call karunga.'), 15_000, 'the reply from the Inbox');
+  // A new email reply arrives: the Inbox shows it by itself (the account's inbox is watched live).
+  await until(() => imap.idling() > 0, 30_000, 'the account’s inbox to be watched');
+  imapMessages.push({ from: 'zahid@realty.pk', subject: 'Re: Website for Zahid Properties', text: 'Theek hai, kal baat karte hain.' });
+  imap.notify();
+  await list.getByText(/Theek hai, kal baat karte hain\./).waitFor({ timeout: 15_000 });
   await win.setViewportSize({ width: 1920, height: 1080 }).catch(() => {});
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1920, 1080));
   await new Promise((r) => setTimeout(r, 500));

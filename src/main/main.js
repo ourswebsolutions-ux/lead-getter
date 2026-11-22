@@ -3022,6 +3022,19 @@ async function pickFiles({ title }) {
   return { ok: files.length > 0, files, errors, error: errors.join(' ') };
 }
 
+// A CSV or Excel file the user chooses, read as a table: { ok, file, columns, rows }.
+async function pickTable({ title }) {
+  const { readTable } = require('../export/lead-import');
+  let file = !app.isPackaged && process.env.LEAD_FINDER_TEST_IMPORT_PICK;
+  if (!file) {
+    const r = await dialog.showOpenDialog(win, { title, properties: ['openFile'], filters: [{ name: 'CSV or Excel', extensions: ['csv', 'xlsx', 'txt', 'tsv', 'xls'] }] });
+    if (r.canceled || !r.filePaths.length) return { ok: false, canceled: true };
+    file = r.filePaths[0];
+  }
+  const t = readTable(file);
+  return t.ok ? { ...t, file: path.basename(file) } : t;
+}
+
 // A file the app gives the user (e.g. the click tracking file), saved where they choose.
 async function saveFile({ title, defaultName, data }) {
   const testDir = !app.isPackaged && process.env.LEAD_FINDER_TEST_SAVE_DIR;
@@ -3146,9 +3159,11 @@ function initInbox() {
   inbox.on('change', (e) => send('inbox:state', e));
   inbox.on('incoming', ({ thread, message }) => alertAdmin(thread, message).catch((err) => autoLog(`inbox: admin not told: ${err.message}`)));
   // Email replies, from the sending accounts' inboxes.
+  // The conversation is with the address that replied; the campaign (or
+  // test) email it answers is shown first.
   email.replies.onReply = (m) => {
-    const ctx = email.campaigns.lastSentTo(m.from);
-    inbox.incoming({ channel: 'email', address: m.from, name: ctx?.name || null, leadId: ctx?.leadId ?? null, campaignId: ctx?.campaignId ?? null, campaignName: ctx?.campaignName || null, account: m.accountId, subject: m.subject, text: m.text, extId: m.messageId, sent: ctx ? `${ctx.subject}\n\n${ctx.text}` : null, at: m.date || Date.now() });
+    const ctx = m.match?.test ? { campaignId: m.match.campaignId, campaignName: m.match.campaignName ? `${m.match.campaignName} (test email)` : 'Test email', subject: m.match.subject, text: String(m.match.text || '').split('\n--\n')[0] } : email.campaigns.lastSentTo(m.recipient || m.from);
+    inbox.incoming({ channel: 'email', address: m.from, name: ctx?.name || null, leadId: ctx?.leadId ?? null, campaignId: ctx?.campaignId ?? null, campaignName: ctx?.campaignName || null, account: m.accountId, subject: m.subject, text: m.unsubscribe ? `${m.text}\n\n(Unsubscribed: no more campaign emails go to this address.)` : m.text, extId: m.messageId, sent: ctx ? `${ctx.subject}\n\n${ctx.text}` : null, at: m.date || Date.now() });
   };
   // The admin answering an alert by email ("[#12]" in the subject): relayed to the client.
   email.replies.onOther = async (m) => {
@@ -3234,7 +3249,7 @@ function initEmailAndAI() {
     allowInsecure: !app.isPackaged && process.env.LEAD_FINDER_TEST_SMTP_INSECURE === '1',
     log: autoLog,
   });
-  registerEmailIpc({ handle, email, requirePlan, pickFiles, saveFile, send, listCategories: () => store.listCategories().categories });
+  registerEmailIpc({ handle, email, requirePlan, pickFiles, saveFile, pickTable, send, listCategories: () => store.listCategories().categories });
   // Images and documents for WhatsApp campaigns (and any other attachment).
   handle('files:pick', () => pickFiles({ title: 'Attach images or documents' }));
   initInbox();
