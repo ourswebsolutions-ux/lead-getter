@@ -2663,3 +2663,36 @@ td.details-cell { max-width: 260px; }
 .em-worker .btn { position: absolute; top: 6px; right: 6px; }
 .em-worker pre { max-height: 220px; overflow: auto; margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); font-size: 11px; line-height: 1.45; white-space: pre; }
 .em-modal-foot .grow { flex: 1; }
+
+/* Email verification (Outreach > Email, Leads) */
+.em-vbadge { display: inline-flex; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; background: var(--sunken); color: var(--text-2); vertical-align: middle; }
+.em-vbadge.v-valid { background: color-mix(in srgb, #1f9d6b 15%, transparent); color: #1f9d6b; }
+.em-vbadge.v-invalid { background: var(--danger-soft); color: var(--danger); }
+.em-vbadge.v-risky { background: var(--warn-soft); color: var(--warn); }
+.em-vbadge.v-catch_all { background: color-mix(in srgb, #7c4dcc 14%, transparent); color: #7c4dcc; }
+.em-vbadge.v-unknown, .em-vbadge.v-checking { background: var(--sunken); color: var(--text-2); }
+.em-vcounts { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; margin: 10px 0 8px; }
+.em-vcount { display: flex; flex-direction: column; align-items: center; padding: 6px 2px; border-radius: 8px; background: var(--sunken); min-width: 0; }
+.em-vcount strong { font-size: 15px; font-variant-numeric: tabular-nums; }
+.em-vcount span { font-size: 10.5px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.em-vcount.v-valid strong { color: #1f9d6b; }
+.em-vcount.v-invalid strong { color: var(--danger); }
+.em-vcount.v-risky strong { color: var(--warn); }
+.em-vcount.v-catch_all strong { color: #7c4dcc; }
+.em-vprogress { display: flex; flex-direction: column; gap: 4px; }
+.em-vbar { height: 6px; border-radius: 999px; background: var(--sunken); overflow: hidden; }
+.em-vbar span { display: block; height: 100%; background: var(--accent); transition: width 0.4s ease; }
+.em-vengine { margin-top: 8px; }
+.em-vengine .em-acc-error { display: block; line-height: 1.4; }
+.em-vactions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.em-vlog { list-style: none; margin: 8px 0 0; padding: 0; max-height: 240px; overflow: auto; display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.em-vlog li { line-height: 1.4; word-break: break-word; }
+.em-vsum { display: inline-flex; gap: 8px; font-size: 12px; margin-left: auto; }
+.em-vsum .v-valid { color: #1f9d6b; font-weight: 600; }
+.em-vsum .v-checking { color: var(--text-2); }
+.em-vsum .v-invalid { color: var(--danger); }
+.em-vfilter { font-size: 12px; padding: 3px 6px; }
+.em-vfield { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin: 10px 0; display: flex; flex-direction: column; gap: 6px; }
+.em-vfield legend { font-weight: 600; font-size: 12.5px; padding: 0 4px; }
+.em-vreacher { display: flex; flex-direction: column; gap: 6px; margin-left: 22px; }
+.em-vtested { font-size: 12.5px; line-height: 1.5; }

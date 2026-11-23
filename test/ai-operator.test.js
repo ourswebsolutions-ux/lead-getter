@@ -15,6 +15,7 @@ const { Outreach } = require('../src/whatsapp/outreach');
 const { eligibleContacts } = require('../src/whatsapp/eligibility');
 const { pickName } = require('../src/whatsapp/templates');
 const { createEmail } = require('../src/email/service');
+const { startMx, testEngine } = require('./fake-mx');
 const { Vault } = require('../src/main/vault');
 const { FileLibrary } = require('../src/main/file-library');
 const { buildTools } = require('../src/ai/tools');
@@ -46,6 +47,13 @@ const say = (content) => ({ content });
 const tools = (...calls) => ({ content: null, tool_calls: calls });
 const lastTool = (messages) => JSON.parse(messages.filter((m) => m.role === 'tool').at(-1).content);
 
+// Verification against a local mail server (every test mailbox exists).
+let sharedMx = null;
+test.before(async () => {
+  sharedMx = await startMx({ exists: (e) => !e.includes('nouser') });
+});
+test.after(() => sharedMx?.close());
+
 function world(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lf-ai-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -53,7 +61,7 @@ function world(t) {
   const state = { get: (k) => db.getState(k), set: (k, v) => db.setState(k, v) };
   const vault = new Vault({ store: db, key: 'secrets', cipher });
   const files = new FileLibrary({ dir: path.join(dir, 'files'), state });
-  const email = createEmail({ store: db, vault, files, canSend: async () => true, allowInsecure: true });
+  const email = createEmail({ store: db, vault, files, canSend: async () => true, allowInsecure: true, makeVerifyEngine: testEngine(sharedMx) });
   t.after(() => {
     email.campaigns.dispose();
     email.accounts.dispose();

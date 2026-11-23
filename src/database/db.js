@@ -1014,6 +1014,14 @@ class LeadStore {
       clauses.push(ids.length ? `b.id IN (${ids.map(() => '?').join(', ')})` : '0');
       params.push(...ids);
     }
+    // Email verification of the lead's email (the email_verifications table,
+    // src/email/verification.js): a status, still being checked, or no email.
+    if (filter.verify === 'none') clauses.push("(b.email IS NULL OR b.email = '')");
+    else if (filter.verify === 'checking') clauses.push("b.email IS NOT NULL AND b.email != '' AND NOT EXISTS (SELECT 1 FROM email_verifications v WHERE v.email = lower(trim(b.email)) AND v.status IS NOT NULL)");
+    else if (['valid', 'invalid', 'risky', 'unknown', 'catch_all'].includes(filter.verify)) {
+      clauses.push('EXISTS (SELECT 1 FROM email_verifications v WHERE v.email = lower(trim(b.email)) AND v.status = ?)');
+      params.push(filter.verify);
+    }
     // Only numbers WhatsApp itself confirmed (not earlier manual marks).
     if (filter.whatsapp === 'available') {
       clauses.push(`b.phone_status = 'valid' AND EXISTS (SELECT 1 FROM whatsapp_checks w2

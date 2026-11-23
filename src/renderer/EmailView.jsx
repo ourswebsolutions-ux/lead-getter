@@ -8,7 +8,7 @@ const api = window.leadFinder;
 
 const STATUS = { draft: 'Draft', running: 'Running', paused: 'Paused', stopped: 'Stopped', completed: 'Completed' };
 const STATE = { queued: 'Waiting', sending: 'Sending', sent: 'Sent', failed: 'Failed', skipped: 'Skipped', uncertain: 'Uncertain' };
-const WAITING = { delay: 'waiting for the delay between emails', daily_limit: 'daily limit reached; continues tomorrow', retry_later: 'retrying failed emails later' };
+const WAITING = { delay: 'waiting for the delay between emails', daily_limit: 'daily limit reached; continues tomorrow', retry_later: 'retrying failed emails later', verifying: 'verifying the next email addresses before sending' };
 const PRESETS = [
   ['Gmail', { host: 'smtp.gmail.com', port: 465, encryption: 'ssl' }],
   ['Outlook', { host: 'smtp.office365.com', port: 587, encryption: 'starttls' }],
@@ -294,6 +294,8 @@ function ImportRecipients({ campaigns, defaultId, onClose, onDone, notify }) {
             {result.already > 0 && <p className="muted">{result.already} already in this campaign.</p>}
             {result.previous > 0 && <p className="muted">{result.previous} already emailed by another campaign (allow it with “Also people emailed by other campaigns”, then import again).</p>}
             {result.optedOut > 0 && <p className="muted">{result.optedOut} unsubscribed: never emailed.</p>}
+            {result.unverified > 0 && <p className="muted">{result.unverified} failed email verification: never emailed.</p>}
+            {result.added > 0 && <p className="muted">Each address is verified before its email is sent; only Valid ones are emailed.</p>}
             {result.invalid > 0 && <p className="muted">{result.invalid} address{result.invalid === 1 ? '' : 'es'} not valid.</p>}
           </div>
         ) : (
@@ -438,13 +440,13 @@ function Accounts({ accounts, persistent, onChange, notify, onImportPeople }) {
 }
 
 function RecipientPicker({ campaign, categories, onClose, onAdded, notify }) {
-  const [f, setF] = useState({ category: 'all', from: '', to: '', search: '' });
+  const [f, setF] = useState({ category: 'all', from: '', to: '', search: '', verify: '' });
   const [leads, setLeads] = useState(null);
   const [pick, setPick] = useState(new Set());
   const [preview, setPreview] = useState(null);
   const [busy, setBusy] = useState(false);
   useEsc(onClose);
-  const filter = useMemo(() => ({ category: f.category, ...(f.from ? { from: f.from } : {}), ...(f.to ? { to: f.to } : {}), ...(f.search.trim() ? { search: f.search.trim() } : {}) }), [f]);
+  const filter = useMemo(() => ({ category: f.category, ...(f.from ? { from: f.from } : {}), ...(f.to ? { to: f.to } : {}), ...(f.search.trim() ? { search: f.search.trim() } : {}), ...(f.verify ? { verify: f.verify } : {}) }), [f]);
 
   useEffect(() => {
     let live = true;
@@ -466,7 +468,7 @@ function RecipientPicker({ campaign, categories, onClose, onAdded, notify }) {
     const r = await api.emailAddLeads(campaign.id, all ? filter : { ids: [...pick] });
     setBusy(false);
     if (!r.ok) return notify({ type: 'error', text: r.error });
-    const skipped = [r.noEmail && `${r.noEmail} without an email`, r.optedOut && `${r.optedOut} unsubscribed`, r.previous && `${r.previous} emailed before`, r.already && `${r.already} already in the campaign`].filter(Boolean);
+    const skipped = [r.noEmail && `${r.noEmail} without an email`, r.unverified && `${r.unverified} whose email did not pass verification`, r.optedOut && `${r.optedOut} unsubscribed`, r.previous && `${r.previous} emailed before`, r.already && `${r.already} already in the campaign`].filter(Boolean);
     notify({ type: 'ok', text: `${r.added} recipient${r.added === 1 ? '' : 's'} added${skipped.length ? ` (skipped: ${skipped.join(', ')})` : ''}.` });
     onAdded();
   }
@@ -499,10 +501,16 @@ function RecipientPicker({ campaign, categories, onClose, onAdded, notify }) {
           <input type="date" aria-label="From" value={f.from} onChange={(e) => setF((x) => ({ ...x, from: e.target.value }))} />
           <input type="date" aria-label="To" value={f.to} onChange={(e) => setF((x) => ({ ...x, to: e.target.value }))} />
           <input aria-label="Search leads" placeholder="Search name or email" value={f.search} onChange={(e) => setF((x) => ({ ...x, search: e.target.value }))} />
+          <select aria-label="Email verification" value={f.verify} onChange={(e) => setF((x) => ({ ...x, verify: e.target.value }))}>
+            <option value="">Any verification</option>
+            <option value="valid">Valid only</option>
+            <option value="checking">Not checked yet</option>
+          </select>
         </div>
         {preview && (
           <p className="em-preview-line">
-            <strong>{preview.ready}</strong> can be emailed
+            <strong>{preview.ready}</strong> can be added{preview.ready ? ` (${preview.verified} verified, ${preview.ready - preview.verified} verified before sending)` : ''}
+            {preview.unverified ? ` · ${preview.unverified} failed verification (never sent)` : ''}
             {preview.noEmail ? ` · ${preview.noEmail} without email` : ''}
             {preview.optedOut ? ` · ${preview.optedOut} unsubscribed` : ''}
             {preview.previous ? ` · ${preview.previous} emailed before` : ''}
@@ -531,6 +539,7 @@ function RecipientPicker({ campaign, categories, onClose, onAdded, notify }) {
                 />
                 <span className="em-lead-name">{l.name}</span>
                 <span className="em-lead-mail">{l.email || l.emails?.[0]?.email || l.emails?.[0]}</span>
+                {l.emailVerify ? <VerifyBadge status={l.emailVerify.state === 'done' || l.emailVerify.status ? l.emailVerify.status : null} reason={l.emailVerify.reason} state={l.emailVerify.state} role={l.emailVerify.role} /> : <VerifyBadge status={null} />}
                 <span className="em-lead-cat">{l.category}</span>
               </label>
             ))
@@ -556,6 +565,7 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
   const [d, setD] = useState(null);
   const [dirty, setDirty] = useState(false);
   const [picker, setPicker] = useState(false);
+  const [rFilter, setRFilter] = useState('all'); // recipients shown: all | ready | checking | excluded
   const [preview, setPreview] = useState(null);
   const [testTo, setTestTo] = useState('');
   const [busy, setBusy] = useState('');
@@ -861,6 +871,19 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
           <h3>
             <Icon name="users" size={14} /> Recipients <span className="or-count">{n.total}</span>
           </h3>
+          {snap.verify && (
+            <span className="em-vsum" aria-label="Recipients by verification">
+              <span className="v-valid">{snap.verify.ready} ready</span>
+              {snap.verify.checking > 0 && <span className="v-checking">{snap.verify.checking} verifying</span>}
+              {snap.verify.excluded > 0 && <span className="v-invalid">{snap.verify.excluded} not verified</span>}
+            </span>
+          )}
+          <select className="em-vfilter" aria-label="Show recipients" value={rFilter} onChange={(e) => setRFilter(e.target.value)}>
+            <option value="all">All</option>
+            <option value="ready">Ready for outreach</option>
+            <option value="checking">Verifying</option>
+            <option value="excluded">Not verified</option>
+          </select>
           {n.failed + n.uncertain > 0 && (
             <button type="button" className="btn btn-sm" onClick={async () => {
               const r = await api.emailRetry(snap.id, false);
@@ -903,7 +926,7 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
                 </tr>
               </thead>
               <tbody>
-                {snap.recipients.map((r) => (
+                {snap.recipients.filter((r) => rFilter === 'all' || (rFilter === 'excluded' ? r.verify === 'excluded' || /^Not sent: email/.test(r.error || '') : ['queued', 'failed'].includes(r.state) && (r.verify === rFilter || (rFilter === 'checking' && r.verify === 'expired')))).map((r) => (
                   <tr key={r.email}>
                     <td className="mono">{r.email}</td>
                     <td>{r.name || '—'}</td>
@@ -912,6 +935,7 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
                       <span className={`em-state s-${r.state}`} title={r.error || ''}>
                         {STATE[r.state]}
                       </span>
+                      {['queued', 'failed', 'sending'].includes(r.state) && r.verify && r.verify !== 'expired' && <VerifyBadge status={r.verifyState === 'done' ? r.verifyStatus : null} reason={r.verifyReason} state={r.verifyState} role={r.verifyRole} />}
                       {r.state === 'queued' && r.priority > 0 && (
                         <span className="em-state s-first" title="Imported: emailed before the rest of the waiting list">
                           Sent first
@@ -1116,6 +1140,242 @@ function ClickTracking({ notify }) {
   );
 }
 
+// Email verification: every address is checked before a campaign email can go to it.
+const VERIFY = { valid: 'Valid', invalid: 'Invalid', risky: 'Risky', unknown: 'Unknown', catch_all: 'Catch-all' };
+const VERIFY_HELP = {
+  valid: 'The mail server confirmed the mailbox. Sent to.',
+  invalid: 'The mailbox or domain does not exist. Never sent to.',
+  risky: 'Disposable, full mailbox, or a role address you marked risky. Not sent to unless you allow it.',
+  unknown: 'No clear answer (timeouts, blocked connections, servers that refuse to say). Not sent to unless you allow it.',
+  catch_all: 'The server accepts every address, so this one cannot be confirmed. Not sent to unless you allow it.',
+};
+
+function VerifyBadge({ status, reason, state, role }) {
+  if (!status) return <span className="em-vbadge v-checking" title={reason || 'Being verified'}>{state === 'queued' && reason ? 'Checking again later' : 'Verifying…'}</span>;
+  return (
+    <span className={`em-vbadge v-${status}`} title={[reason, role ? 'Role address (info@, sales@…)' : ''].filter(Boolean).join(' · ')}>
+      {VERIFY[status] || status}
+      {role ? ' · role' : ''}
+    </span>
+  );
+}
+
+function EmailVerification({ notify }) {
+  const [st, setSt] = useState(null);
+  const [log, setLog] = useState([]);
+  const [open, setOpen] = useState(false);
+  const [showLog, setShowLog] = useState(false);
+  const load = useCallback(() => api.emailVerifyStatus().then((r) => r.ok && (setSt(r.status), setLog(r.log || []))), []);
+  useEffect(() => {
+    load();
+    return api.onEmailVerify((s) => {
+      setSt(s);
+      if (showLog) load();
+    });
+  }, [load, showLog]);
+  if (!st) return null;
+  const c = st.counts;
+  const p = st.progress;
+  const pct = p.total ? Math.round((p.done / p.total) * 100) : 100;
+  async function recheck(statuses, what) {
+    const r = await api.emailVerifyRecheck(statuses);
+    notify({ type: 'ok', text: r.queued ? `${r.queued} ${what} being checked again.` : `No ${what} to check again.` });
+  }
+  const allowedExtra = Object.entries(st.settings.allow).filter(([, on]) => on).map(([k]) => VERIFY[k]);
+  return (
+    <section className="panel em-card" aria-label="Email verification">
+      <div className="or-card-head">
+        <h3>
+          <Icon name="shield" size={14} /> Email verification
+        </h3>
+        <button type="button" className="icon-btn" title="Verification settings" aria-label="Verification settings" onClick={() => setOpen(true)}>
+          <Icon name="sliders" size={13} />
+        </button>
+      </div>
+      <p className="muted small">
+        Every email is verified before outreach. Only <strong>Valid</strong> addresses are sent to{allowedExtra.length ? <> (you also allow {allowedExtra.join(', ')})</> : null}.
+      </p>
+      <div className="em-vcounts" role="group" aria-label="Verification counts">
+        {Object.keys(VERIFY).map((k) => (
+          <div key={k} className={`em-vcount v-${k}`} title={VERIFY_HELP[k]}>
+            <strong>{c[k]}</strong>
+            <span>{VERIFY[k]}</span>
+          </div>
+        ))}
+      </div>
+      {p.pending > 0 ? (
+        <div className="em-vprogress" role="progressbar" aria-label="Verification progress" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
+          <div className="em-vbar">
+            <span style={{ width: `${pct}%` }} />
+          </div>
+          <span className="muted small">
+            Verifying… {p.done} of {p.total} ({p.pending} left)
+          </span>
+        </div>
+      ) : (
+        <span className="muted small">{c.total ? 'All addresses checked.' : 'New lead emails are checked automatically.'}</span>
+      )}
+      <div className="em-vengine">
+        {st.settings.engine === 'reacher' ? (
+          <span className="em-acc-ok">
+            <Icon name="check" size={11} /> Reacher server · {hostOf(st.settings.reacherUrl)}
+          </span>
+        ) : st.port25 === 'blocked' ? (
+          <span className="em-acc-error" role="alert">
+            This network blocks mail servers (port 25): addresses cannot be confirmed from this computer, so they stay Unknown and are not sent to. Use a Reacher server in the settings.
+          </span>
+        ) : (
+          <span className="muted small">Checked from this computer{st.port25 === 'ok' ? ' · mail servers reachable' : ''}</span>
+        )}
+      </div>
+      <div className="em-vactions">
+        {c.unknown > 0 && (
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => recheck(['unknown'], 'Unknown addresses')}>
+            <Icon name="refresh" size={12} /> Recheck Unknown
+          </button>
+        )}
+        <button type="button" className="btn btn-ghost btn-sm" onClick={() => (setShowLog((v) => !v), load())}>
+          {showLog ? 'Hide log' : 'Log'}
+        </button>
+      </div>
+      {showLog && (
+        <ul className="em-vlog" aria-label="Verification log">
+          {!log.length && <li className="muted small">Nothing checked yet.</li>}
+          {log.map((l, i) => (
+            <li key={i}>
+              <span className="mono">{l.email}</span> {l.status === 'retry' ? <span className="em-vbadge v-checking">Asked again later</span> : <VerifyBadge status={l.status} />}
+              <span className="muted small">
+                {' '}
+                {when(l.at)} · {l.reason}
+                {l.detail ? ` · server: “${l.detail}”` : ''}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {open && <VerifySettings status={st} onClose={() => setOpen(false)} notify={notify} />}
+    </section>
+  );
+}
+
+function hostOf(url) {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
+function VerifySettings({ status, onClose, notify }) {
+  const s = status.settings;
+  const [engine, setEngine] = useState(s.engine);
+  const [url, setUrl] = useState(s.reacherUrl);
+  const [secret, setSecret] = useState('');
+  const [allow, setAllow] = useState(s.allow);
+  const [roleRisky, setRoleRisky] = useState(s.roleRisky);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState('');
+  const [testAddr, setTestAddr] = useState('');
+  const [tested, setTested] = useState(null);
+  useEsc(onClose);
+  async function save(e) {
+    e?.preventDefault();
+    setBusy('save');
+    setError('');
+    const r = await api.emailVerifySave({ engine, reacherUrl: url, allow, roleRisky, ...(secret ? { secret } : {}) });
+    setBusy('');
+    if (!r.ok) return setError(r.error);
+    notify({ type: 'ok', text: 'Verification settings saved.' });
+    onClose();
+  }
+  async function test() {
+    setBusy('test');
+    setTested(null);
+    setError('');
+    const r = await api.emailVerifyCheck(testAddr);
+    setBusy('');
+    if (!r.ok) return setError(r.error);
+    setTested(r);
+  }
+  return (
+    <div className="modal-scrim" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <form className="em-modal wide" role="dialog" aria-modal="true" aria-label="Verification settings" onSubmit={save}>
+        <header className="em-modal-head">
+          <span className="em-mark">
+            <Icon name="shield" size={16} />
+          </span>
+          <div>
+            <h2>Email verification</h2>
+            <p>Checked before any campaign email is sent</p>
+          </div>
+          <button type="button" className="icon-btn" aria-label="Close" onClick={onClose}>
+            <Icon name="x" size={14} />
+          </button>
+        </header>
+        <fieldset className="em-vfield">
+          <legend>Verify with</legend>
+          <label className="check-wrap">
+            <input type="radio" name="engine" checked={engine === 'local'} onChange={() => setEngine('local')} /> This computer: asks each domain’s mail server directly (needs port 25, often blocked by home internet)
+          </label>
+          <label className="check-wrap">
+            <input type="radio" name="engine" checked={engine === 'reacher'} onChange={() => setEngine('reacher')} /> My Reacher server (open source: <code>github.com/reacherhq/check-if-email-exists</code>) on a server with port 25 open
+          </label>
+          {engine === 'reacher' && (
+            <div className="em-vreacher">
+              <input aria-label="Reacher address" placeholder="https://verify.yourdomain.com" value={url} onChange={(e) => setUrl(e.target.value)} spellCheck={false} />
+              <input aria-label="Reacher secret" type="password" autoComplete="off" placeholder={s.hasSecret ? 'Secret saved (type to replace)' : 'Secret (RCH__HEADER_SECRET), if set'} value={secret} onChange={(e) => setSecret(e.target.value)} />
+              <p className="em-note">
+                <Icon name="file" size={12} /> On your server: <code>docker run -d -p 8080:8080 -e RCH__HEADER_SECRET=yoursecret reacherhq/backend:latest</code>. The secret is kept encrypted on this computer.
+              </p>
+            </div>
+          )}
+        </fieldset>
+        <fieldset className="em-vfield">
+          <legend>Also send to (not recommended)</legend>
+          {['catch_all', 'unknown', 'risky'].map((k) => (
+            <label key={k} className="check-wrap" title={VERIFY_HELP[k]}>
+              <input type="checkbox" checked={allow[k]} onChange={(e) => setAllow((a) => ({ ...a, [k]: e.target.checked }))} /> {VERIFY[k]} addresses
+            </label>
+          ))}
+          <p className="em-note">
+            <Icon name="alert" size={12} /> Invalid addresses are never sent to. Sending to unconfirmed addresses brings bounces, which hurt your sending accounts.
+          </p>
+          <label className="check-wrap">
+            <input type="checkbox" checked={roleRisky} onChange={(e) => setRoleRisky(e.target.checked)} /> Count role addresses (info@, sales@, support@…) as Risky
+          </label>
+        </fieldset>
+        <div className="em-track-form">
+          <input aria-label="Test an address" placeholder="Test an address: name@company.com" value={testAddr} onChange={(e) => setTestAddr(e.target.value)} spellCheck={false} />
+          <button type="button" className="btn" disabled={busy === 'test' || !testAddr.includes('@')} onClick={test}>
+            {busy === 'test' ? 'Checking…' : 'Check'}
+          </button>
+        </div>
+        {tested && (
+          <p className="em-vtested" role="status">
+            <span className="mono">{tested.email}</span>: {tested.result?.status ? <VerifyBadge status={tested.result.status} reason={tested.result.reason} role={tested.result.role} /> : <VerifyBadge state="queued" reason={tested.result?.reason} />} {tested.result?.reason}
+            {tested.result?.detail ? ` (server: “${tested.result.detail}”)` : ''}
+            {tested.allowed ? ' · would be sent to' : ' · would not be sent to'}
+          </p>
+        )}
+        {error && (
+          <p className="em-error" role="alert">
+            <Icon name="alert" size={13} /> {error}
+          </p>
+        )}
+        <footer className="em-modal-foot">
+          <span className="grow" />
+          <button type="button" className="btn btn-ghost" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="submit" className="btn btn-primary" disabled={busy === 'save'}>
+            <Icon name="check" size={13} /> Save
+          </button>
+        </footer>
+      </form>
+    </div>
+  );
+}
+
 function OptOuts({ notify }) {
   const [list, setList] = useState([]);
   const [open, setOpen] = useState(false);
@@ -1288,6 +1548,7 @@ export default function EmailView({ notify, hidden }) {
       <aside className="or-side">
         <Accounts accounts={accounts.accounts} persistent={accounts.persistent} onChange={loadAccounts} notify={notify} onImportPeople={() => setImportPeople(true)} />
         <ClickTracking notify={notify} />
+        <EmailVerification notify={notify} />
         <CategoryCampaigns list={catList} selected={selected} onOpen={openCategory} onToggle={toggleCategory} toggling={toggling} />
         <section className="panel em-card" aria-label="Campaign list">
           <div className="or-card-head">

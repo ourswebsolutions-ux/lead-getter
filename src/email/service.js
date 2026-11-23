@@ -7,6 +7,7 @@
 const { EmailAccounts } = require('./accounts');
 const { EmailCampaigns } = require('./campaigns');
 const { ReplyWatcher, imapInbox, watchInbox } = require('./replies');
+const { EmailVerification } = require('./verification');
 const { extractAccounts, providerFor } = require('./credentials');
 const { ClickTracker } = require('./tracking');
 const { parseRecipients, tableToLines } = require('./recipients-import');
@@ -29,10 +30,12 @@ function leadFilter(raw) {
   if (['with', 'without'].includes(f.website)) out.website = f.website;
   if (['maps', 'facebook', 'linkedin', 'podcast', 'import'].includes(f.source)) out.source = f.source;
   if (Array.isArray(f.ids)) out.ids = f.ids.map(Number).filter(Number.isInteger).slice(0, 1000);
+  if (['valid', 'invalid', 'risky', 'unknown', 'catch_all', 'checking'].includes(f.verify)) out.verify = f.verify;
   return out;
 }
 
-function createEmail({ store, vault, files, canSend, allowInsecure = false, log = () => {}, fetch = globalThis.fetch }) {
+// makeVerifyEngine(opts) -> EmailVerifier (tests: one asking a local mail server).
+function createEmail({ store, vault, files, canSend, allowInsecure = false, log = () => {}, fetch = globalThis.fetch, makeVerifyEngine = undefined }) {
   const accounts = new EmailAccounts({ store, vault, allowInsecure });
   const campaigns = new EmailCampaigns({
     db: store.db,
@@ -47,6 +50,27 @@ function createEmail({ store, vault, files, canSend, allowInsecure = false, log 
     canSend,
   });
   campaigns.on('error', (err) => log(`email campaigns: ${err.message}`));
+  // Every address is verified before any campaign email goes to it.
+  const verification = new EmailVerification({
+    db: store.db,
+    state: { get: (k) => store.getState(k), set: (k, v) => store.setState(k, v) },
+    vault,
+    ...(makeVerifyEngine ? { makeEngine: makeVerifyEngine } : {}),
+    // Saved leads' emails never checked (new leads): checked in the background.
+    newEmails: (limit) =>
+      store.db
+        .prepare("SELECT DISTINCT lower(trim(b.email)) AS e FROM businesses b WHERE b.email LIKE '%_@_%._%' AND NOT EXISTS (SELECT 1 FROM email_verifications v WHERE v.email = lower(trim(b.email))) LIMIT ?")
+        .all(limit)
+        .map((r) => r.e),
+    sender: () => accounts.list()[0]?.email || '',
+    log,
+  });
+  campaigns.verification = verification;
+  verification.on('verified', (list) => campaigns.applyVerification(list.map((x) => x.email)));
+  verification.on('policy', () => {
+    campaigns.applyVerification(null);
+    campaigns.kick();
+  });
   // Link clicks, fetched from the user's tracking address.
   const tracker = new ClickTracker({ state: { get: (k) => store.getState(k), set: (k, v) => store.setState(k, v) }, vault, fetch, allowInsecure, log });
   tracker.onClick = (c) => campaigns.recordClick(c);
@@ -139,7 +163,7 @@ function createEmail({ store, vault, files, canSend, allowInsecure = false, log 
       }
       ids.push(id);
     }
-    const out = { added: 0, already: 0, optedOut: 0, previous: 0, overLimit: 0 };
+    const out = { added: 0, already: 0, optedOut: 0, previous: 0, unverified: 0, overLimit: 0 };
     for (let i = 0; i < ids.length; i += 1000) {
       // Also into a running campaign (category ones too): these people were
       // chosen one by one, so they go to the top of the waiting list.
@@ -154,7 +178,7 @@ function createEmail({ store, vault, files, canSend, allowInsecure = false, log 
     return { ok: true, campaignId: cid, found: list.length, invalid, newLeads, ...out, campaign: campaigns.summary(cid) };
   }
 
-  return { accounts, campaigns, replies, tracker, addFromText, importRecipients };
+  return { accounts, campaigns, replies, tracker, verification, addFromText, importRecipients };
 }
 
 // IPC: handle(channel, fn) is main.js's ipcMain.handle wrapper.
@@ -271,6 +295,39 @@ function registerEmailIpc({ handle, email, requirePlan, pickFiles, send, listCat
 
   // Click tracking: the tracking address, its files, clicks now.
   const { tracker } = email;
+  // Email verification: its status (counts, progress, settings; never the Reacher secret).
+  const { verification } = email;
+  let verifySend = null;
+  verification.on('change', () => {
+    if (verifySend) return;
+    verifySend = setTimeout(() => {
+      verifySend = null;
+      send('email:verify', verification.status());
+    }, 500);
+    verifySend.unref?.();
+  });
+  handle('email:verifyStatus', () => ({ ok: true, status: verification.status(), log: verification.logs(60) }));
+  handle('email:verifySave', (patch) => {
+    const p = patch && typeof patch === 'object' ? patch : {};
+    const allow = p.allow && typeof p.allow === 'object' ? { risky: p.allow.risky === true, unknown: p.allow.unknown === true, catch_all: p.allow.catch_all === true } : undefined;
+    const r = verification.save({ engine: str(p.engine) || undefined, reacherUrl: typeof p.reacherUrl === 'string' ? p.reacherUrl.slice(0, 500) : undefined, secret: typeof p.secret === 'string' ? p.secret : undefined, allow, roleRisky: typeof p.roleRisky === 'boolean' ? p.roleRisky : undefined });
+    if (r.ok) send('email:state', { id: null });
+    return r.ok ? { ok: true, status: verification.status() } : r;
+  });
+  // Checked again now: these statuses (or all).
+  handle('email:verifyRecheck', (statuses) => ({ ok: true, queued: verification.recheck(Array.isArray(statuses) ? statuses.map(str) : null) }));
+  // One address checked now (the settings' "Test an address").
+  handle('email:verifyCheck', async (raw) => {
+    const e = str(raw).trim().toLowerCase().slice(0, 254);
+    if (!e.includes('@')) return { ok: false, error: 'Enter an email address.' };
+    verification.enqueue([e], { priority: 9, force: true });
+    const r = await verification.ensure([e], { timeout: 120_000 });
+    return { ok: true, email: e, result: r.get(e) || null, allowed: verification.allows(e) };
+  });
+  handle('email:verifyLookup', (list) => {
+    const emails = Array.isArray(list) ? list.slice(0, 5000).map(str) : [];
+    return { ok: true, results: Object.fromEntries(verification.lookup(emails)) };
+  });
   tracker.on('change', () => send('email:tracking', tracker.status()));
   handle('email:tracking', () => ({ ok: true, status: tracker.status() }));
   handle('email:trackingConnect', async (base) => {

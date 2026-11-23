@@ -15,7 +15,7 @@ const { leadsToCsv } = require('../src/export/csv');
 const exe = findChromeExecutable();
 const fixture = fs.readFileSync(path.join(__dirname, 'fixtures', 'linkedin-connections.html'), 'utf8');
 
-async function run(t, { store = new LeadStore(':memory:'), signal = new AbortController().signal, onStatus, link = null } = {}) {
+async function run(t, { store = new LeadStore(':memory:'), signal = new AbortController().signal, onStatus, link = null, pacing = {}, onSession } = {}) {
   const browser = await chromium.launch({ executablePath: exe, headless: true });
   t.after(() => browser.close());
   const context = await browser.newContext({ viewport: { width: 1100, height: 900 } });
@@ -41,9 +41,10 @@ async function run(t, { store = new LeadStore(':memory:'), signal = new AbortCon
     pages: { linkedin: async () => page },
     signal,
     fetchImpl: async () => new Response('', { status: 404 }),
-    pacing: { liPage: [5, 5], liMaps: false, netRetries: [1] },
+    pacing: { liPage: [5, 5], liProfileGap: [5, 5], liMaps: false, netRetries: [1], ...pacing },
     emit: (e, p) => (e === 'status' ? (statuses.push(p.message), onStatus?.(p.message)) : e === 'lead' && leads.push(p)),
   });
+  onSession?.(session);
   const outcome = await session.run();
   return { outcome, stats: session.stats.linkedin, store, statuses, visited, leads };
 }
@@ -140,4 +141,22 @@ test('Page link: a page past the last one ends the run', { skip: !exe && 'Google
   assert.equal(outcome.state, 'done', outcome.message);
   assert.equal(leads.length, 1);
   assert.match(outcome.message, /1 person read/);
+});
+
+test('My connections: a random 30-50 second break before each next profile (none before the first)', { skip: !exe && 'Google Chrome not installed' }, async (t) => {
+  const gaps = [];
+  const { outcome, statuses, visited } = await run(t, {
+    pacing: { liProfileGap: [30_000, 50_000] },
+    // The breaks are recorded, not waited (the real ones are tens of seconds).
+    onSession: (session) => {
+      const delay = session.delay.bind(session);
+      session.delay = (ms) => (ms >= 30_000 ? (gaps.push(ms), Promise.resolve()) : delay(ms));
+    },
+  });
+  assert.equal(outcome.state, 'done', outcome.message);
+  const opened = visited.filter((u) => /^\/in\/[^/]+\/?$/.test(u)).length;
+  assert.equal(gaps.length, opened - 1, 'a break between each two profiles');
+  assert.ok(gaps.every((ms) => ms >= 30_000 && ms <= 50_000), gaps.join(', '));
+  assert.ok(new Set(gaps).size > 1, 'random, not always the same');
+  assert.ok(statuses.some((m) => /break: next profile in (3\d|4\d|50) s/.test(m)), 'the break is shown');
 });

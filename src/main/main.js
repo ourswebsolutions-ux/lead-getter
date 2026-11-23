@@ -427,6 +427,17 @@ function validateCategory(value) {
 }
 
 // Lead filters arrive from the renderer; only known, well-formed fields pass.
+// Each lead with its email's verification ({ status, reason, state, fresh }, or null).
+function withVerification(leads) {
+  if (!email?.verification) return leads;
+  const key = (l) => String(l.email || '').trim().toLowerCase();
+  const seen = email.verification.lookup(leads.map(key).filter(Boolean));
+  return leads.map((l) => {
+    const v = seen.get(key(l));
+    return { ...l, emailVerify: v ? { status: v.status, reason: v.reason, state: v.state, fresh: v.fresh, role: v.role } : null };
+  });
+}
+
 function validateFilter(raw) {
   const f = raw && typeof raw === 'object' ? raw : {};
   const out = {};
@@ -440,6 +451,7 @@ function validateFilter(raw) {
   }
   if (f.campaign === 'seen' || f.campaign === 'unseen') out.campaign = f.campaign;
   if (['seen', 'unseen', 'dnc'].includes(f.call)) out.call = f.call;
+  if (['valid', 'invalid', 'risky', 'unknown', 'catch_all', 'checking', 'none'].includes(f.verify)) out.verify = f.verify;
   if (['maps', 'facebook', 'linkedin', 'podcast', 'import'].includes(f.source)) out.source = f.source;
   if (typeof f.search === 'string' && f.search.trim()) out.search = f.search.trim().slice(0, 100);
   return out;
@@ -1891,11 +1903,11 @@ app.whenReady().then(() => {
     appLock.lock();
     return { ok: true };
   });
-  handle('leads:list', (filter) => store.listLeads(validateFilter(filter)));
+  handle('leads:list', (filter) => withVerification(store.listLeads(validateFilter(filter))));
   // Which of these leads match the table's filter (same rules as leads:list).
   handle('leads:match', (filter, ids) => {
     const list = Array.isArray(ids) ? [...new Set(ids.filter((id) => Number.isInteger(id) && id > 0))].slice(0, 1000) : [];
-    return list.length ? store.listLeads({ ...validateFilter(filter), ids: list }) : [];
+    return list.length ? withVerification(store.listLeads({ ...validateFilter(filter), ids: list })) : [];
   });
   handle('leads:dates', (filter) => store.listDates(validateFilter(filter)));
   handle('leads:delete', (ids) => deleteLeads(ids));
@@ -2364,6 +2376,7 @@ function startBackgroundWork() {
   email?.campaigns.init(); // email campaigns running when the app ended carry on
   email?.replies.start(); // replies and unsubscribes, read from each account's inbox
   email?.tracker.start(); // link clicks, from the user's tracking address
+  email?.verification.start(); // every lead email verified before outreach
   // Continuous searches running when the app ended carry on.
   if (autopilot.engine().state === 'running' && automationSettings().search.resumeInterrupted) {
     autopilot.start();
@@ -2976,6 +2989,7 @@ app.on('before-quit', (e) => {
     .then(() => email?.campaigns.dispose())
     .then(() => email?.replies.stop())
     .then(() => email?.tracker.stop())
+    .then(() => email?.verification.stop())
     .then(() => email?.accounts.dispose())
     .then(() => autoDialer?.stop())
     .then(() => sms?.disconnect())
@@ -3248,6 +3262,20 @@ function initEmailAndAI() {
     canSend: async () => activation.active,
     allowInsecure: !app.isPackaged && process.env.LEAD_FINDER_TEST_SMTP_INSECURE === '1',
     log: autoLog,
+    // Tests only: every domain's mail server is a local one (its port), so
+    // the real verification runs against known mailboxes.
+    ...(!app.isPackaged && process.env.LEAD_FINDER_TEST_MX_PORT
+      ? {
+          makeVerifyEngine: (o) =>
+            new EmailVerifier({
+              ...o,
+              port: Number(process.env.LEAD_FINDER_TEST_MX_PORT),
+              timeout: 3_000,
+              hostFor: (h) => (/^mx\.unreachable\./.test(h) ? '127.0.0.2' : '127.0.0.1'),
+              dns: { resolveMx: async (d) => (/\.invalid$/.test(d) ? Promise.reject(Object.assign(new Error('nx'), { code: 'ENOTFOUND' })) : [{ exchange: `mx.${d}`, priority: 10 }]), resolve4: async () => Promise.reject(Object.assign(new Error('nx'), { code: 'ENOTFOUND' })) },
+            }),
+        }
+      : {}),
   });
   registerEmailIpc({ handle, email, requirePlan, pickFiles, saveFile, pickTable, send, listCategories: () => store.listCategories().categories });
   // Images and documents for WhatsApp campaigns (and any other attachment).

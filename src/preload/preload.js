@@ -204,6 +204,13 @@ contextBridge.exposeInMainWorld('leadFinder', {
   emailTrackingFile: (kind) => ipcRenderer.invoke('email:trackingFile', kind === 'worker' ? 'worker' : 'php'),
   emailClicks: (id, email) => ipcRenderer.invoke('email:clicks', Number(id), String(email ?? '')),
   onEmailTracking: (cb) => subscribe('email:tracking', cb),
+  // Email verification before outreach (the Reacher secret is only ever sent, never read back)
+  emailVerifyStatus: () => ipcRenderer.invoke('email:verifyStatus'),
+  emailVerifySave: (patch) => ipcRenderer.invoke('email:verifySave', patch && typeof patch === 'object' ? patch : {}),
+  emailVerifyRecheck: (statuses) => ipcRenderer.invoke('email:verifyRecheck', Array.isArray(statuses) ? statuses.map(String) : null),
+  emailVerifyCheck: (email) => ipcRenderer.invoke('email:verifyCheck', String(email ?? '')),
+  emailVerifyLookup: (emails) => ipcRenderer.invoke('email:verifyLookup', Array.isArray(emails) ? emails.map(String) : []),
+  onEmailVerify: (cb) => subscribe('email:verify', cb),
   // Inbox: leads who replied (email and WhatsApp)
   inboxThreads: () => ipcRenderer.invoke('inbox:threads'),
   inboxThread: (id) => ipcRenderer.invoke('inbox:thread', Number(id)),

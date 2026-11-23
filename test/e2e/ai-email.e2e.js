@@ -15,6 +15,7 @@ const http = require('node:http');
 const { _electron } = require('playwright-core');
 const { LeadStore } = require('../../src/database/db');
 const { startSmtp } = require('../fake-smtp');
+const { startMx } = require('../fake-mx');
 const { unlock, activationEnv } = require('./helpers');
 
 const root = path.join(__dirname, '..', '..');
@@ -92,6 +93,8 @@ test('Email campaigns, Groq settings, the Assistant and AI on WhatsApp, in the r
   const smtp = await startSmtp();
   const groq = await fakeGroq();
   const waLog = path.join(tmp, 'wa-sent.log');
+  const mx = await startMx({ exists: (e) => !e.includes('nouser') });
+  t.after(() => mx.close());
   const env = {
     ...process.env,
     ...activationEnv,
@@ -100,6 +103,7 @@ test('Email campaigns, Groq settings, the Assistant and AI on WhatsApp, in the r
     LEAD_FINDER_NO_UPDATES: '1',
     LEAD_FINDER_TEST_SECRETS: '1',
     LEAD_FINDER_TEST_SMTP_INSECURE: '1',
+    LEAD_FINDER_TEST_MX_PORT: String(mx.port), // email verification asks this local mail server
     LEAD_FINDER_TEST_GROQ_URL: groq.url,
     LEAD_FINDER_TEST_PROVIDER_PORT: String(smtp.port),
     LEAD_FINDER_TEST_BAILEYS: path.join(__dirname, 'fake-baileys.js'),
@@ -170,7 +174,7 @@ test('Email campaigns, Groq settings, the Assistant and AI on WhatsApp, in the r
   await win.getByRole('button', { name: 'Add recipients' }).click();
   const picker = win.getByRole('dialog', { name: 'Add recipients' });
   await picker.getByLabel('Category').selectOption({ label: 'Real Estate' });
-  await picker.getByText(/2\s*can be emailed/).waitFor();
+  await picker.getByText(/2\s*can be added/).waitFor();
   await picker.getByRole('button', { name: /Add all 2/ }).click();
   await win.getByRole('region', { name: 'Recipients' }).getByText('zahid@realty.pk').waitFor();
   await win.getByRole('button', { name: 'Start' }).click(); // the confirm dialog is accepted

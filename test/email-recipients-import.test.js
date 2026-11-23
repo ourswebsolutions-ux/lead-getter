@@ -11,6 +11,7 @@ const { parseRecipients, tableToLines } = require('../src/email/recipients-impor
 const { createEmail } = require('../src/email/service');
 const { LeadStore } = require('../src/database/db');
 const { Vault } = require('../src/main/vault');
+const { startMx, testEngine } = require('./fake-mx');
 
 test('Recipients from text: "email, name, business", "Name <email>", bare addresses, several on a line', () => {
   const { list, invalid } = parseRecipients(
@@ -42,7 +43,14 @@ test('Recipients from text: "email, name, business", "Name <email>", bare addres
   assert.equal(tableToLines(['A'], [['x']]).ok, false);
 });
 
-test('Import people to email: new contacts saved as leads, added to a new or running campaign, duplicates and unsubscribes handled', (t) => {
+// Verification against a local mail server (every test mailbox exists).
+let sharedMx = null;
+test.before(async () => {
+  sharedMx = await startMx({ exists: (e) => !e.includes('nouser') });
+});
+test.after(() => sharedMx?.close());
+
+test('Import people to email: new contacts saved as leads, added to a new or running campaign, duplicates and unsubscribes handled', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lf-rcpt-'));
   const store = new LeadStore(path.join(dir, 'leads.db'));
   t.after(() => {
@@ -55,7 +63,7 @@ test('Import people to email: new contacts saved as leads, added to a new or run
   const zahid = store.listLeads({})[0];
   store.saveLeadEmails(zahid.id, { emails: ['zahid@realty.pk'] });
   const vault = new Vault({ store, key: 'secrets', cipher: null });
-  var email = createEmail({ store, vault, files: null, canSend: async () => true, allowInsecure: true });
+  var email = createEmail({ store, vault, files: null, canSend: async () => true, allowInsecure: true, makeVerifyEngine: testEngine(sharedMx) });
 
   assert.equal(email.importRecipients('no addresses here', { name: 'X' }).ok, false);
   assert.match(email.importRecipients('a@b.pk', {}).error, /name/);
@@ -93,6 +101,9 @@ test('Import people to email: new contacts saved as leads, added to a new or run
   const cc = email.campaigns.categoryCampaign(String(cat.id), 'Real Estate');
   email.campaigns.syncQueue(email.campaigns.row(cc.id), true);
   const c = email.campaigns.row(cc.id);
+  // Only verified addresses are ever next.
+  assert.deepEqual(email.campaigns.nextRecipients(c, Date.now(), 10), []);
+  await email.verification.ensure(['w1@re.pk', 'w2@re.pk', 'w3@re.pk', 'vip@client.pk'], { timeout: 15_000 });
   assert.deepEqual(email.campaigns.nextRecipients(c, Date.now(), 10).map((x) => x.email), ['w1@re.pk', 'w2@re.pk', 'w3@re.pk']);
   const top = email.importRecipients('vip@client.pk, Vip Client\nw3@re.pk', { id: cc.id });
   assert.ok(top.ok, top.error);

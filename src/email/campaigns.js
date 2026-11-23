@@ -28,6 +28,10 @@ const { isEmail } = require('./accounts');
 const { extractName, cleanBusiness } = require('../whatsapp/templates');
 const { leadFacts } = require('../ai/lead-facts');
 const { newTrackId } = require('./tracking');
+const { chooseEmail } = require('./verification');
+
+// How a verification result is named in a recipient's reason.
+const VERIFY_LABEL = { valid: 'Valid', invalid: 'Invalid', risky: 'Risky', unknown: 'Unknown', catch_all: 'Catch-all' };
 
 // accountIds: the accounts it sends from, in turn (each with its own delay and daily limit).
 // aiWrite: each email written by the AI from the body (the user's instructions)
@@ -190,10 +194,14 @@ function compose({ subject, body }, values) {
 
 // A lead's address to email: its main email, else the first valid one of
 // the others. '' when it has none.
-function emailOf(lead) {
+// Every usable address of a lead, best first.
+function emailsOf(lead) {
   const all = [lead.email, ...(Array.isArray(lead.emails) ? lead.emails.map((e) => (typeof e === 'string' ? e : e?.email)) : [])];
-  const ok = all.map((e) => String(e || '').trim().toLowerCase()).find((e) => isEmail(e) && !/@(example\.(com|org|net)|sentry\.io|wixpress\.com)$/i.test(e) && !/\.(png|jpe?g|gif|webp|svg)$/i.test(e));
-  return ok || '';
+  return [...new Set(all.map((e) => String(e || '').trim().toLowerCase()).filter((e) => isEmail(e) && !/@(example\.(com|org|net)|sentry\.io|wixpress\.com)$/i.test(e) && !/\.(png|jpe?g|gif|webp|svg)$/i.test(e)))];
+}
+
+function emailOf(lead) {
+  return emailsOf(lead)[0] || '';
 }
 
 // {name} and {business} for a lead: a person's first name; for a business
@@ -221,7 +229,8 @@ class EmailCampaigns extends EventEmitter {
     // sent each email, and the AI's text for each recipient.
     // Clicks: the recipient's tracking id (in their links), first click and count.
     // priority 1: imported by hand, sent before the rest of the waiting list.
-    for (const col of ['replied_at INTEGER', 'reply_subject TEXT', 'sent_account TEXT', 'ai_subject TEXT', 'ai_body TEXT', 'track_id TEXT', 'clicked_at INTEGER', 'clicks INTEGER NOT NULL DEFAULT 0', 'priority INTEGER NOT NULL DEFAULT 0']) {
+    // verify_skip 1: skipped because its email did not pass verification (back in the queue if it later does).
+    for (const col of ['replied_at INTEGER', 'reply_subject TEXT', 'sent_account TEXT', 'ai_subject TEXT', 'ai_body TEXT', 'track_id TEXT', 'clicked_at INTEGER', 'clicks INTEGER NOT NULL DEFAULT 0', 'priority INTEGER NOT NULL DEFAULT 0', 'verify_skip INTEGER NOT NULL DEFAULT 0']) {
       try {
         this.db.exec(`ALTER TABLE email_recipients ADD COLUMN ${col}`);
       } catch {} // already there
@@ -229,6 +238,9 @@ class EmailCampaigns extends EventEmitter {
     this.db.exec('CREATE INDEX IF NOT EXISTS email_recipients_track ON email_recipients (track_id)');
     this.db.exec('CREATE INDEX IF NOT EXISTS email_recipients_msgid ON email_recipients (message_id)');
     this.tracker = null; // ClickTracker (service.js)
+    // EmailVerification (service.js): nobody is emailed without it, and only
+    // addresses whose verification the user allows (valid, by default).
+    this.verification = null;
     // A category campaign: the category's leads with an email, added as they come.
     try {
       this.db.exec('ALTER TABLE email_campaigns ADD COLUMN category TEXT');
@@ -447,23 +459,30 @@ class EmailCampaigns extends EventEmitter {
   // Which leads of `list` can be added and why the others cannot.
   audience(id, list) {
     const c = this.row(id);
-    const out = { ready: [], noEmail: 0, optedOut: 0, previous: 0, already: 0 };
+    // unverified: their email failed verification (excludedBy: how many per status).
+    const out = { ready: [], noEmail: 0, optedOut: 0, previous: 0, already: 0, unverified: 0, excludedBy: {} };
     const seen = new Set();
     const inCampaign = new Set(this.db.prepare('SELECT email FROM email_recipients WHERE campaign_id = ?').all(c.id).map((r) => r.email));
     for (const lead of list) {
-      const email = emailOf(lead);
-      if (!email) {
+      const emails = emailsOf(lead);
+      if (!emails.length) {
         out.noEmail++;
         continue;
       }
-      if (seen.has(email) || inCampaign.has(email)) {
+      if (emails.some((e) => seen.has(e) || inCampaign.has(e))) {
         out.already++;
         continue;
       }
+      // The lead's address that passed verification, else one still to be checked.
+      const pick = chooseEmail(emails, this.verification);
+      const email = pick.email;
       seen.add(email);
       if (this.isOptedOut(email)) out.optedOut++;
       else if (!c.config.allowPrevious && this.wasEmailed(email, c.id)) out.previous++;
-      else out.ready.push({ lead, email });
+      else if (pick.state === 'excluded') {
+        out.unverified++;
+        out.excludedBy[pick.status] = (out.excludedBy[pick.status] || 0) + 1;
+      } else out.ready.push({ lead, email, verified: pick.state === 'allowed' });
     }
     return out;
   }
@@ -473,7 +492,7 @@ class EmailCampaigns extends EventEmitter {
     const c = this.row(id);
     if (!c) return { ok: false, error: 'That email campaign no longer exists.' };
     const a = this.audience(id, this.leads(filter));
-    return { ok: true, ready: a.ready.length, noEmail: a.noEmail, optedOut: a.optedOut, previous: a.previous, already: a.already, sample: a.ready.slice(0, 10).map(({ lead, email }) => ({ id: lead.id, name: lead.name, email })) };
+    return { ok: true, ready: a.ready.length, verified: a.ready.filter((x) => x.verified).length, noEmail: a.noEmail, optedOut: a.optedOut, previous: a.previous, already: a.already, unverified: a.unverified, excludedBy: a.excludedBy, sample: a.ready.slice(0, 10).map(({ lead, email, verified }) => ({ id: lead.id, name: lead.name, email, verified })) };
   }
 
   // internal: a running category campaign picking up its new leads.
@@ -488,21 +507,27 @@ class EmailCampaigns extends EventEmitter {
     const now = this.clock();
     const ins = this.db.prepare('INSERT INTO email_recipients (campaign_id, email, lead_id, name, business, state, priority, added_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (campaign_id, email) DO NOTHING');
     let added = 0;
+    const toCheck = [];
     this.db.exec('BEGIN');
     try {
-      for (const { lead, email } of take) {
+      for (const { lead, email, verified } of take) {
         const v = valuesOf(lead);
-        added += ins.run(c.id, email, lead.id ?? null, v.name, v.business, 'queued', first ? 1 : 0, now, now).changes;
+        const n = ins.run(c.id, email, lead.id ?? null, v.name, v.business, 'queued', first ? 1 : 0, now, now).changes;
+        added += n;
+        if (n && !verified) toCheck.push(email);
       }
       this.db.exec('COMMIT');
     } catch (err) {
       this.db.exec('ROLLBACK');
       throw err;
     }
+    // Their emails are verified now (before any can be sent).
+    if (toCheck.length) this.verification?.enqueue(toCheck, { priority: 2 });
     if (added) this.log(c.id, 'info', `${added} recipient${added === 1 ? '' : 's'} added`);
+    if (a.unverified) this.log(c.id, 'info', `${a.unverified} lead${a.unverified === 1 ? '' : 's'} not added: their email did not pass verification`);
     if (c.status === 'completed' && added && !c.category) this.setFields(c.id, { status: 'paused', pauseReason: 'new_recipients' });
     this.emit('change', { id: c.id });
-    return { ok: true, added, noEmail: a.noEmail, optedOut: a.optedOut, previous: a.previous, already: a.already, overLimit: a.ready.length - take.length, campaign: this.summary(c.id) };
+    return { ok: true, added, noEmail: a.noEmail, optedOut: a.optedOut, previous: a.previous, already: a.already, unverified: a.unverified, excludedBy: a.excludedBy, overLimit: a.ready.length - take.length, campaign: this.summary(c.id) };
   }
 
   // Addresses already on the waiting list moved to its top -> how many moved.
@@ -681,7 +706,9 @@ class EmailCampaigns extends EventEmitter {
       const now = this.clock();
       for (const c of running) {
         if (c.category) this.syncQueue(c);
-        const next = this.nextRecipients(c, now, 50);
+        // The next addresses are verified first (waiting for them a little).
+        await this.verifyHead(c);
+        const next = this.nextRecipients(c, this.clock(), 50);
         // Nobody left: completed at once (no delay to wait for). A category
         // campaign stays on and waits for the category's new leads.
         if (!next.length) {
@@ -689,6 +716,11 @@ class EmailCampaigns extends EventEmitter {
           const n = this.counts(c.id);
           if (!n.remaining && c.category) {
             this.waiting.set(c.id, 'new_leads');
+            continue;
+          }
+          // Addresses still being verified: not finished yet.
+          if (n.queued) {
+            this.waiting.set(c.id, 'verifying');
             continue;
           }
           if (!n.remaining) {
@@ -746,19 +778,69 @@ class EmailCampaigns extends EventEmitter {
     await Promise.all(jobs);
   }
 
+  // Only recipients whose email passed verification (a fresh result the user
+  // allows): new ones, and failed ones due for another try.
+  verifiedSql(now) {
+    const allowed = this.verification ? this.verification.allowed() : [];
+    if (!allowed.length) return { sql: '0', params: [] };
+    return { sql: `EXISTS (SELECT 1 FROM email_verifications v WHERE v.email = email_recipients.email AND v.status IN (${allowed.map(() => '?').join(',')}) AND v.expires_at > ?)`, params: [...allowed, now] };
+  }
+
   nextRecipients(c, now, n) {
+    const v = this.verifiedSql(now);
     return [
-      ...this.db.prepare("SELECT * FROM email_recipients WHERE campaign_id = ? AND state = 'queued' ORDER BY priority DESC, added_at, email LIMIT ?").all(c.id, n),
-      ...this.db.prepare("SELECT * FROM email_recipients WHERE campaign_id = ? AND state = 'failed' AND attempts < ? AND retry_at IS NOT NULL AND retry_at <= ? ORDER BY retry_at LIMIT ?").all(c.id, MAX_ATTEMPTS, now, n),
+      ...this.db.prepare(`SELECT * FROM email_recipients WHERE campaign_id = ? AND state = 'queued' AND ${v.sql} ORDER BY priority DESC, added_at, email LIMIT ?`).all(c.id, ...v.params, n),
+      ...this.db.prepare(`SELECT * FROM email_recipients WHERE campaign_id = ? AND state = 'failed' AND attempts < ? AND retry_at IS NOT NULL AND retry_at <= ? AND ${v.sql} ORDER BY retry_at LIMIT ?`).all(c.id, MAX_ATTEMPTS, now, ...v.params, n),
     ].slice(0, n);
   }
 
   nextRecipient(c, now) {
-    return (
-      this.db.prepare("SELECT * FROM email_recipients WHERE campaign_id = ? AND state = 'queued' ORDER BY priority DESC, added_at, email LIMIT 1").get(c.id) ||
-      this.db.prepare("SELECT * FROM email_recipients WHERE campaign_id = ? AND state = 'failed' AND attempts < ? AND retry_at IS NOT NULL AND retry_at <= ? ORDER BY retry_at LIMIT 1").get(c.id, MAX_ATTEMPTS, now) ||
-      null
-    );
+    return this.nextRecipients(c, now, 1)[0] || null;
+  }
+
+  // The first waiting recipients not verified yet: checked now (up to 30 s;
+  // the rest go on in the background), then the results applied.
+  async verifyHead(c) {
+    if (!this.verification) return;
+    const now = this.clock();
+    const head = this.db.prepare("SELECT email FROM email_recipients WHERE campaign_id = ? AND (state = 'queued' OR (state = 'failed' AND attempts < ? AND retry_at IS NOT NULL AND retry_at <= ?)) ORDER BY state = 'failed', priority DESC, added_at, email LIMIT 10").all(c.id, MAX_ATTEMPTS, now).map((r) => r.email);
+    const open = head.filter((e) => !this.verification.allows(e) && !this.verification.excluded(e));
+    if (open.length) await this.verification.ensure(open, { timeout: 30_000 });
+    this.applyVerification(head);
+  }
+
+  // After verification: recipients whose email failed are skipped (with the
+  // reason); those skipped for it whose email now passes (rechecked, or the
+  // user allowed that status) are queued again. emails: these only (null: all).
+  applyVerification(emails = null) {
+    if (!this.verification) return;
+    const now = this.clock();
+    const allowed = this.verification.allowed();
+    const list = emails ? [...new Set(emails)] : null;
+    const only = list ? ` AND r.email IN (${list.map(() => '?').join(',')})` : '';
+    if (list && !list.length) return;
+    const inAllowed = allowed.map(() => '?').join(',');
+    const changed = new Set();
+    const bad = this.db.prepare(`SELECT r.campaign_id AS id, r.email, v.status, v.reason FROM email_recipients r JOIN email_verifications v ON v.email = r.email WHERE r.state IN ('queued', 'failed') AND v.state = 'done' AND v.expires_at > ? AND v.status NOT IN (${inAllowed})${only}`).all(now, ...allowed, ...(list || []));
+    const skip = this.db.prepare("UPDATE email_recipients SET state = 'skipped', error = ?, verify_skip = 1, retry_at = NULL, updated_at = ? WHERE campaign_id = ? AND email = ? AND state IN ('queued', 'failed')");
+    for (const r of bad) {
+      if (skip.run(`Not sent: email ${VERIFY_LABEL[r.status] || r.status}${r.reason ? ` (${r.reason})` : ''}`, now, r.id, r.email).changes) changed.add(r.id);
+    }
+    const good = this.db.prepare(`SELECT r.campaign_id AS id, r.email FROM email_recipients r JOIN email_verifications v ON v.email = r.email WHERE r.state = 'skipped' AND r.verify_skip = 1 AND v.expires_at > ? AND v.status IN (${inAllowed})${only}`).all(now, ...allowed, ...(list || []));
+    const back = this.db.prepare("UPDATE email_recipients SET state = 'queued', error = NULL, verify_skip = 0, attempts = 0, updated_at = ? WHERE campaign_id = ? AND email = ? AND state = 'skipped' AND verify_skip = 1");
+    const requeued = new Set();
+    for (const r of good) {
+      if (this.isOptedOut(r.email)) continue;
+      if (back.run(now, r.id, r.email).changes) {
+        changed.add(r.id);
+        requeued.add(r.id);
+      }
+    }
+    for (const id of requeued) {
+      const c = this.row(id);
+      if (c?.status === 'completed' && !c.category) this.setFields(id, { status: 'paused', pauseReason: 'new_recipients' });
+    }
+    for (const id of changed) this.emit('change', { id });
   }
 
   async sendOne(c, r, accountId = this.senders(c)[0]) {
@@ -769,6 +851,12 @@ class EmailCampaigns extends EventEmitter {
     };
     // Checked again right before sending.
     if (this.isOptedOut(r.email)) return set({ state: 'skipped', error: 'Unsubscribed' });
+    // Its email must have passed verification (here too, whatever chose it).
+    if (!this.verification?.allows(r.email)) {
+      if (this.verification?.excluded(r.email)) this.applyVerification([r.email]);
+      else this.verification?.enqueue([r.email], { priority: 9 });
+      return;
+    }
     if (!c.config.allowPrevious && this.wasEmailed(r.email, c.id)) return set({ state: 'skipped', error: 'Already emailed by another campaign' });
     if (!(await this.canSend())) return this.pause(c.id, 'subscription');
     // Written by the AI first (nothing is reserved if that fails).
@@ -802,6 +890,12 @@ class EmailCampaigns extends EventEmitter {
       msg = { ...msg, ...this.tracker.rewrite(msg, t) };
     }
     const account = this.accounts.get(accountId);
+    // The last check before it leaves (the result may have changed meanwhile).
+    if (!this.verification?.allows(r.email)) {
+      set({ state: r.state === 'failed' ? 'failed' : 'queued', attempts: r.attempts });
+      this.applyVerification([r.email]);
+      return;
+    }
     try {
       const res = await this.accounts.send(accountId, {
         to: r.email,
@@ -1063,6 +1157,7 @@ class EmailCampaigns extends EventEmitter {
       clicks: this.db.prepare('SELECT COUNT(*) AS n FROM email_recipients WHERE campaign_id = ? AND clicked_at IS NOT NULL').get(c.id).n,
       trackClicks: c.config.trackClicks !== false,
       tracking: this.tracking(c),
+      verify: this.verifyCounts(c.id),
       nextDueAt: c.nextDueAt,
       createdAt: c.createdAt,
       startedAt: c.startedAt,
@@ -1082,10 +1177,38 @@ class EmailCampaigns extends EventEmitter {
       body: c.body,
       allowPrevious: c.config.allowPrevious,
       problems: this.problems(c),
-      recipients: this.db.prepare('SELECT email, lead_id AS leadId, name, business, state, attempts, error, sent_at AS sentAt, retry_at AS retryAt, replied_at AS repliedAt, clicked_at AS clickedAt, clicks, priority, ai_subject AS aiSubject, ai_body AS aiBody FROM email_recipients WHERE campaign_id = ? ORDER BY CASE state WHEN \'sending\' THEN 0 WHEN \'failed\' THEN 1 WHEN \'uncertain\' THEN 2 WHEN \'queued\' THEN 3 ELSE 4 END, CASE WHEN state = \'queued\' THEN -priority ELSE 0 END, CASE WHEN state = \'queued\' THEN added_at ELSE -updated_at END, email LIMIT ?').all(c.id, recipients),
+      recipients: this.recipientRows(c.id, recipients),
       log: this.db.prepare('SELECT at, level, text FROM email_log WHERE campaign_id = ? ORDER BY id DESC LIMIT 100').all(c.id),
       limits: LIMITS,
     };
+  }
+
+  // The recipients (waiting ones in sending order), each with its email's verification.
+  recipientRows(id, limit) {
+    const v = this.verification;
+    const cols = 'r.email, r.lead_id AS leadId, r.name, r.business, r.state, r.attempts, r.error, r.sent_at AS sentAt, r.retry_at AS retryAt, r.replied_at AS repliedAt, r.clicked_at AS clickedAt, r.clicks, r.priority, r.ai_subject AS aiSubject, r.ai_body AS aiBody';
+    const verify = v ? ', v.status AS verifyStatus, v.reason AS verifyReason, v.state AS verifyState, v.expires_at AS verifyExpires, v.role AS verifyRole, v.next_at AS verifyNext' : '';
+    const join = v ? ' LEFT JOIN email_verifications v ON v.email = r.email' : '';
+    const rows = this.db.prepare(`SELECT ${cols}${verify} FROM email_recipients r${join} WHERE r.campaign_id = ? ORDER BY CASE r.state WHEN 'sending' THEN 0 WHEN 'failed' THEN 1 WHEN 'uncertain' THEN 2 WHEN 'queued' THEN 3 ELSE 4 END, CASE WHEN r.state = 'queued' THEN -r.priority ELSE 0 END, CASE WHEN r.state = 'queued' THEN r.added_at ELSE -r.updated_at END, r.email LIMIT ?`).all(id, limit);
+    if (!v) return rows;
+    const now = this.clock();
+    const allowed = v.allowed();
+    // verify: ready (passed, may be sent) | checking | excluded | expired (checked again before sending).
+    return rows.map((r) => {
+      const fresh = r.verifyStatus && r.verifyExpires > now;
+      const verify = !r.verifyStatus || r.verifyState !== 'done' ? 'checking' : !fresh ? 'expired' : allowed.includes(r.verifyStatus) ? 'ready' : 'excluded';
+      return { ...r, verifyRole: Boolean(r.verifyRole), verify };
+    });
+  }
+
+  // Waiting recipients by verification: { ready, checking, excluded } (excluded: skipped for it).
+  verifyCounts(id) {
+    if (!this.verification) return null;
+    const v = this.verifiedSql(this.clock());
+    const ready = this.db.prepare(`SELECT COUNT(*) AS n FROM email_recipients WHERE campaign_id = ? AND state = 'queued' AND ${v.sql}`).get(Number(id), ...v.params).n;
+    const queued = this.db.prepare("SELECT COUNT(*) AS n FROM email_recipients WHERE campaign_id = ? AND state = 'queued'").get(Number(id)).n;
+    const excluded = this.db.prepare("SELECT COUNT(*) AS n FROM email_recipients WHERE campaign_id = ? AND state = 'skipped' AND verify_skip = 1").get(Number(id)).n;
+    return { ready, checking: queued - ready, excluded };
   }
 
   failedRecipients(id, limit = 50) {
@@ -1125,4 +1248,4 @@ const PAUSE_TEXT = {
   retry: 'failed recipients were queued again',
 };
 
-module.exports = { EmailCampaigns, compose, render, emailOf, valuesOf, textToHtml, htmlToText, cleanHtml, dayOf, DEFAULTS, LIMITS, MAX_ATTEMPTS, UNSUBSCRIBE_TEXT };
+module.exports = { EmailCampaigns, compose, render, emailOf, emailsOf, valuesOf, textToHtml, htmlToText, cleanHtml, dayOf, DEFAULTS, LIMITS, MAX_ATTEMPTS, UNSUBSCRIBE_TEXT };

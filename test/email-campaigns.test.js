@@ -8,6 +8,8 @@ const { DatabaseSync } = require('node:sqlite');
 const { startSmtp } = require('./fake-smtp');
 const { EmailAccounts } = require('../src/email/accounts');
 const { EmailCampaigns, compose, render, emailOf } = require('../src/email/campaigns');
+const { EmailVerification } = require('../src/email/verification');
+const { startMx, testEngine } = require('./fake-mx');
 const { Vault } = require('../src/main/vault');
 
 function memState() {
@@ -39,9 +41,15 @@ async function setup(t, { clock } = {}) {
     clock: clock || (() => time.now),
     tickMs: 60_000,
   });
-  t.after(() => {
+  // Verification (a local mail server where every test mailbox exists).
+  const mx = await startMx({ exists: (e) => !e.includes('nouser') });
+  campaigns.verification = new EmailVerification({ db, state: { get: state.getState, set: state.setState }, makeEngine: testEngine(mx), clock: clock || (() => time.now) });
+  campaigns.verification.on('verified', (list) => campaigns.applyVerification(list.map((x) => x.email)));
+  t.after(async () => {
     campaigns.dispose();
     accounts.dispose();
+    campaigns.verification.stop();
+    await mx.close();
   });
   const acc = accounts.add({ name: 'Company SMTP', senderName: 'Ali from Axora', email: 'sender@example.com', host: '127.0.0.1', port: smtp.port, username: 'sender@example.com', password: 's3cret-pass', encryption: 'none' });
   assert.ok(acc.ok, acc.error);

@@ -242,6 +242,18 @@ function CallStatus({ lead: l, notify }) {
   );
 }
 
+// Email verification before outreach (Outreach > Email): the result for the
+// lead's email, with why on hover.
+const VERIFY_NAME = { valid: 'Valid', invalid: 'Invalid', risky: 'Risky', unknown: 'Unknown', catch_all: 'Catch-all' };
+function VerifyChip({ v }) {
+  if (!v || !v.status) return <span className="em-vbadge v-checking" title={v?.reason || 'Email verification pending'}>Verifying…</span>;
+  return (
+    <span className={`em-vbadge v-${v.status}`} title={`Email verification: ${VERIFY_NAME[v.status]}${v.reason ? ` · ${v.reason}` : ''}${v.role ? ' · role address' : ''}${v.fresh ? '' : ' · checked again before sending'}`}>
+      {VERIFY_NAME[v.status] || v.status}
+    </span>
+  );
+}
+
 // Every email of a lead: the main one, then "+N" (all listed on hover).
 function EmailCell({ lead: l }) {
   const all = [...new Set([l.email, ...(l.emails || []).map((e) => e.email)].filter(Boolean))];
@@ -256,6 +268,7 @@ function EmailCell({ lead: l }) {
         {all[0]}
       </a>
       {l.kind === 'person' && l.email && <EmailBadge status={l.emailStatus} />}
+      {l.email && <VerifyChip v={l.emailVerify} />}
       {all.length > 1 && (
         <span className="more" title={all.join('\n')}>
           +{all.length - 1}
@@ -598,6 +611,7 @@ export default function App({ onLock }) {
   const [waView, setWaView] = useState('all'); // all | available | unavailable (WhatsApp's own check)
   const [campaignView, setCampaignView] = useState('all'); // all | seen | unseen
   const [callView, setCallView] = useState('all'); // all | seen | unseen | dnc (the Dialer)
+  const [verifyView, setVerifyView] = useState('all'); // email verification: all | valid | invalid | risky | unknown | catch_all | checking | none
   const [sourceView, setSourceView] = useState('all'); // all | maps | facebook | linkedin | podcast
   const [mapsOn, setMapsOn] = useState(true); // Google Maps search (stored in the app)
   const [facebookOn, setFacebookOn] = useState(false); // Facebook Lead Search (stored in the app)
@@ -718,6 +732,7 @@ export default function App({ onLock }) {
     if (waView !== 'all') f.whatsapp = waView;
     if (campaignView !== 'all') f.campaign = campaignView;
     if (callView !== 'all') f.call = callView;
+    if (verifyView !== 'all') f.verify = verifyView;
     if (sourceView !== 'all') f.source = sourceView;
     if (searchQuery) f.search = searchQuery;
     if (view === 'today') f.date = today;
@@ -727,7 +742,7 @@ export default function App({ onLock }) {
       if (range.to) f.to = range.to;
     } else f.before = today;
     return f;
-  }, [view, today, pastMode, pastDate, range, catFilter, siteView, waView, campaignView, callView, sourceView, searchQuery]);
+  }, [view, today, pastMode, pastDate, range, catFilter, siteView, waView, campaignView, callView, verifyView, sourceView, searchQuery]);
   const filterRef = useRef(filter);
   filterRef.current = filter;
   const viewKey = JSON.stringify(filter);
@@ -771,6 +786,35 @@ export default function App({ onLock }) {
     [applyLive],
   );
 
+  // Email verification results arriving: the badges shown are updated (the
+  // list itself is reloaded only when it is filtered by verification).
+  useEffect(() => {
+    let t = 0;
+    const off = api.onEmailVerify?.(() => {
+      if (t) return;
+      t = setTimeout(() => {
+        t = 0;
+        if (filterRef.current.verify) return loadLeadsRef.current?.();
+        setLeads((prev) => {
+          const emails = prev.map((l) => String(l.email || '').toLowerCase()).filter(Boolean);
+          if (!emails.length) return prev;
+          api.emailVerifyLookup(emails).then((r) => {
+            if (!r?.ok) return;
+            setLeads((cur) => cur.map((l) => {
+              const v = r.results[String(l.email || '').toLowerCase()];
+              return v ? { ...l, emailVerify: { status: v.status, reason: v.reason, state: v.state, fresh: v.fresh, role: v.role } } : l;
+            }));
+          });
+          return prev;
+        });
+      }, 3000);
+    });
+    return () => {
+      off?.();
+      clearTimeout(t);
+    };
+  }, []);
+
   const loadLeads = useCallback(() => {
     const f = filterRef.current;
     const slow = setTimeout(() => setLoading(true), 120);
@@ -793,6 +837,8 @@ export default function App({ onLock }) {
         setLoading(false);
       });
   }, [notify, queueLive]);
+  const loadLeadsRef = useRef(loadLeads);
+  loadLeadsRef.current = loadLeads;
 
   useEffect(() => {
     loadLeads();
@@ -1046,13 +1092,14 @@ export default function App({ onLock }) {
   }, []);
 
   // Filters that can hide leads (besides the date view).
-  const narrowed = catFilter !== 'all' || siteView !== 'all' || waView !== 'all' || campaignView !== 'all' || callView !== 'all' || sourceView !== 'all' || Boolean(searchQuery);
+  const narrowed = catFilter !== 'all' || siteView !== 'all' || waView !== 'all' || campaignView !== 'all' || callView !== 'all' || verifyView !== 'all' || sourceView !== 'all' || Boolean(searchQuery);
   const showAll = () => {
     setCatFilter('all');
     setSiteView('all');
     setWaView('all');
     setCampaignView('all');
     setCallView('all');
+    setVerifyView('all');
     setSourceView('all');
     setTableSearch('');
     setSearchQuery('');
@@ -1599,6 +1646,19 @@ export default function App({ onLock }) {
                 <option value="seen">Call Seen (called)</option>
                 <option value="unseen">Call Unseen (not called)</option>
                 <option value="dnc">Do not call</option>
+              </select>
+            </label>
+            <label className="select-wrap">
+              <span>Email check</span>
+              <select aria-label="Show email verification" value={verifyView} onChange={(e) => setVerifyView(e.target.value)}>
+                <option value="all">All leads</option>
+                <option value="valid">Valid (ready for outreach)</option>
+                <option value="invalid">Invalid</option>
+                <option value="risky">Risky</option>
+                <option value="unknown">Unknown</option>
+                <option value="catch_all">Catch-all</option>
+                <option value="checking">Not checked yet</option>
+                <option value="none">No email</option>
               </select>
             </label>
             <label className="select-wrap">

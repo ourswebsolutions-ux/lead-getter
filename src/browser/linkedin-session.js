@@ -45,6 +45,7 @@ const { SearchSession, StopRequested, FatalSearchError, DEFAULT_PACING } = requi
 
 const LI_PACING = {
   liPage: [1500, 3000], // pause after each LinkedIn page
+  liProfileGap: [30_000, 50_000], // My connections and Page link: a random break before the next profile is opened
   liMaxPages: 100, // result pages per mode, at most (a safety stop; an empty page ends sooner)
   liMaxPosts: 60, // posts read per search
   liScrolls: 4, // scrolls of one results page for more
@@ -268,6 +269,7 @@ class LinkedInSession extends SearchSession {
         this.seenProfiles.add(p.profileUrl);
         s.connections++;
         try {
+          await this.profileGap();
           await this.processConnection(page, p);
         } catch (err) {
           // Stop, Chrome closing, a lost connection: the run ends as usual.
@@ -318,6 +320,7 @@ class LinkedInSession extends SearchSession {
         this.seenProfiles.add(p.profileUrl);
         s.connections++;
         try {
+          await this.profileGap();
           await this.processConnection(page, p, { label: 'LinkedIn link', sourceUrl: url });
         } catch (err) {
           if (err instanceof StopRequested || err instanceof FatalSearchError || err?.name === 'PageReplaced') throw err;
@@ -329,6 +332,19 @@ class LinkedInSession extends SearchSession {
       this.linkPage = n;
     }
     this.connProgress(`pages ${from}${to > from ? `–${to}` : ''} of the link done`);
+  }
+
+  // A random break (30-50 s) after a profile was opened, before the next one
+  // is: LinkedIn sees a person's pace, not a burst. Nothing waits before the
+  // first profile, or after one that was skipped (already a lead).
+  async profileGap() {
+    if (!this.profileOpened) return;
+    this.profileOpened = false;
+    const [min, max] = this.pacing.liProfileGap || [0, 0];
+    const ms = Math.round((min + this.random() * (max - min)) * this.slow);
+    if (ms <= 0) return;
+    this.connProgress(`break: next profile in ${Math.round(ms / 1000)} s`);
+    await this.delay(ms);
   }
 
   connProgress(note = '') {
@@ -351,6 +367,7 @@ class LinkedInSession extends SearchSession {
       return this.connProgress(`${card.name} is already a lead`);
     }
     this.connProgress(`${card.name}: profile`);
+    this.profileOpened = true;
     const r = await this.liPage(page, () => this.li.readProfile(page, profileUrl));
     if (!r) return;
     if (r.mode !== 'ok') {

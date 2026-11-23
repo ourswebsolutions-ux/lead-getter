@@ -11,6 +11,7 @@ const path = require('node:path');
 const { _electron } = require('playwright-core');
 const { LeadStore } = require('../../src/database/db');
 const { startSmtp } = require('../fake-smtp');
+const { startMx } = require('../fake-mx');
 const { startTracker } = require('../fake-tracker');
 const { unlock, activationEnv } = require('./helpers');
 
@@ -30,7 +31,9 @@ test('Click tracking: set up, tracked campaign links, clicks shown', { timeout: 
   s.close();
   const smtp = await startSmtp();
   const srv = await startTracker();
-  const env = { ...process.env, ...activationEnv, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome'), LEAD_FINDER_NO_UPDATES: '1', LEAD_FINDER_TEST_SECRETS: '1', LEAD_FINDER_TEST_SMTP_INSECURE: '1', LEAD_FINDER_TEST_SAVE_DIR: saveDir };
+  const mx = await startMx({ exists: (e) => !e.includes('nouser') });
+  t.after(() => mx.close());
+  const env = { ...process.env, ...activationEnv, LEAD_FINDER_USER_DATA: userData, LEAD_FINDER_CHROME_EXE: path.join(tmp, 'no-chrome'), LEAD_FINDER_NO_UPDATES: '1', LEAD_FINDER_TEST_SECRETS: '1', LEAD_FINDER_TEST_SMTP_INSECURE: '1', LEAD_FINDER_TEST_SAVE_DIR: saveDir, LEAD_FINDER_TEST_MX_PORT: String(mx.port) };
   delete env.ELECTRON_RUN_AS_NODE;
   const app = await _electron.launch({ args: [root], cwd: root, env });
   t.after(async () => {

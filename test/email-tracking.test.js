@@ -10,6 +10,8 @@ const { startSmtp } = require('./fake-smtp');
 const { startTracker } = require('./fake-tracker');
 const { EmailAccounts } = require('../src/email/accounts');
 const { EmailCampaigns, compose } = require('../src/email/campaigns');
+const { EmailVerification } = require('../src/email/verification');
+const { startMx, testEngine } = require('./fake-mx');
 const { ClickTracker, normalizeBase, isBot } = require('../src/email/tracking');
 const { Vault } = require('../src/main/vault');
 
@@ -77,10 +79,15 @@ test('Click tracking end to end: connect, tracked email, a click redirects and i
   const tracker = trackerFor(state, vault);
   tracker.onClick = (c) => campaigns.recordClick(c);
   campaigns.tracker = tracker;
-  t.after(() => {
+  // Verification against a local mail server (every test mailbox exists).
+  const mx = await startMx({ exists: (e) => !e.includes('nouser') });
+  campaigns.verification = new EmailVerification({ db, state: { get: (k) => state.getState(k), set: (k, v) => state.setState(k, v) }, makeEngine: testEngine(mx), clock: () => time.now });
+  t.after(async () => {
     tracker.stop();
     campaigns.dispose();
     accounts.dispose();
+    campaigns.verification.stop();
+    await mx.close();
   });
 
   // Not connected: links go out as they are.

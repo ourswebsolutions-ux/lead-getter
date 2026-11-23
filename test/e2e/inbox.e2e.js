@@ -13,6 +13,7 @@ const path = require('node:path');
 const { _electron } = require('playwright-core');
 const { LeadStore } = require('../../src/database/db');
 const { startSmtp } = require('../fake-smtp');
+const { startMx } = require('../fake-mx');
 const { startImap } = require('../fake-imap');
 const { unlock, activationEnv } = require('./helpers');
 
@@ -41,6 +42,8 @@ test('Inbox: replies from WhatsApp and email, alerts to the admin, answers relay
   const imapMessages = [];
   const imap = await startImap({ messages: imapMessages, user: null });
   const waLog = path.join(tmp, 'wa-sent.log');
+  const mx = await startMx({ exists: (e) => !e.includes('nouser') });
+  t.after(() => mx.close());
   const env = {
     ...process.env,
     ...activationEnv,
@@ -49,6 +52,7 @@ test('Inbox: replies from WhatsApp and email, alerts to the admin, answers relay
     LEAD_FINDER_NO_UPDATES: '1',
     LEAD_FINDER_TEST_SECRETS: '1',
     LEAD_FINDER_TEST_SMTP_INSECURE: '1',
+    LEAD_FINDER_TEST_MX_PORT: String(mx.port), // email verification asks this local mail server
     LEAD_FINDER_TEST_BAILEYS: path.join(__dirname, 'fake-baileys.js'),
     LEAD_FINDER_TEST_BAILEYS_LOG: waLog,
     LEAD_FINDER_TEST_BAILEYS_NUMBERS: CLIENT,
