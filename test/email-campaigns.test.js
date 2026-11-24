@@ -310,7 +310,7 @@ test('The inbox over IMAP (imapflow): logs in, examines INBOX read-only, reads s
   });
 });
 
-test('Several sending accounts: emails go out from each in turn, each with its own delay; one failing does not stop the others; accounts added while running', async (t) => {
+test('Several sending accounts: they take turns; the delay is between any two emails of the campaign; one failing does not stop the others; accounts added while running', async (t) => {
   const { smtp, campaigns, accounts, account, time } = await setup(t);
   const smtp2 = await startSmtp();
   t.after(() => smtp2.close());
@@ -328,8 +328,14 @@ test('Several sending accounts: emails go out from each in turn, each with its o
   assert.ok(campaigns.update(c.id, { accountIds: [account.id, second.id] }).ok);
   assert.deepEqual(campaigns.summary(c.id).accountIds, [account.id, second.id]);
   await campaigns.tick();
-  assert.equal(smtp2.messages.length, 1, 'the new account sends at once; the first one waits for its delay');
+  assert.equal(smtp.messages.length + smtp2.messages.length, 1, 'another account does not skip the campaign’s delay');
+  assert.equal(campaigns.summary(c.id).waiting, 'delay');
+  time.now += 61_000;
+  await campaigns.tick();
+  assert.equal(smtp2.messages.length, 1, 'then the account that has not sent yet');
   assert.match(smtp2.messages[0].text, /From: Axora 2 <second@example\.com>/);
+  await campaigns.tick();
+  assert.equal(smtp.messages.length + smtp2.messages.length, 2, 'one email per delay, not one per account');
   // The first account's login now fails: the second goes on alone.
   smtp.setMode('auth-fail');
   time.now += 61_000;
@@ -339,7 +345,7 @@ test('Several sending accounts: emails go out from each in turn, each with its o
   assert.ok(s.senders.find((x) => x.id === account.id).down);
   assert.equal(smtp2.messages.length + smtp.messages.length, 2, 'the failed send went back in the queue');
   await campaigns.tick();
-  assert.equal(smtp2.messages.length, 2, 'the working account sent it');
+  assert.equal(smtp2.messages.length, 2, 'the working account sent it at once (nothing had gone out)');
   await campaigns.tick();
   assert.equal(campaigns.summary(c.id).status, 'completed');
   assert.equal(campaigns.summary(c.id).counts.sent, 3);
@@ -348,6 +354,35 @@ test('Several sending accounts: emails go out from each in turn, each with its o
   const toFirst = campaigns.sentAddresses(account.id);
   assert.equal(toSecond.size + toFirst.size, 3);
   assert.ok([...toSecond].every((e) => !toFirst.has(e)));
+});
+
+test('10.5 minutes between emails with three accounts: every email of the campaign at least 10.5 minutes after the one before', async (t) => {
+  const { smtp, campaigns, accounts, account, time } = await setup(t);
+  const more = [];
+  for (const n of [2, 3]) {
+    const srv = await startSmtp();
+    t.after(() => srv.close());
+    more.push(srv);
+    accounts.add({ name: `A${n}`, senderName: 'Axora', email: `a${n}@example.com`, host: '127.0.0.1', port: srv.port, password: 'pw', encryption: 'none' });
+  }
+  const ids = accounts.list().map((a) => a.id);
+  const c = campaigns.create({ name: 'Slow' });
+  assert.ok(campaigns.update(c.id, { accountIds: ids, subject: 'Hi', body: 'Hello', delaySeconds: Math.round(10.5 * 60) }).ok);
+  assert.equal(campaigns.summary(c.id).delaySeconds, 630);
+  campaigns.addLeads(c.id, {});
+  await campaigns.start(c.id);
+  const sentAt = [];
+  const count = () => smtp.messages.length + more.reduce((n, s) => n + s.messages.length, 0);
+  for (let minute = 0; minute < 40; minute++) {
+    const before = count();
+    await campaigns.tick();
+    for (let i = before; i < count(); i++) sentAt.push(time.now);
+    time.now += 60_000;
+  }
+  assert.equal(sentAt.length, 3);
+  for (let i = 1; i < sentAt.length; i++) assert.ok(sentAt[i] - sentAt[i - 1] >= 630_000, `gap ${(sentAt[i] - sentAt[i - 1]) / 60_000} min`);
+  assert.equal(new Set([smtp.messages.length, ...more.map((s) => s.messages.length)]).size, 1, 'one email from each account, in turn');
+  void account;
 });
 
 const { extractAccounts, providerFor } = require('../src/email/credentials');
@@ -480,4 +515,24 @@ test('Category campaigns: a category with no emails left disappears, and its unu
   const list = campaigns.categoryStats([{ id: 1, name: 'Real Estate' }, { id: 3, name: 'Empty' }]);
   assert.ok(!list.some((x) => x.name === 'Empty'));
   assert.equal(campaigns.row(cc.id), null, 'never sent anything: deleted');
+});
+
+test('Test run: every sending account emails itself the email a lead would get; no lead is emailed, nothing counted', async (t) => {
+  const { smtp, campaigns, accounts, account } = await setup(t);
+  const srv2 = await startSmtp();
+  t.after(() => srv2.close());
+  const second = accounts.add({ name: 'Second', senderName: 'Axora', email: 'second@example.com', host: '127.0.0.1', port: srv2.port, password: 'pw', encryption: 'none' }).account;
+  const c = campaigns.create({ name: 'Trial' });
+  campaigns.update(c.id, { accountIds: [account.id, second.id], subject: 'Website for {business}', body: 'Hello {name},\n\nWe build websites.' });
+  campaigns.addLeads(c.id, {});
+  const r = await campaigns.testRun(c.id);
+  assert.ok(r.ok, r.error);
+  assert.deepEqual(r.results.map((x) => [x.to, x.ok]), [['sender@example.com', true], ['second@example.com', true]]);
+  assert.deepEqual(smtp.messages.map((m) => m.to), [['sender@example.com']]);
+  assert.deepEqual(srv2.messages.map((m) => m.to), [['second@example.com']]);
+  assert.match(smtp.messages[0].text, /Subject: \[Test run\] Website for /);
+  assert.match(smtp.messages[0].text, /Test run of \S*Trial\S*: the email Noor Estate <info@noor\.pk> would get\. Not sent to any lead\./, 'the next lead in sending order');
+  assert.equal(campaigns.counts(c.id).sent, 0);
+  assert.equal(campaigns.counts(c.id).queued, 3);
+  assert.match(campaigns.snapshot(c.id).log[0].text, /Test run: 2 of 2 sending accounts emailed themselves/);
 });

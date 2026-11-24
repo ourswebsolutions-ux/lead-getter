@@ -65,7 +65,7 @@ class EmailAccounts {
   }
 
   public(a) {
-    return { id: a.id, name: a.name, senderName: a.senderName, email: a.email, host: a.host, port: a.port, username: a.username, encryption: a.encryption, status: a.status || 'untested', statusDetail: a.statusDetail || '', testedAt: a.testedAt || null, hasPassword: this.vault.has(`smtp:${a.id}`), createdAt: a.createdAt, imapOn: a.imapOn !== false, imapHost: a.imapHost || imapHostFor(a.host), imapPort: a.imapPort || 993, imapStatus: a.imapStatus || null, imapDetail: a.imapDetail || '', imapCheckedAt: a.imapCheckedAt || null };
+    return { id: a.id, name: a.name, senderName: a.senderName, email: a.email, host: a.host, port: a.port, username: a.username, encryption: a.encryption, status: a.status || 'untested', statusDetail: a.statusDetail || '', testedAt: a.testedAt || null, hasPassword: this.vault.has(`smtp:${a.id}`), createdAt: a.createdAt, imapOn: a.imapOn !== false, imapHost: a.imapHost || imapHostFor(a.host), imapPort: a.imapPort || 993, imapStatus: a.imapStatus || null, imapDetail: a.imapDetail || '', imapCheckedAt: a.imapCheckedAt || null, enabled: a.enabled !== false, dailyLimit: a.dailyLimit || null };
   }
 
   get(id) {
@@ -122,6 +122,20 @@ class EmailAccounts {
     if (v.password) this.vault.set(`smtp:${id}`, v.password);
     this.transports.delete(id);
     this.write(this.raw().map((a) => (a.id === id ? account : a)));
+    return { ok: true, account: this.public(account) };
+  }
+
+  // Its own switch (off: never used to send) and a daily limit across all campaigns (null: none).
+  setLimits(id, { enabled = true, dailyLimit = null } = {}) {
+    const a = this.get(id);
+    if (!a) return { ok: false, error: 'That email account no longer exists.' };
+    let limit = null;
+    if (dailyLimit != null) {
+      limit = Math.round(Number(dailyLimit));
+      if (!Number.isFinite(limit) || limit < 1 || limit > 5000) return { ok: false, error: 'The account’s daily limit must be 1 to 5000 emails (empty: none).' };
+    }
+    const account = { ...a, enabled: enabled !== false, dailyLimit: limit };
+    this.write(this.raw().map((x) => (x.id === id ? account : x)));
     return { ok: true, account: this.public(account) };
   }
 

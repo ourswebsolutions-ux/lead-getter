@@ -182,7 +182,8 @@ function createEmail({ store, vault, files, canSend, allowInsecure = false, log 
 }
 
 // IPC: handle(channel, fn) is main.js's ipcMain.handle wrapper.
-function registerEmailIpc({ handle, email, requirePlan, pickFiles, send, listCategories = () => [], saveFile = null, pickTable = null }) {
+// inboxMessages(address) -> the Inbox's messages with that email address (for a lead's timeline).
+function registerEmailIpc({ handle, email, requirePlan, pickFiles, send, listCategories = () => [], saveFile = null, pickTable = null, inboxMessages = null }) {
   const { accounts, campaigns } = email;
   const id = (v) => (Number.isInteger(Number(v)) && Number(v) > 0 ? Number(v) : null);
   const withCampaign = (fn) => (raw, ...rest) => {
@@ -254,8 +255,26 @@ function registerEmailIpc({ handle, email, requirePlan, pickFiles, send, listCat
     if (typeof p.trackClicks === 'boolean') clean.trackClicks = p.trackClicks;
     if (Array.isArray(p.accountIds)) clean.accountIds = p.accountIds.map(String).slice(0, 50);
     if (Array.isArray(p.attachments)) clean.attachments = p.attachments.map((a) => (typeof a === 'string' ? a : str(a?.id))).slice(0, 20);
+    for (const k of ['delayMaxSeconds', 'maxPerDay']) if (p[k] !== undefined) clean[k] = p[k] === null || p[k] === '' ? null : Number(p[k]);
+    if (typeof p.signature === 'string') clean.signature = p.signature;
+    if (p.followups && typeof p.followups === 'object') clean.followups = { on: p.followups.on === true, steps: (Array.isArray(p.followups.steps) ? p.followups.steps : []).slice(0, 10).map((x) => ({ days: Number(x?.days), subject: str(x?.subject), body: str(x?.body) })) };
+    if (p.schedule && typeof p.schedule === 'object') clean.schedule = { on: p.schedule.on === true, days: Array.isArray(p.schedule.days) ? p.schedule.days.map(Number) : [], start: Number(p.schedule.start), end: Number(p.schedule.end), tz: str(p.schedule.tz) };
     return campaigns.update(cid, clean);
   }));
+  handle('email:duplicate', withCampaign((cid) => campaigns.duplicate(cid)));
+  // One lead in a campaign: stop / resume its sequence, interest, everything that happened.
+  handle('email:stopLead', withCampaign((cid, address, on) => campaigns.stopLead(cid, str(address), on !== false)));
+  handle('email:interest', withCampaign((cid, address, value) => campaigns.setInterest(cid, str(address), str(value) || null)));
+  handle('email:timeline', withCampaign((cid, address) => {
+    const events = campaigns.timeline(cid, str(address));
+    if (!events) return { ok: false, error: 'That person is not in this campaign.' };
+    // Their replies, as the Inbox has them.
+    const replies = (inboxMessages?.(str(address).toLowerCase()) || []).map((m) => ({ at: m.at, kind: m.direction === 'in' ? 'reply_text' : 'answer', subject: m.subject || null, text: m.text }));
+    return { ok: true, events: [...events, ...replies].sort((a, b) => a.at - b.at) };
+  }));
+  handle('email:dashboard', () => ({ ok: true, dashboard: campaigns.dashboard() }));
+  // An account's own switch and daily limit (across campaigns).
+  handle('email:accountLimits', (aid, limits) => changed(accounts.setLimits(str(aid), limits && typeof limits === 'object' ? { enabled: limits.enabled !== false, dailyLimit: limits.dailyLimit == null || limits.dailyLimit === '' ? null : Number(limits.dailyLimit) } : {})));
   handle('email:delete', withCampaign((cid) => campaigns.remove(cid)));
   handle('email:preview', withCampaign((cid, filter) => campaigns.preview(cid, leadFilter(filter))));
   handle('email:addLeads', withCampaign((cid, filter) => campaigns.addLeads(cid, leadFilter(filter))));
@@ -275,6 +294,8 @@ function registerEmailIpc({ handle, email, requirePlan, pickFiles, send, listCat
   handle('email:stop', withCampaign((cid) => campaigns.stop(cid)));
   handle('email:retry', withCampaign((cid, includeUncertain) => campaigns.retryFailed(cid, { includeUncertain: includeUncertain === true })));
   handle('email:test', withCampaign((cid, to) => campaigns.sendTest(cid, str(to))));
+  // Test run: each sending account emails itself the email a lead would get.
+  handle('email:testRun', withCampaign((cid) => campaigns.testRun(cid)));
   handle('email:render', withCampaign((cid, subject, body) => campaigns.render(cid, { subject: typeof subject === 'string' ? subject : undefined, body: typeof body === 'string' ? body : undefined })));
   handle('email:optOuts', () => ({ ok: true, optOuts: campaigns.optOuts() }));
   handle('email:optOut', (address) => campaigns.optOut(str(address)));

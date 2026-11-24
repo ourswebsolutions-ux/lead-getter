@@ -98,26 +98,75 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
 
   // One personalised email: the user's instructions + the business's facts.
   // Resolves { subject, body } (plain text; the app adds the unsubscribe line).
-  async function writeEmail({ instructions, subject = '', sender = {}, business = {} }) {
+  // The instructions are the brief and come first: they decide the offer,
+  // what is said, tone, language, length, structure, greeting, sign-off and
+  // call to action; a template or example in them is followed and only
+  // personalised. The app's own rules are defaults for what they leave open,
+  // except never inventing facts. An answer that is not usable (not JSON,
+  // empty, placeholders left in it) is asked for once more.
+  // signature: the sender's sign-off; the email ends with exactly it (the AI never replaces the sender).
+  async function writeEmail({ instructions, subject = '', sender = {}, business = {}, signature = '' }) {
+    const brief = String(instructions || '').slice(0, 6000).trim();
     const system = [
-      'You write ONE personalised outreach email from the sender to one business, following the sender’s instructions (their offer, tone and language — write in the language of the instructions).',
-      'Use the business facts given to make it specific and relevant (their category, area, whether they have a website, what they do). Never invent anything that is not in the facts or the instructions: no made-up names, numbers, reviews, prices or claims.',
-      'Greet the contact by first name only if contact_name is given and looks like a person’s name; otherwise use a neutral greeting.',
-      'Plain text only: no markdown, no placeholders like [Name], no subject line inside the body. 60 to 170 words. Sign off with the sender’s name if given.',
-      'Do not add an unsubscribe line (the app adds one).',
-      subject ? `Subject: use exactly this subject, filling {name} / {business} from the facts (drop a placeholder whose value is unknown): ${subject}` : 'Write a short, specific subject (at most 9 words, no clickbait, no ALL CAPS).',
-      'Reply with JSON only: {"subject": "...", "body": "..."}',
+      'You write ONE outreach email on behalf of the sender, to one business. You are the sender’s copywriter: do exactly what the sender’s instructions ask.',
+      '',
+      '=== THE SENDER’S INSTRUCTIONS (top priority) ===',
+      brief || '(none: write a short, friendly introduction of the sender’s services)',
+      '=== END OF INSTRUCTIONS ===',
+      '',
+      'How to follow them:',
+      '- They decide the offer, what to say and what not to say, the tone, the language, the length, the structure, the greeting, the sign-off and the call to action. Follow every point they make, in their order.',
+      '- If they contain a template or an example email, keep its structure, wording and paragraphs, and only personalise it for this business (its name, category, area, website situation). Replace any placeholder in it ({name}, {business}, [Business Name], <company>...) with the business’s real value, or rephrase the sentence if the value is unknown.',
+      '- If they give facts about the sender (services, prices, links, phone, portfolio), use them as given, word for word where they are exact (links, numbers, names).',
+      '',
+      'Defaults, only where the instructions say nothing:',
+      '- Language: the language the instructions are written in (Roman Urdu stays Roman Urdu).',
+      '- Length: about 80 to 180 words.',
+      '- Greeting: the contact’s first name if contact_name is a person’s name; otherwise a neutral greeting (no "Dear Sir/Madam" unless asked).',
+      signature ? '' : '- Sign off with the sender’s name (and nothing invented after it).',
+      '',
+      'Always:',
+      '- Make it specific to this business using the facts in the user message (category, area, website or not, rating, what they do).',
+      '- Never invent anything that is not in the facts or the instructions: no made-up names, numbers, reviews, prices, results or claims.',
+      signature ? `- End the email with exactly this sign-off, unchanged, and no other sign-off or name after it (never write as anyone else):\n${String(signature).slice(0, 500)}` : '',
+      '- Plain text only: no markdown, no ** or #, no placeholders left, no subject line inside the body, no unsubscribe line (the app adds one).',
+      subject ? `- Subject: use exactly this subject, filling {name} / {business} from the facts (drop a placeholder whose value is unknown): ${subject}` : '- Subject: short and specific (at most 9 words), in the email’s language, as the instructions ask if they say anything about it; no clickbait, no ALL CAPS.',
+      '',
+      'Reply with JSON only, nothing before or after it: {"subject": "...", "body": "..."}',
     ].join('\n');
-    const user = JSON.stringify({ instructions: String(instructions || '').slice(0, 4000), sender, business });
-    const { message } = await ai.chat([{ role: 'system', content: system }, { role: 'user', content: user }], []);
-    const text = String(message?.content || '');
-    const json = text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1);
-    let out = null;
-    try {
-      out = JSON.parse(json);
-    } catch {}
-    if (!out || typeof out.body !== 'string') throw Object.assign(new Error('the AI did not answer in the expected form'), { code: 'ai_empty' });
-    return { subject: String(out.subject || subject || ''), body: out.body.replace(/\r\n/g, '\n') };
+    const user = JSON.stringify({ instructions: brief, sender, business });
+    const read = (message) => {
+      const text = String(message?.content || '');
+      const json = text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1);
+      try {
+        const out = JSON.parse(json);
+        return out && typeof out.body === 'string' && out.body.trim() ? out : null;
+      } catch {
+        return null;
+      }
+    };
+    // Placeholders the AI left: filled from the facts, or reported.
+    const fill = (t) =>
+      String(t || '')
+        .replace(/\{\s*(business(?: name)?|company)\s*\}|\[\s*(business|company)(?: name)?\s*\]/gi, business.business_name || business.company || '')
+        .replace(/\{\s*(name|first name|contact)\s*\}|\[\s*(name|first name|contact(?: name)?)\s*\]/gi, (business.contact_name || '').split(/\s+/)[0] || '')
+        .replace(/\{\s*(sender|your name)\s*\}|\[\s*(your name|sender(?: name)?)\s*\]/gi, sender.name || '');
+    const leftover = (t) => /\[[A-Z][A-Za-z ]{2,30}\]|\{[a-z ]{2,30}\}|<(?:company|name|business)>/i.test(t);
+    const opts = { maxTokens: 4000, reasoning: 'medium' };
+    const messages = [{ role: 'system', content: system }, { role: 'user', content: user }];
+    let out = read((await ai.chat(messages, [], opts)).message);
+    let body = out ? fill(out.body) : '';
+    if (!out || leftover(body)) {
+      // Once more, saying what was wrong.
+      const again = [...messages, { role: 'assistant', content: out ? JSON.stringify(out) : '(no usable answer)' }, { role: 'user', content: out ? 'The body still has placeholders. Replace every placeholder with the real value from the facts (or rephrase without it) and answer with the JSON only.' : 'Answer with the JSON only: {"subject": "...", "body": "..."}, following the instructions.' }];
+      const second = read((await ai.chat(again, [], opts)).message);
+      if (second) {
+        out = second;
+        body = fill(second.body);
+      }
+    }
+    if (!out) throw Object.assign(new Error('the AI did not answer in the expected form'), { code: 'ai_empty' });
+    return { subject: fill(String(out.subject || subject || '')).replace(/\s+/g, ' ').trim(), body: body.replace(/\r\n/g, '\n').replace(/\*\*(.+?)\*\*/g, '$1').trim() };
   }
 
   // One personalised WhatsApp message: the user's prompt + the business's facts.

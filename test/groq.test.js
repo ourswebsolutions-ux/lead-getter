@@ -146,3 +146,29 @@ test('The email writer: instructions and business facts go to the AI; its JSON a
   assert.match(sent.messages[0].content, /Never invent/);
   assert.equal(sent.tools, undefined, 'no tools for writing');
 });
+
+test('The email writer follows the prompt: it is the brief (first, in the system message), placeholders left by the AI are filled from the facts, a broken answer is asked for once more', async () => {
+  const { createAI } = require('../src/ai/service');
+  const { Vault } = require('../src/main/vault');
+  const m = new Map();
+  const store = { getState: (k) => m.get(k), setState: (k, v) => m.set(k, v) };
+  const vault = new Vault({ store, key: 's', cipher: null });
+  vault.set('groq', KEY);
+  const bodies = [];
+  const answers = ['Sure! Here is your email: Subject - Hello', JSON.stringify({ subject: 'Website for [Business Name]', body: 'Assalam o Alaikum {name},\n\n[Business Name] ki website nahi hai. Hum 25,000 mein bana dete hain.\n\nAli' })];
+  const fetchImpl = async (url, init) => {
+    bodies.push(JSON.parse(init.body));
+    return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ choices: [{ message: { role: 'assistant', content: answers.shift() } }] }) };
+  };
+  const ai = createAI({ store, vault, toolDeps: { email: null, files: null, store: null }, fetchImpl });
+  const prompt = 'Roman Urdu mein likho. Template:\nAssalam o Alaikum {name},\n[Business Name] ki website nahi hai. Hum 25,000 mein bana dete hain.\nAli';
+  const out = await ai.writeEmail({ instructions: prompt, sender: { name: 'Ali' }, business: { business_name: 'Zahid Properties', contact_name: 'Zahid Khan' } });
+  assert.equal(bodies.length, 2, 'the unusable first answer was asked for again');
+  const sys = bodies[0].messages[0].content;
+  assert.ok(sys.indexOf(prompt) > 0 && sys.indexOf(prompt) < sys.indexOf('Defaults'), 'the prompt comes before the defaults');
+  assert.match(sys, /keep its structure, wording/);
+  assert.equal(bodies[0].max_completion_tokens, 4000);
+  assert.equal(bodies[0].reasoning_effort, 'medium', 'gpt-oss thinks a little more for emails');
+  assert.equal(out.subject, 'Website for Zahid Properties');
+  assert.equal(out.body, 'Assalam o Alaikum Zahid,\n\nZahid Properties ki website nahi hai. Hum 25,000 mein bana dete hain.\n\nAli');
+});

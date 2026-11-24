@@ -250,6 +250,17 @@ class EmailVerification extends EventEmitter {
     return this.db.prepare('SELECT at, email, status, reason, detail FROM email_verify_log ORDER BY id DESC LIMIT ?').all(limit);
   }
 
+  // An email to the address bounced (its mail server said it does not exist):
+  // invalid, whatever the earlier check said.
+  markBounced(email, reason = '') {
+    const e = normal(email);
+    if (!e) return;
+    const now = this.clock();
+    this.db.prepare("INSERT INTO email_verifications (email, domain, status, reason, engine, checked_at, expires_at, state, added_at) VALUES (?, ?, 'invalid', ?, 'bounce', ?, ?, 'done', ?) ON CONFLICT (email) DO UPDATE SET status = 'invalid', reason = excluded.reason, engine = 'bounce', checked_at = excluded.checked_at, expires_at = excluded.expires_at, state = 'done'").run(e, e.split('@')[1] || '', `an email to it bounced${reason ? `: ${String(reason).slice(0, 200)}` : ''}`, now, now + TTL.invalid, now);
+    this.db.prepare('INSERT INTO email_verify_log (at, email, status, reason, detail) VALUES (?, ?, ?, ?, ?)').run(now, e, 'invalid', 'bounced', String(reason || '').slice(0, 300));
+    this.emit('change');
+  }
+
   // --- queue ---------------------------------------------------------------------------
 
   // Addresses to check (those with a fresh result, or already waiting, are left alone).

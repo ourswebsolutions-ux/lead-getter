@@ -30,7 +30,6 @@ const crypto = require('node:crypto');
 
 const KEY = 'autopilot.tasks';
 const ENGINE = 'autopilot.engine';
-const MAX_TASKS = 20;
 const MAX_COUNTRIES = 60;
 
 const TIMINGS = {
@@ -99,8 +98,8 @@ class Autopilot {
     if (k.length < 2) return { ok: false, error: 'Enter a keyword, for example Shoes Shop.' };
     if (!c) return { ok: false, error: 'Choose a category for the leads.' };
     if (!list.length) return { ok: false, error: 'Choose at least one country.' };
+    // Any number of continuous searches can be saved.
     const tasks = this.tasks();
-    if (tasks.length >= MAX_TASKS) return { ok: false, error: `Up to ${MAX_TASKS} continuous searches can be saved. Delete one first.` };
     const task = {
       id: crypto.randomBytes(6).toString('hex'),
       keyword: k,
@@ -418,4 +417,4 @@ function fmtWait(ms) {
   return ms < 60_000 ? `${Math.round(ms / 1000)} s` : `${Math.round(ms / 60_000)} min`;
 }
 
-module.exports = { Autopilot, TIMINGS, MAX_TASKS, MAX_COUNTRIES };
+module.exports = { Autopilot, TIMINGS, MAX_COUNTRIES };

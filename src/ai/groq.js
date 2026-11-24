@@ -112,17 +112,18 @@ class ChatAPI {
     }
   }
 
-  body(model, messages, tools) {
-    return { model, messages, temperature: 0.2, max_tokens: 1200, ...(tools?.length ? { tools, tool_choice: 'auto' } : {}) };
+  // opts: { maxTokens, reasoning ('low' | 'medium' | 'high', for models that think first) }.
+  body(model, messages, tools, opts = {}) {
+    return { model, messages, temperature: 0.2, max_tokens: opts.maxTokens || 1200, ...(tools?.length ? { tools, tool_choice: 'auto' } : {}) };
   }
 
   // One chat completion: { message: { content, tool_calls }, model, provider }.
-  async chat(messages, tools) {
+  async chat(messages, tools, opts = {}) {
     let lastErr = null;
     for (const model of this.models.slice(Math.max(0, this.models.indexOf(this.model)))) {
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
-          const data = await this.request('/chat/completions', { method: 'POST', body: this.body(model, messages, tools) });
+          const data = await this.request('/chat/completions', { method: 'POST', body: this.body(model, messages, tools, opts) });
           this.model = model;
           const message = data?.choices?.[0]?.message;
           if (!message) throw new GroqError(`${this.label} returned an empty answer.`, 'empty');
@@ -147,9 +148,9 @@ class Groq extends ChatAPI {
   // Not chat models (speech, safety classifiers): never picked as a fallback.
   static NOT_CHAT = /whisper|tts|orpheus|playai|guard|prompt-guard|safeguard|distil/i;
 
-  body(model, messages, tools) {
-    const { max_tokens, ...rest } = super.body(model, messages, tools);
-    return { ...rest, max_completion_tokens: max_tokens, ...(/gpt-oss/.test(model) ? { reasoning_effort: 'low' } : {}) };
+  body(model, messages, tools, opts = {}) {
+    const { max_tokens, ...rest } = super.body(model, messages, tools, opts);
+    return { ...rest, max_completion_tokens: max_tokens, ...(/gpt-oss/.test(model) ? { reasoning_effort: opts.reasoning || 'low' } : {}) };
   }
 }
 
@@ -192,11 +193,11 @@ class Providers {
     return this.list.some((p) => p.configured());
   }
 
-  async chat(messages, tools) {
+  async chat(messages, tools, opts) {
     let lastErr = null;
     for (const p of this.ordered()) {
       try {
-        return await p.chat(messages, tools);
+        return await p.chat(messages, tools, opts);
       } catch (err) {
         lastErr = err;
         if (!['rate_limit', 'server', 'network', 'invalid_key', 'credits', 'model', 'empty', 'no_key'].includes(err.code)) throw err;

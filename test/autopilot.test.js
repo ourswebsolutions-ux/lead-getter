@@ -193,3 +193,11 @@ test("Chrome waiting for the user's Allow: asked again in 5 minutes, and the use
   assert.ok(notes.some((n) => n.title === 'Chrome needs you'));
   await ap.stopEngine();
 });
+
+test('Continuous searches: any number can be saved (no limit of 20)', () => {
+  const { LeadStore } = require('../src/database/db');
+  const store = new LeadStore(':memory:');
+  const ap = new Autopilot({ store, runSearch: async () => ({ state: 'done' }), now: () => 0, timings: {}, notify: () => {} });
+  for (let i = 0; i < 25; i++) assert.equal(ap.add({ keyword: `Shop ${i}`, category: 'Shops', countries: ['Pakistan'] }).ok, true, `search ${i + 1}`);
+  assert.equal(ap.tasks().length, 25);
+});

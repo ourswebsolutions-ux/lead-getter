@@ -53,7 +53,7 @@ async function fakeGroq() {
       const { messages } = JSON.parse(body);
       calls.push(messages);
       // The email writer (no tools): a JSON email from the business facts.
-      if (/You write ONE personalised outreach email/.test(messages[0].content)) {
+      if (/You write ONE outreach email on behalf of the sender/.test(messages[0].content)) {
         const u = JSON.parse(messages[1].content);
         return send(200, { choices: [{ message: { role: 'assistant', content: JSON.stringify({ subject: `AI idea for ${u.business.business_name}`, body: `Salam,\n\n${u.business.business_name} in ${u.business.address} has no website yet. ${u.instructions}\n\n${u.sender.name}` }) } }] });
       }
@@ -169,7 +169,7 @@ test('Email campaigns, Groq settings, the Assistant and AI on WhatsApp, in the r
   await until(async () => (await win.evaluate(() => window.leadFinder.emailCampaign(1))).campaign.accountIds.length === 2);
   await compose.getByLabel('Minutes between emails').fill('0.5');
   await compose.getByLabel('Subject').fill('Website for {business}');
-  await compose.locator('textarea').fill('Hello {name},\n\nWe build websites for real estate businesses.');
+  await compose.locator('textarea').first().fill('Hello {name},\n\nWe build websites for real estate businesses.');
   await compose.getByRole('button', { name: 'Save' }).click();
   await win.getByRole('button', { name: 'Add recipients' }).click();
   const picker = win.getByRole('dialog', { name: 'Add recipients' });
@@ -178,8 +178,9 @@ test('Email campaigns, Groq settings, the Assistant and AI on WhatsApp, in the r
   await picker.getByRole('button', { name: /Add all 2/ }).click();
   await win.getByRole('region', { name: 'Recipients' }).getByText('zahid@realty.pk').waitFor();
   await win.getByRole('button', { name: 'Start' }).click(); // the confirm dialog is accepted
-  for (let i = 0; i < 100 && smtp.messages.length < 2; i++) await new Promise((r) => setTimeout(r, 300));
-  assert.equal(smtp.messages.length, 2, 'both emails sent');
+  // 30 seconds between the two emails (the campaign's delay, whichever account sends).
+  for (let i = 0; i < 250 && smtp.messages.length < 2; i++) await new Promise((r) => setTimeout(r, 300));
+  assert.equal(smtp.messages.length, 2, `both emails sent (${smtp.messages.map((m) => `${m.to} ${/Subject: (.*)/.exec(m.text)?.[1]}`).join(' | ')})`);
   assert.deepEqual(smtp.messages.map((m) => /From: .*<([^>]+)>/.exec(m.text)[1]).sort(), ['sales.one@gmail.com', 'sender@example.com'], 'one from each sending account');
   assert.ok(smtp.messages.some((m) => /Subject: Website for Zahid Properties/.test(m.text)));
   assert.ok(smtp.messages.every((m) => /List-Unsubscribe/.test(m.text) && /unsubscribe/.test(m.text)));
@@ -210,7 +211,7 @@ test('Email campaigns, Groq settings, the Assistant and AI on WhatsApp, in the r
   await comp2.getByText('Subject', { exact: true }).waitFor({ state: 'detached' }); // AI on: only the prompt (the AI writes the subject)
   await comp2.getByText('Your prompt for the AI').waitFor();
   assert.equal(await comp2.getByLabel('Minutes between emails').inputValue(), '1', 'the delay is shown in minutes');
-  await comp2.locator('textarea').fill('We build websites for restaurants. Offer a free menu page.');
+  await comp2.locator('textarea').first().fill('We build websites for restaurants. Offer a free menu page.');
   await comp2.getByRole('button', { name: 'Save' }).click();
   await until(async () => (await win.evaluate(() => window.leadFinder.emailCampaigns())).campaigns.some((c) => c.category && c.aiWrite));
   const before = smtp.messages.length;

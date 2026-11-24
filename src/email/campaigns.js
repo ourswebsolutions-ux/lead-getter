@@ -29,6 +29,7 @@ const { extractName, cleanBusiness } = require('../whatsapp/templates');
 const { leadFacts } = require('../ai/lead-facts');
 const { newTrackId } = require('./tracking');
 const { chooseEmail } = require('./verification');
+const { checkFollowups, checkSchedule, inWindow, nextWindow, pauseMs, withSignature, FOLLOWUP_DEFAULTS, SCHEDULE_DEFAULTS, DAY } = require('./sequence');
 
 // How a verification result is named in a recipient's reason.
 const VERIFY_LABEL = { valid: 'Valid', invalid: 'Invalid', risky: 'Risky', unknown: 'Unknown', catch_all: 'Catch-all' };
@@ -37,11 +38,13 @@ const VERIFY_LABEL = { valid: 'Valid', invalid: 'Invalid', risky: 'Risky', unkno
 // aiWrite: each email written by the AI from the body (the user's instructions)
 // and the business's details; the text is kept on the recipient.
 // trackClicks: links go through the user's click tracking address (tracking.js), when it is set up.
-const DEFAULTS = { delaySeconds: 60, dailyLimit: 100, allowPrevious: false, attachments: [], html: null, accountIds: [], senderNext: {}, senderDown: {}, aiWrite: false, trackClicks: true };
+// followups: steps after the first email; schedule: sending days/hours; delayMaxSeconds: a random
+// pause up to this; maxPerDay: the campaign's emails a day (all accounts); signature: every email ends with it.
+const DEFAULTS = { delaySeconds: 60, delayMaxSeconds: null, dailyLimit: 100, maxPerDay: null, allowPrevious: false, attachments: [], html: null, accountIds: [], senderNext: {}, senderDown: {}, aiWrite: false, trackClicks: true, followups: FOLLOWUP_DEFAULTS, schedule: SCHEDULE_DEFAULTS, signature: '' };
 const SYNC_EVERY = 60_000; // category campaigns look for new leads with an email
 const LIMITS = { delay: { min: 10, max: 3600 }, daily: { min: 1, max: 2000 }, attachments: 10, attachmentBytes: 20 * 1024 * 1024, recipients: 20_000 };
 const MAX_ATTEMPTS = 3;
-const RETRY_AFTER = 30 * 60_000;
+const RETRY_AFTER = 15 * 60_000; // a temporary failure: tried again after 15, then 30 minutes (doubling)
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS email_campaigns (
@@ -102,6 +105,28 @@ CREATE TABLE IF NOT EXISTS email_clicks (
   bot INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS email_clicks_campaign ON email_clicks (campaign_id, email);
+CREATE TABLE IF NOT EXISTS email_followups (
+  campaign_id INTEGER NOT NULL,
+  email TEXT NOT NULL,
+  step INTEGER NOT NULL,
+  state TEXT NOT NULL DEFAULT 'queued',
+  due_at INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  retry_at INTEGER,
+  error TEXT,
+  subject TEXT,
+  body TEXT,
+  message_id TEXT,
+  sent_account TEXT,
+  sent_at INTEGER,
+  sent_day TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (campaign_id, email, step)
+);
+CREATE INDEX IF NOT EXISTS email_followups_due ON email_followups (campaign_id, state, due_at);
+CREATE INDEX IF NOT EXISTS email_followups_msgid ON email_followups (message_id);
+CREATE INDEX IF NOT EXISTS email_followups_day ON email_followups (sent_day);
 CREATE TABLE IF NOT EXISTS email_test_sends (
   message_id TEXT PRIMARY KEY,
   campaign_id INTEGER NOT NULL,
@@ -180,11 +205,14 @@ function htmlToText(html) {
 const UNSUBSCRIBE_TEXT = 'If you would rather not receive these emails, reply with “unsubscribe” and you will not be emailed again.';
 
 // The email for one recipient: { subject, text, html }.
-function compose({ subject, body }, values) {
+// signature: the sender's sign-off, added at the end unless the body already ends with it.
+function compose({ subject, body }, values, signature = '') {
   const s = render(subject, values).replace(/[\r\n]+/g, ' ').trim();
-  const b = render(body, values);
-  const html = looksHtml(b) ? cleanHtml(b) : textToHtml(b);
-  const text = looksHtml(b) ? htmlToText(b) : b;
+  const raw = render(body, values);
+  const b = signature && !looksHtml(raw) ? withSignature(raw, signature) : raw;
+  const sigHtml = signature && looksHtml(raw) ? `<p>${esc(signature).replace(/\n/g, '<br>')}</p>` : '';
+  const html = (looksHtml(b) ? cleanHtml(b) : textToHtml(b)) + sigHtml;
+  const text = looksHtml(b) ? withSignature(htmlToText(b), signature) : b;
   return {
     subject: s,
     text: `${text.trim()}\n\n--\n${UNSUBSCRIBE_TEXT}`,
@@ -215,6 +243,12 @@ function valuesOf(lead) {
   return { name, business };
 }
 
+// The mail server refused the address itself (not the sender, not the connection).
+function isRecipientRefusal(err) {
+  const t = `${err?.responseCode || ''} ${err?.response || ''} ${err?.message || ''}`;
+  return (err?.code === 'EENVELOPE' && !(err.responseCode >= 400 && err.responseCode < 500)) || (/\b55[0-3]\b/.test(t) && /\b5\.1\.\d\b|user unknown|unknown user|no such (user|mailbox)|does not exist|mailbox (unavailable|not found)|recipient (rejected|unknown|not found)|address rejected|invalid recipient/i.test(t) && !/spam|block|policy|reputation|spamhaus/i.test(t));
+}
+
 class EmailCampaigns extends EventEmitter {
   // db: node:sqlite DatabaseSync (the lead database); accounts: EmailAccounts;
   // files: FileLibrary (attachments); leads(filter) -> LeadStore.listLeads rows;
@@ -230,7 +264,7 @@ class EmailCampaigns extends EventEmitter {
     // Clicks: the recipient's tracking id (in their links), first click and count.
     // priority 1: imported by hand, sent before the rest of the waiting list.
     // verify_skip 1: skipped because its email did not pass verification (back in the queue if it later does).
-    for (const col of ['replied_at INTEGER', 'reply_subject TEXT', 'sent_account TEXT', 'ai_subject TEXT', 'ai_body TEXT', 'track_id TEXT', 'clicked_at INTEGER', 'clicks INTEGER NOT NULL DEFAULT 0', 'priority INTEGER NOT NULL DEFAULT 0', 'verify_skip INTEGER NOT NULL DEFAULT 0']) {
+    for (const col of ['replied_at INTEGER', 'reply_subject TEXT', 'sent_account TEXT', 'ai_subject TEXT', 'ai_body TEXT', 'track_id TEXT', 'clicked_at INTEGER', 'clicks INTEGER NOT NULL DEFAULT 0', 'priority INTEGER NOT NULL DEFAULT 0', 'verify_skip INTEGER NOT NULL DEFAULT 0', 'sent_subject TEXT', 'sent_text TEXT', 'bounced_at INTEGER', 'bounce_reason TEXT', 'stopped_at INTEGER', 'interest TEXT', 'auto_reply_at INTEGER']) {
       try {
         this.db.exec(`ALTER TABLE email_recipients ADD COLUMN ${col}`);
       } catch {} // already there
@@ -248,6 +282,7 @@ class EmailCampaigns extends EventEmitter {
     this.syncedAt = new Map();
     this.aiFailures = new Map();
     this.busy = new Set(); // SMTP accounts sending right now
+    this.sendingNow = new Set(); // campaigns with an email on its way right now
     this.timer = null;
     this.ticking = false;
     this.waiting = new Map(); // campaign id -> why it is not sending right now
@@ -315,11 +350,16 @@ class EmailCampaigns extends EventEmitter {
     return c;
   }
 
+  // Emails sent today (first emails and follow-ups): by an account in a
+  // campaign, by a campaign, or by an account in all campaigns.
   sentToday(accountId, campaignId = null, now = this.clock()) {
     const day = dayOf(now);
-    if (campaignId && accountId) return this.db.prepare("SELECT COUNT(*) AS n FROM email_recipients WHERE campaign_id = ? AND sent_account = ? AND state = 'sent' AND sent_day = ?").get(Number(campaignId), accountId, day).n;
-    if (campaignId) return this.db.prepare("SELECT COUNT(*) AS n FROM email_recipients WHERE campaign_id = ? AND state = 'sent' AND sent_day = ?").get(Number(campaignId), day).n;
-    return this.db.prepare("SELECT COUNT(*) AS n FROM email_recipients r JOIN email_campaigns c ON c.id = r.campaign_id WHERE c.account_id = ? AND r.state = 'sent' AND r.sent_day = ?").get(accountId, day).n;
+    const count = (where, params) =>
+      this.db.prepare(`SELECT COUNT(*) AS n FROM email_recipients WHERE state = 'sent' AND sent_day = ? AND ${where}`).get(day, ...params).n +
+      this.db.prepare(`SELECT COUNT(*) AS n FROM email_followups WHERE state = 'sent' AND sent_day = ? AND ${where}`).get(day, ...params).n;
+    if (campaignId && accountId) return count('campaign_id = ? AND sent_account = ?', [Number(campaignId), accountId]);
+    if (campaignId) return count('campaign_id = ?', [Number(campaignId)]);
+    return count('sent_account = ?', [accountId]);
   }
 
   // --- campaigns ------------------------------------------------------------------
@@ -342,8 +382,9 @@ class EmailCampaigns extends EventEmitter {
   update(id, patch = {}) {
     const c = this.row(id);
     if (!c) return { ok: false, error: 'That email campaign no longer exists.' };
-    // While it runs, only its sending accounts can change (added or removed).
-    if (c.status === 'running' && Object.keys(patch).some((k) => patch[k] !== undefined && k !== 'accountIds')) return { ok: false, error: 'Pause the campaign before changing it (sending accounts can be added while it runs).' };
+    // While it runs, only its sending accounts, follow-ups, schedule and daily maximum can change.
+    const live = ['accountIds', 'followups', 'schedule', 'maxPerDay'];
+    if (c.status === 'running' && Object.keys(patch).some((k) => patch[k] !== undefined && !live.includes(k))) return { ok: false, error: 'Pause the campaign before changing it (sending accounts, follow-ups and the schedule can be changed while it runs).' };
     const fields = {};
     const config = { ...c.config };
     if (patch.accountIds !== undefined) {
@@ -390,6 +431,35 @@ class EmailCampaigns extends EventEmitter {
       if (!Number.isFinite(d) || d < LIMITS.daily.min || d > LIMITS.daily.max) return { ok: false, error: `The daily limit must be ${LIMITS.daily.min} to ${LIMITS.daily.max} emails.` };
       config.dailyLimit = d;
     }
+    if (patch.delayMaxSeconds !== undefined) {
+      if (patch.delayMaxSeconds === null || patch.delayMaxSeconds === '' || Number(patch.delayMaxSeconds) === 0) config.delayMaxSeconds = null;
+      else {
+        const d = Math.round(Number(patch.delayMaxSeconds));
+        const min = config.delaySeconds;
+        if (!Number.isFinite(d) || d < min || d > LIMITS.delay.max) return { ok: false, error: `The random pause must be from the delay (${Math.round(min / 6) / 10} min) up to ${LIMITS.delay.max / 60} minutes.` };
+        config.delayMaxSeconds = d === min ? null : d;
+      }
+    }
+    if (config.delayMaxSeconds && config.delayMaxSeconds < config.delaySeconds) config.delayMaxSeconds = null;
+    if (patch.maxPerDay !== undefined) {
+      if (patch.maxPerDay === null || patch.maxPerDay === '' || Number(patch.maxPerDay) === 0) config.maxPerDay = null;
+      else {
+        const d = Math.round(Number(patch.maxPerDay));
+        if (!Number.isFinite(d) || d < 1 || d > 20_000) return { ok: false, error: 'The campaign’s daily maximum must be 1 to 20000 emails (empty: no maximum).' };
+        config.maxPerDay = d;
+      }
+    }
+    if (patch.followups !== undefined) {
+      const f = checkFollowups(patch.followups);
+      if (!f.ok) return f;
+      config.followups = f.value;
+    }
+    if (patch.schedule !== undefined) {
+      const sc = checkSchedule(patch.schedule);
+      if (!sc.ok) return sc;
+      config.schedule = sc.value;
+    }
+    if (patch.signature !== undefined) config.signature = String(patch.signature || '').replace(/\r\n/g, '\n').trim().slice(0, 500);
     if (patch.allowPrevious !== undefined) config.allowPrevious = Boolean(patch.allowPrevious);
     if (patch.aiWrite !== undefined) config.aiWrite = Boolean(patch.aiWrite);
     if (patch.trackClicks !== undefined) config.trackClicks = Boolean(patch.trackClicks);
@@ -409,8 +479,25 @@ class EmailCampaigns extends EventEmitter {
       config.attachments = list;
     }
     this.setFields(id, { ...fields, config });
+    // Follow-ups changed: the leads' next ones follow the new steps.
+    if (patch.followups !== undefined) this.syncFollowups(this.row(id));
     this.emit('change', { id });
     return { ok: true, campaign: this.summary(id) };
+  }
+
+  // A copy of a campaign: its emails, follow-ups, schedule and settings
+  // (not its recipients, history or category).
+  duplicate(id) {
+    const c = this.row(id);
+    if (!c) return { ok: false, error: 'That email campaign no longer exists.' };
+    const now = this.clock();
+    const config = { ...c.config, senderNext: {}, senderDown: {}, senderLast: {} };
+    const name = `${c.name.replace(/ · email$/, '')} (copy)`.slice(0, 80);
+    const r = this.db.prepare('INSERT INTO email_campaigns (name, status, account_id, subject, body, config, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(name, 'draft', c.accountId, c.subject, c.body, JSON.stringify(config), now, now);
+    const nid = Number(r.lastInsertRowid);
+    this.log(nid, 'info', `Created as a copy of “${c.name}”`);
+    this.emit('change', { id: nid });
+    return { ok: true, id: nid, campaign: this.summary(nid) };
   }
 
   remove(id) {
@@ -421,6 +508,7 @@ class EmailCampaigns extends EventEmitter {
     this.db.prepare('DELETE FROM email_log WHERE campaign_id = ?').run(c.id);
     this.db.prepare('DELETE FROM email_clicks WHERE campaign_id = ?').run(c.id);
     this.db.prepare('DELETE FROM email_test_sends WHERE campaign_id = ?').run(c.id);
+    this.db.prepare('DELETE FROM email_followups WHERE campaign_id = ?').run(c.id);
     this.db.prepare('DELETE FROM email_campaigns WHERE id = ?').run(c.id);
     this.emit('change', { id: c.id });
     return { ok: true };
@@ -596,9 +684,10 @@ class EmailCampaigns extends EventEmitter {
     if (errs.length) return { ok: false, error: errs.join(' ') };
     if (c.category) this.syncQueue(c, true);
     const n = this.counts(id);
-    if (!c.category && !n.queued && !n.remaining) return { ok: false, error: 'There is nobody left to email in this campaign: add recipients first.' };
+    if (!c.category && !n.queued && !n.remaining && !this.followupCounts(id).pending && !(c.config.followups?.on && this.db.prepare("SELECT 1 FROM email_recipients WHERE campaign_id = ? AND state = 'sent' LIMIT 1").get(c.id))) return { ok: false, error: 'There is nobody left to email in this campaign: add recipients first.' };
     if (!(await this.canSend())) return { ok: false, error: 'Sending emails needs an active plan.' };
-    this.setFields(id, { status: 'running', pauseReason: null, failures: 0, nextDueAt: this.clock(), startedAt: c.startedAt || this.clock(), finishedAt: null, config: { ...c.config, senderDown: {}, senderNext: {} } });
+    this.setFields(id, { status: 'running', pauseReason: null, failures: 0, nextDueAt: this.clock(), startedAt: c.startedAt || this.clock(), finishedAt: null, config: { ...c.config, senderDown: {}, senderNext: {}, resumedAt: this.clock() } });
+    this.syncFollowups(this.row(id));
     this.log(id, 'info', c.status === 'paused' ? 'Resumed' : 'Started');
     this.emit('change', { id: c.id });
     this.kick();
@@ -644,10 +733,10 @@ class EmailCampaigns extends EventEmitter {
     const from = this.senders(c)[0];
     const address = String(to || this.accounts.get(from).email).trim().toLowerCase();
     if (!isEmail(address)) return { ok: false, error: 'Enter a valid email address for the test.' };
-    const r = this.db.prepare('SELECT * FROM email_recipients WHERE campaign_id = ? ORDER BY added_at LIMIT 1').get(c.id);
+    const r = this.db.prepare("SELECT * FROM email_recipients WHERE campaign_id = ? ORDER BY CASE WHEN state = 'queued' THEN 0 ELSE 1 END, priority DESC, added_at, email LIMIT 1").get(c.id);
     let msg;
     try {
-      msg = c.config.aiWrite ? compose(await this.aiText(c, r || { email: address, name: null, business: null }, { save: false }), { name: r?.name || null, business: r?.business || null, email: r?.email || address }) : compose(c, { name: r?.name || null, business: r?.business || null, email: r?.email || address });
+      msg = c.config.aiWrite ? compose(await this.aiText(c, r || { email: address, name: null, business: null }, { save: false }), { name: r?.name || null, business: r?.business || null, email: r?.email || address }, c.config.signature) : compose(c, { name: r?.name || null, business: r?.business || null, email: r?.email || address }, c.config.signature);
     } catch (err) {
       return { ok: false, error: `The AI could not write the test email: ${err.message}.` };
     }
@@ -669,6 +758,51 @@ class EmailCampaigns extends EventEmitter {
     }
   }
 
+  // Test run: every sending account of the campaign emails itself the email
+  // a lead would get (the next waiting leads, one per account, AI-written
+  // when the campaign is), marked as a test. Nothing is counted as sent and
+  // no lead is emailed. -> { ok, results: [{ account, to, as, ok, error }] }.
+  async testRun(id) {
+    const c = this.row(id);
+    if (!c) return { ok: false, error: 'That email campaign no longer exists.' };
+    const errs = this.problems(c);
+    if (errs.length) return { ok: false, error: errs.join(' ') };
+    const senders = this.senders(c).slice(0, 10);
+    const sample = this.db.prepare("SELECT * FROM email_recipients WHERE campaign_id = ? ORDER BY CASE WHEN state = 'queued' THEN 0 ELSE 1 END, priority DESC, added_at, email LIMIT ?").all(c.id, senders.length);
+    const results = [];
+    for (const [i, from] of senders.entries()) {
+      const acc = this.accounts.get(from);
+      const address = String(acc?.email || '').toLowerCase();
+      const r = sample[i] || sample[0] || null;
+      const as = r ? `${r.business || r.name || r.email} <${r.email}>` : null;
+      const values = { name: r?.name || null, business: r?.business || null, email: r?.email || address };
+      let msg;
+      try {
+        msg = c.config.aiWrite ? compose(await this.aiText(c, r || { email: address, name: null, business: null }, { save: false }), values, c.config.signature) : compose(c, values, c.config.signature);
+      } catch (err) {
+        results.push({ account: acc?.name || from, to: address, as, ok: false, error: `the AI could not write it: ${err.message}` });
+        continue;
+      }
+      if (this.tracking(c)) msg = { ...msg, ...this.tracker.rewrite(msg, `test-${c.id}`) };
+      const note = `Test run of “${c.name}”${as ? `: the email ${as} would get` : ''}. Not sent to any lead.`;
+      const subject = `[Test run] ${msg.subject}`;
+      const text = `${note}\n\n${msg.text}`;
+      const html = msg.html ? `<p style="color:#666;font-size:12px">${note.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</p>${msg.html}` : undefined;
+      try {
+        const res = await this.accounts.send(from, { to: address, subject, text, html, attachments: this.attachments(c) });
+        if (res?.messageId) this.db.prepare('INSERT OR REPLACE INTO email_test_sends (message_id, campaign_id, account, email, subject, text, at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(res.messageId, c.id, from, address, subject, String(msg.text || '').slice(0, 8000), this.clock());
+        results.push({ account: acc?.name || from, to: address, as, ok: true });
+      } catch (err) {
+        results.push({ account: acc?.name || from, to: address, as, ok: false, error: err.message });
+      }
+    }
+    this.db.prepare('DELETE FROM email_test_sends WHERE message_id NOT IN (SELECT message_id FROM email_test_sends ORDER BY at DESC LIMIT 200)').run();
+    const sent = results.filter((x) => x.ok).length;
+    this.log(c.id, sent === results.length ? 'info' : 'warn', `Test run: ${sent} of ${results.length} sending account${results.length === 1 ? '' : 's'} emailed ${results.length === 1 ? 'itself' : 'themselves'}${results.some((x) => !x.ok) ? ` (${results.filter((x) => !x.ok).map((x) => `${x.account}: ${x.error}`).join('; ')})` : ''}`);
+    this.emit('change', { id: c.id });
+    return { ok: sent > 0, results, ...(sent ? {} : { error: `The test run failed: ${results.map((x) => `${x.account}: ${x.error}`).join('; ')}.` }) };
+  }
+
   attachments(c) {
     if (!this.files) return [];
     return (c.config.attachments || []).map((a) => {
@@ -683,6 +817,8 @@ class EmailCampaigns extends EventEmitter {
     // Emails interrupted by a crash or shutdown: they may have gone out.
     const n = this.db.prepare("UPDATE email_recipients SET state = 'uncertain', error = 'Interrupted while sending; it may have been delivered', updated_at = ? WHERE state = 'sending'").run(this.clock()).changes;
     if (n) for (const r of this.db.prepare('SELECT DISTINCT campaign_id AS id FROM email_recipients WHERE state = ?').all('uncertain')) this.log(r.id, 'warn', 'An email was interrupted by a restart; it is not sent again automatically');
+    const f = this.db.prepare("UPDATE email_followups SET state = 'uncertain', error = 'Interrupted while sending; it may have been delivered', updated_at = ? WHERE state = 'sending'").run(this.clock()).changes;
+    if (f) for (const r of this.db.prepare("SELECT DISTINCT campaign_id AS id FROM email_followups WHERE state = 'uncertain'").all()) this.log(r.id, 'warn', 'A follow-up was interrupted by a restart; it is not sent again automatically');
     this.timer = setInterval(() => this.tick(), this.tickMs);
     this.timer.unref?.();
     this.kick();
@@ -708,19 +844,29 @@ class EmailCampaigns extends EventEmitter {
         if (c.category) this.syncQueue(c);
         // The next addresses are verified first (waiting for them a little).
         await this.verifyHead(c);
+        // Follow-ups of leads who replied, bounced, unsubscribed or were stopped: cancelled.
+        this.sweepFollowups(c);
         const next = this.nextRecipients(c, this.clock(), 50);
+        // Follow-ups that are due go before new first emails.
+        const due = this.dueFollowups(c, this.clock(), 5);
         // Nobody left: completed at once (no delay to wait for). A category
         // campaign stays on and waits for the category's new leads.
-        if (!next.length) {
-          if (this.db.prepare("SELECT 1 FROM email_recipients WHERE campaign_id = ? AND state = 'sending' LIMIT 1").get(c.id)) continue;
+        if (!next.length && !due.length) {
+          if (this.db.prepare("SELECT 1 FROM email_recipients WHERE campaign_id = ? AND state = 'sending' LIMIT 1").get(c.id) || this.db.prepare("SELECT 1 FROM email_followups WHERE campaign_id = ? AND state = 'sending' LIMIT 1").get(c.id)) continue;
           const n = this.counts(c.id);
+          const fu = this.followupCounts(c.id);
           if (!n.remaining && c.category) {
-            this.waiting.set(c.id, 'new_leads');
+            this.waiting.set(c.id, fu.pending ? 'followups' : 'new_leads');
             continue;
           }
           // Addresses still being verified: not finished yet.
           if (n.queued) {
             this.waiting.set(c.id, 'verifying');
+            continue;
+          }
+          // Follow-ups still to come (or waiting for a retry): not finished yet.
+          if (fu.pending && c.config.followups?.on) {
+            this.waiting.set(c.id, 'followups');
             continue;
           }
           if (!n.remaining) {
@@ -732,19 +878,54 @@ class EmailCampaigns extends EventEmitter {
           } else this.waiting.set(c.id, 'retry_later');
           continue;
         }
-        // Each sending account in turn: its own delay and daily limit; one
-        // email at a time per account (across campaigns).
+        // One email at a time per campaign: its delay is between any two of
+        // its emails, whichever account sends them (with 5 accounts and 10
+        // minutes, still one email every 10 minutes). The accounts take
+        // turns, the one that sent least recently first (ties in a random
+        // order), each within its own daily limit; an account sends one
+        // email at a time (across campaigns).
+        // Only on the campaign's sending days and hours (in its time zone);
+        // outside them it waits and goes on by itself when they start.
+        if (!inWindow(c.config.schedule, now)) {
+          this.waiting.set(c.id, 'schedule');
+          continue;
+        }
+        if (c.config.maxPerDay && this.sentToday(null, c.id, now) >= c.config.maxPerDay) {
+          this.waiting.set(c.id, 'daily_limit');
+          continue;
+        }
+        if ((c.nextDueAt || 0) > now || this.sendingNow.has(c.id)) {
+          this.waiting.set(c.id, 'delay');
+          continue;
+        }
         const why = new Set();
-        // The sending accounts in a random order each round (none is always first).
         const order = this.senders(c);
         for (let i = order.length - 1; i > 0; i--) {
           const j = Math.floor(this.random() * (i + 1));
           [order[i], order[j]] = [order[j], order[i]];
         }
+        const last = c.config.senderLast || {};
+        order.sort((a, b) => (last[a] || 0) - (last[b] || 0));
+        let started = false;
         for (const acc of order) {
-          if (!next.length) break;
+          if ((!next.length && !due.length) || started) break;
           if (c.config.senderDown?.[acc]) {
             why.add('accounts_failing');
+            continue;
+          }
+          const a = this.accounts.get(acc);
+          // Switched off by the user; or its connection / login check failed
+          // since the campaign was last started (never used automatically then).
+          if (!a || a.enabled === false) {
+            why.add('accounts_off');
+            continue;
+          }
+          if (a.status === 'failed' && (a.testedAt || 0) > (c.config.resumedAt || 0)) {
+            why.add('accounts_failing');
+            continue;
+          }
+          if (a.dailyLimit && this.sentToday(acc, null, now) >= a.dailyLimit) {
+            why.add('daily_limit');
             continue;
           }
           if (this.busy.has(acc)) {
@@ -759,15 +940,19 @@ class EmailCampaigns extends EventEmitter {
             why.add('daily_limit');
             continue;
           }
-          const r = next.shift();
           this.busy.add(acc);
+          this.sendingNow.add(c.id);
+          started = true;
           jobs.push(
-            this.sendOne(c, r, acc)
+            (due.length ? this.sendFollowUp(c, due.shift(), acc) : this.sendOne(c, next.shift(), acc))
               .catch((err) => this.emit('error', err))
-              .finally(() => this.busy.delete(acc)),
+              .finally(() => {
+                this.busy.delete(acc);
+                this.sendingNow.delete(c.id);
+              }),
           );
         }
-        if (!jobs.length) this.waiting.set(c.id, why.has('delay') ? 'delay' : why.has('daily_limit') ? 'daily_limit' : why.has('accounts_failing') ? 'accounts_failing' : 'delay');
+        if (!started) this.waiting.set(c.id, why.has('delay') ? 'delay' : why.has('daily_limit') ? 'daily_limit' : why.has('accounts_failing') ? 'accounts_failing' : why.has('accounts_off') ? 'accounts_off' : 'delay');
         else this.waiting.delete(c.id);
       }
     } catch (err) {
@@ -780,10 +965,10 @@ class EmailCampaigns extends EventEmitter {
 
   // Only recipients whose email passed verification (a fresh result the user
   // allows): new ones, and failed ones due for another try.
-  verifiedSql(now) {
+  verifiedSql(now, column = 'email_recipients.email') {
     const allowed = this.verification ? this.verification.allowed() : [];
     if (!allowed.length) return { sql: '0', params: [] };
-    return { sql: `EXISTS (SELECT 1 FROM email_verifications v WHERE v.email = email_recipients.email AND v.status IN (${allowed.map(() => '?').join(',')}) AND v.expires_at > ?)`, params: [...allowed, now] };
+    return { sql: `EXISTS (SELECT 1 FROM email_verifications v WHERE v.email = ${column} AND v.status IN (${allowed.map(() => '?').join(',')}) AND v.expires_at > ?)`, params: [...allowed, now] };
   }
 
   nextRecipients(c, now, n) {
@@ -804,9 +989,16 @@ class EmailCampaigns extends EventEmitter {
     if (!this.verification) return;
     const now = this.clock();
     const head = this.db.prepare("SELECT email FROM email_recipients WHERE campaign_id = ? AND (state = 'queued' OR (state = 'failed' AND attempts < ? AND retry_at IS NOT NULL AND retry_at <= ?)) ORDER BY state = 'failed', priority DESC, added_at, email LIMIT 10").all(c.id, MAX_ATTEMPTS, now).map((r) => r.email);
-    const open = head.filter((e) => !this.verification.allows(e) && !this.verification.excluded(e));
+    // Follow-ups due now: their address checked again if its result expired.
+    const fus = c.config.followups?.on ? this.db.prepare("SELECT email FROM email_followups WHERE campaign_id = ? AND state IN ('queued', 'failed') AND due_at <= ? LIMIT 5").all(c.id, now).map((r) => r.email) : [];
+    const open = [...new Set([...head, ...fus])].filter((e) => !this.verification.allows(e) && !this.verification.excluded(e));
     if (open.length) await this.verification.ensure(open, { timeout: 30_000 });
     this.applyVerification(head);
+    // A follow-up's address that now fails verification: that follow-up is not sent.
+    for (const e of fus) if (this.verification.excluded(e)) {
+      const v = this.verification.statusOf(e);
+      this.cancelFollowups(c.id, e, `Not sent: email ${VERIFY_LABEL[v.status] || v.status}${v.reason ? ` (${v.reason})` : ''}`);
+    }
   }
 
   // After verification: recipients whose email failed are skipped (with the
@@ -851,6 +1043,7 @@ class EmailCampaigns extends EventEmitter {
     };
     // Checked again right before sending.
     if (this.isOptedOut(r.email)) return set({ state: 'skipped', error: 'Unsubscribed' });
+    if (r.stopped_at) return set({ state: 'skipped', error: 'Stopped by you' });
     // Its email must have passed verification (here too, whatever chose it).
     if (!this.verification?.allows(r.email)) {
       if (this.verification?.excluded(r.email)) this.applyVerification([r.email]);
@@ -881,9 +1074,9 @@ class EmailCampaigns extends EventEmitter {
     // Reserved: from here on, it is never sent twice.
     const reserved = this.db.prepare("UPDATE email_recipients SET state = 'sending', attempts = attempts + 1, updated_at = ? WHERE campaign_id = ? AND email = ? AND state IN ('queued', 'failed')").run(now, c.id, r.email).changes;
     if (!reserved) return;
-    this.patchConfig(c.id, (cfg) => (cfg.senderNext = { ...(cfg.senderNext || {}), [accountId]: now + c.config.delaySeconds * 1000 }));
-    this.setFields(c.id, { nextDueAt: now + c.config.delaySeconds * 1000 });
-    let msg = text ? compose({ subject: text.subject, body: text.body }, { name: r.name, business: r.business, email: r.email }) : compose(c, { name: r.name, business: r.business, email: r.email });
+    this.paced(c, accountId, now);
+    const sig = c.config.signature || '';
+    let msg = text ? compose({ subject: text.subject, body: text.body }, { name: r.name, business: r.business, email: r.email }, sig) : compose(c, { name: r.name, business: r.business, email: r.email }, sig);
     if (this.tracking(c)) {
       const t = r.track_id || newTrackId();
       if (!r.track_id) set({ track_id: t });
@@ -907,8 +1100,10 @@ class EmailCampaigns extends EventEmitter {
       });
       if (res.rejected?.length) throw Object.assign(new Error('the email server refused this address'), { code: 'EENVELOPE' });
       const at = this.clock();
-      set({ state: 'sent', error: null, message_id: res.messageId || null, sent_at: at, sent_day: dayOf(at), retry_at: null, sent_account: accountId });
+      set({ state: 'sent', error: null, message_id: res.messageId || null, sent_at: at, sent_day: dayOf(at), retry_at: null, sent_account: accountId, sent_subject: msg.subject.slice(0, 250), sent_text: String(msg.text).split('\n--\n')[0].slice(0, 8000) });
       this.setFields(c.id, { failures: 0 });
+      // Its first follow-up is scheduled (when the campaign has follow-ups).
+      this.chainFollowups(this.row(c.id), r.email);
       this.emit('sent', { id: c.id, email: r.email });
     } catch (err) {
       const code = err?.code || '';
@@ -919,6 +1114,8 @@ class EmailCampaigns extends EventEmitter {
         // the campaign waits for the user.
         set({ state: r.state === 'failed' ? 'failed' : 'queued', attempts: r.attempts });
         this.patchConfig(c.id, (cfg) => (cfg.senderDown = { ...(cfg.senderDown || {}), [accountId]: err.message }));
+        // Nothing went out: another account may send it now.
+        this.setFields(c.id, { nextDueAt: this.clock() });
         const now2 = this.row(c.id);
         const left = this.senders(now2).filter((x) => !now2.config.senderDown?.[x]);
         const name = account?.name || accountId;
@@ -934,9 +1131,13 @@ class EmailCampaigns extends EventEmitter {
       }
       const timeout = ['ETIMEDOUT', 'ESOCKET'].includes(code);
       const attempts = r.attempts + 1;
-      const permanent = code === 'EENVELOPE' || (err.responseCode >= 500 && err.responseCode < 600);
+      // Permanent: a 5xx answer (an address refused for now, 4xx, is tried again).
+      const permanent = (err.responseCode >= 500 && err.responseCode < 600) || (code === 'EENVELOPE' && !(err.responseCode >= 400 && err.responseCode < 500));
       if (timeout) set({ state: 'uncertain', error: `${err.message} (it may still have been delivered)` });
-      else set({ state: 'failed', error: err.message, retry_at: !permanent && attempts < MAX_ATTEMPTS ? this.clock() + RETRY_AFTER : null });
+      // Temporary: tried again later, waiting longer each time; permanent: never again.
+      else set({ state: 'failed', error: err.message, retry_at: !permanent && attempts < MAX_ATTEMPTS ? this.clock() + RETRY_AFTER * 2 ** (attempts - 1) : null });
+      // The mail server refused the address itself: a bounce (no more emails to it).
+      if (permanent && isRecipientRefusal(err)) this.recordBounce({ email: r.email, campaignId: c.id, permanent: true, reason: err.message });
       const failures = (latest?.failures || 0) + 1;
       this.setFields(c.id, { failures });
       this.log(c.id, 'error', `${r.email}: ${err.message}`);
@@ -945,6 +1146,368 @@ class EmailCampaigns extends EventEmitter {
     } finally {
       this.emit('change', { id: c.id });
     }
+  }
+
+
+  // After an email (first or follow-up) leaves: the campaign's next one only
+  // after its pause; this account's next one too.
+  paced(c, accountId, now) {
+    const gap = pauseMs(c.config, this.random);
+    this.patchConfig(c.id, (cfg) => {
+      cfg.senderNext = { ...(cfg.senderNext || {}), [accountId]: now + gap };
+      cfg.senderLast = { ...(cfg.senderLast || {}), [accountId]: now };
+    });
+    this.setFields(c.id, { nextDueAt: now + gap });
+  }
+
+  // --- follow-ups --------------------------------------------------------------------
+
+  // Waiting follow-ups { pending, due, sent, cancelled, uncertain, nextAt }.
+  followupCounts(id, now = this.clock()) {
+    const out = { pending: 0, due: 0, sent: 0, cancelled: 0, uncertain: 0, failed: 0, nextAt: null };
+    for (const r of this.db.prepare('SELECT state, COUNT(*) AS n, MIN(due_at) AS first, SUM(CASE WHEN due_at <= ? THEN 1 ELSE 0 END) AS due FROM email_followups WHERE campaign_id = ? GROUP BY state').all(now, Number(id))) {
+      if (r.state === 'queued') {
+        out.pending += r.n;
+        out.due += r.due;
+        out.nextAt = r.first;
+      } else if (r.state === 'failed') {
+        const retry = this.db.prepare('SELECT COUNT(*) AS n FROM email_followups WHERE campaign_id = ? AND state = ? AND attempts < ? AND retry_at IS NOT NULL').get(Number(id), 'failed', MAX_ATTEMPTS).n;
+        out.pending += retry;
+        out.failed += r.n - retry;
+      } else if (r.state in out) out[r.state] += r.n;
+    }
+    return out;
+  }
+
+  // Follow-ups due now whose address passed verification.
+  dueFollowups(c, now, n) {
+    if (!c.config.followups?.on) return [];
+    const v = this.verifiedSql(now, 'f.email');
+    return this.db
+      .prepare(`SELECT f.* FROM email_followups f WHERE f.campaign_id = ? AND ((f.state = 'queued' AND f.due_at <= ?) OR (f.state = 'failed' AND f.attempts < ? AND f.retry_at IS NOT NULL AND f.retry_at <= ?)) AND ${v.sql} ORDER BY f.due_at, f.step, f.email LIMIT ?`)
+      .all(c.id, now, MAX_ATTEMPTS, now, ...v.params, n);
+  }
+
+  // Why a lead gets no more emails from this campaign (null: it may).
+  stopReason(r) {
+    if (!r) return 'No longer in the campaign';
+    if (r.replied_at) return 'Replied';
+    if (r.bounced_at) return 'Bounced';
+    if (this.isOptedOut(r.email)) return 'Unsubscribed';
+    if (r.stopped_at) return 'Stopped by you';
+    if (r.interest === 'not_interested') return 'Not interested';
+    return null;
+  }
+
+  // The waiting follow-ups of a lead (or of every lead: email null) cancelled.
+  cancelFollowups(campaignId, email, reason) {
+    const now = this.clock();
+    const r = email
+      ? this.db.prepare("UPDATE email_followups SET state = 'cancelled', error = ?, updated_at = ? WHERE campaign_id = ? AND email = ? AND state IN ('queued', 'failed')").run(reason, now, Number(campaignId), email)
+      : this.db.prepare("UPDATE email_followups SET state = 'cancelled', error = ?, updated_at = ? WHERE campaign_id = ? AND state IN ('queued', 'failed')").run(reason, now, Number(campaignId));
+    if (r.changes) this.emit('change', { id: Number(campaignId) });
+    return r.changes;
+  }
+
+  // Follow-ups of leads who replied, bounced, unsubscribed, were stopped or
+  // are not interested: cancelled, with the reason.
+  sweepFollowups(c) {
+    const now = this.clock();
+    const rows = this.db.prepare("SELECT DISTINCT f.email, r.replied_at, r.bounced_at, r.stopped_at, r.interest, r.email AS remail FROM email_followups f LEFT JOIN email_recipients r ON r.campaign_id = f.campaign_id AND r.email = f.email WHERE f.campaign_id = ? AND f.state IN ('queued', 'failed') AND (r.email IS NULL OR r.replied_at IS NOT NULL OR r.bounced_at IS NOT NULL OR r.stopped_at IS NOT NULL OR r.interest = 'not_interested' OR f.email IN (SELECT email FROM email_optouts))").all(c.id);
+    for (const r of rows) this.cancelFollowups(c.id, r.email, this.stopReason(r.remail ? r : null));
+    void now;
+  }
+
+  // A lead's next follow-up, after its last email: scheduled (or rescheduled
+  // when the steps changed). Nothing for a lead who replied, bounced etc.
+  chainFollowups(c, email, cache = null) {
+    if (!c) return;
+    const steps = c.config.followups?.on ? c.config.followups.steps : [];
+    if (!steps.length) return;
+    const r = this.db.prepare('SELECT * FROM email_recipients WHERE campaign_id = ? AND email = ?').get(c.id, email);
+    if (!r || r.state !== 'sent' || this.stopReason(r)) return;
+    const rows = cache?.get(email) || this.db.prepare('SELECT step, state, due_at, sent_at, updated_at FROM email_followups WHERE campaign_id = ? AND email = ?').all(c.id, email);
+    const byStep = new Map(rows.map((x) => [x.step, x]));
+    const now = this.clock();
+    let prevAt = r.sent_at;
+    for (let k = 1; k <= steps.length; k++) {
+      const row = byStep.get(k);
+      const due = prevAt + steps[k - 1].days * DAY;
+      if (!row) {
+        this.db.prepare("INSERT INTO email_followups (campaign_id, email, step, state, due_at, created_at, updated_at) VALUES (?, ?, ?, 'queued', ?, ?, ?) ON CONFLICT (campaign_id, email, step) DO NOTHING").run(c.id, email, k, due, now, now);
+        return;
+      }
+      if (row.state === 'sent' || row.state === 'uncertain') {
+        prevAt = row.sent_at || row.updated_at;
+        continue;
+      }
+      if (row.state === 'queued' && row.due_at !== due) this.db.prepare("UPDATE email_followups SET due_at = ?, updated_at = ? WHERE campaign_id = ? AND email = ? AND step = ? AND state = 'queued'").run(due, now, c.id, email, k);
+      return;
+    }
+  }
+
+  // Every lead's follow-ups follow the campaign's steps (after they changed,
+  // or were turned on for leads emailed before).
+  syncFollowups(c) {
+    if (!c) return;
+    const steps = c.config.followups?.on ? c.config.followups.steps : [];
+    this.db.prepare("UPDATE email_followups SET state = 'cancelled', error = 'Removed from the sequence', updated_at = ? WHERE campaign_id = ? AND state IN ('queued', 'failed') AND step > ?").run(this.clock(), c.id, steps.length);
+    if (!steps.length) return;
+    const cache = new Map();
+    for (const x of this.db.prepare('SELECT email, step, state, due_at, sent_at, updated_at FROM email_followups WHERE campaign_id = ?').all(c.id)) {
+      if (!cache.has(x.email)) cache.set(x.email, []);
+      cache.get(x.email).push(x);
+    }
+    this.db.exec('BEGIN');
+    try {
+      for (const r of this.db.prepare("SELECT email FROM email_recipients WHERE campaign_id = ? AND state = 'sent'").all(c.id)) this.chainFollowups(c, r.email, cache);
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  // The follow-up's text: the step's email (or, with AI on, written from the
+  // step's prompt and the earlier emails), in the same thread ("Re: ...")
+  // unless the step has its own subject. Kept on the follow-up once written.
+  async followupText(c, r, f) {
+    const step = c.config.followups.steps[f.step - 1];
+    const values = { name: r.name, business: r.business, email: r.email };
+    const thread = `Re: ${String(r.sent_subject || render(c.subject, values) || '').replace(/^(re:\s*)+/i, '')}`.trim();
+    if (f.body) return { subject: f.subject || thread, body: f.body, ai: true };
+    let subject = step.subject ? render(step.subject, values) : thread;
+    let body = step.body;
+    if (c.config.aiWrite) {
+      if (!this.writer) throw Object.assign(new Error('no AI key is saved'), { code: 'no_key' });
+      const earlier = [r.sent_text, ...this.db.prepare("SELECT body FROM email_followups WHERE campaign_id = ? AND email = ? AND step < ? AND state = 'sent' ORDER BY step").all(c.id, r.email, f.step).map((x) => x.body)].filter(Boolean);
+      const sender = this.accounts.get(this.senders(c)[0]);
+      const out = await this.writer({
+        instructions: `${step.body}\n\n---\nThis is follow-up ${f.step} of an email sequence. The business has not replied to the earlier email${earlier.length > 1 ? 's' : ''} below. Write a short follow-up in the same thread that refers back to ${earlier.length > 1 ? 'them' : 'it'} naturally, without repeating ${earlier.length > 1 ? 'them' : 'it'}.\n\nEarlier email${earlier.length > 1 ? 's' : ''}:\n${earlier.map((t, i) => `[${i + 1}]\n${String(t).slice(0, 2500)}`).join('\n\n')}`,
+        subject: step.subject || thread,
+        sender: { name: sender?.senderName || sender?.name || '', email: sender?.email || '' },
+        business: this.leadDetails(r),
+        signature: c.config.signature || '',
+      });
+      body = String(out?.body || '').trim().slice(0, 8000);
+      if (body.length < 10) throw Object.assign(new Error('the AI did not write a usable follow-up'), { code: 'ai_empty' });
+      if (step.subject) subject = String(out?.subject || subject).replace(/[\r\n]+/g, ' ').trim().slice(0, 200);
+      this.db.prepare('UPDATE email_followups SET subject = ?, body = ? WHERE campaign_id = ? AND email = ? AND step = ?').run(subject, body, c.id, r.email, f.step);
+      return { subject, body, ai: true };
+    }
+    return { subject, body, ai: false };
+  }
+
+  // One follow-up: checked again (reply, bounce, unsubscribe, stop,
+  // verification), reserved (never sent twice), sent in the lead's thread.
+  async sendFollowUp(c, f, accountId) {
+    const now = this.clock();
+    const set = (fields) => {
+      const cols = Object.keys(fields);
+      this.db.prepare(`UPDATE email_followups SET ${cols.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE campaign_id = ? AND email = ? AND step = ?`).run(...cols.map((k) => fields[k]), this.clock(), c.id, f.email, f.step);
+    };
+    const r = this.db.prepare('SELECT * FROM email_recipients WHERE campaign_id = ? AND email = ?').get(c.id, f.email);
+    const stop = this.stopReason(r);
+    if (stop) return this.cancelFollowups(c.id, f.email, stop);
+    if (!c.config.followups?.steps?.[f.step - 1]) return set({ state: 'cancelled', error: 'Removed from the sequence' });
+    if (!this.verification?.allows(f.email)) {
+      if (this.verification?.excluded(f.email)) {
+        const v = this.verification.statusOf(f.email);
+        this.cancelFollowups(c.id, f.email, `Not sent: email ${VERIFY_LABEL[v.status] || v.status}${v.reason ? ` (${v.reason})` : ''}`);
+      } else this.verification?.enqueue([f.email], { priority: 9 });
+      return;
+    }
+    if (!(await this.canSend())) return this.pause(c.id, 'subscription');
+    let text;
+    try {
+      text = await this.followupText(c, r, f);
+      this.aiFailures.delete(c.id);
+    } catch (err) {
+      const n = (this.aiFailures.get(c.id) || 0) + 1;
+      this.aiFailures.set(c.id, n);
+      this.log(c.id, 'error', `AI could not write follow-up ${f.step} for ${f.email}: ${err.message}`);
+      this.patchConfig(c.id, (cfg) => (cfg.senderNext = { ...(cfg.senderNext || {}), [accountId]: now + Math.max(30, c.config.delaySeconds) * 1000 }));
+      if (['no_key', 'invalid_key', 'credits'].includes(err.code) || n >= 3) {
+        this.aiFailures.delete(c.id);
+        this.pause(c.id, 'ai');
+      }
+      this.emit('change', { id: c.id });
+      return;
+    }
+    // Reserved: from here on, it is never sent twice.
+    const reserved = this.db.prepare("UPDATE email_followups SET state = 'sending', attempts = attempts + 1, updated_at = ? WHERE campaign_id = ? AND email = ? AND step = ? AND state IN ('queued', 'failed')").run(now, c.id, f.email, f.step).changes;
+    if (!reserved) return;
+    this.paced(c, accountId, now);
+    const values = { name: r.name, business: r.business, email: r.email };
+    let msg = compose({ subject: text.subject, body: text.body }, values, c.config.signature || '');
+    if (this.tracking(c)) {
+      const t = r.track_id || newTrackId();
+      if (!r.track_id) this.db.prepare('UPDATE email_recipients SET track_id = ? WHERE campaign_id = ? AND email = ?').run(t, c.id, r.email);
+      msg = { ...msg, ...this.tracker.rewrite(msg, t) };
+    }
+    // In the lead's thread: it answers the earlier emails.
+    const ids = [r.message_id, ...this.db.prepare("SELECT message_id FROM email_followups WHERE campaign_id = ? AND email = ? AND step < ? AND message_id IS NOT NULL ORDER BY step").all(c.id, f.email, f.step).map((x) => x.message_id)].filter(Boolean);
+    const account = this.accounts.get(accountId);
+    if (!this.verification?.allows(f.email)) {
+      set({ state: f.state === 'failed' ? 'failed' : 'queued', attempts: f.attempts });
+      return;
+    }
+    try {
+      const res = await this.accounts.send(accountId, {
+        to: f.email,
+        subject: msg.subject,
+        text: msg.text,
+        html: msg.html,
+        headers: { 'List-Unsubscribe': `<mailto:${account.email}?subject=unsubscribe>` },
+        ...(ids.length ? { inReplyTo: ids.at(-1), references: ids } : {}),
+      });
+      if (res.rejected?.length) throw Object.assign(new Error('the email server refused this address'), { code: 'EENVELOPE' });
+      const at = this.clock();
+      set({ state: 'sent', error: null, message_id: res.messageId || null, sent_at: at, sent_day: dayOf(at), retry_at: null, sent_account: accountId, subject: msg.subject.slice(0, 250), body: String(msg.text).split('\n--\n')[0].slice(0, 8000) });
+      this.setFields(c.id, { failures: 0 });
+      this.log(c.id, 'info', `Follow-up ${f.step} sent to ${f.email}`);
+      this.chainFollowups(this.row(c.id), f.email);
+      this.emit('sent', { id: c.id, email: f.email, step: f.step });
+    } catch (err) {
+      const code = err?.code || '';
+      if (['EAUTH', 'ECONNECTION', 'EDNS', 'no_password', 'no_account'].includes(code) || err.message === 'the email server could not be reached') {
+        set({ state: f.state === 'failed' ? 'failed' : 'queued', attempts: f.attempts });
+        this.patchConfig(c.id, (cfg) => (cfg.senderDown = { ...(cfg.senderDown || {}), [accountId]: err.message }));
+        this.setFields(c.id, { nextDueAt: this.clock() });
+        const left = this.senders(this.row(c.id)).filter((x) => !this.row(c.id).config.senderDown?.[x]);
+        this.log(c.id, 'error', `${account?.name || accountId}: ${err.message}${left.length ? '' : ' (paused)'}`);
+        if (!left.length && this.row(c.id)?.status === 'running') this.pause(c.id, code === 'EAUTH' ? 'login' : 'connection');
+        this.emit('failed', { id: c.id, email: f.email, error: err.message, paused: !left.length });
+        return;
+      }
+      const timeout = ['ETIMEDOUT', 'ESOCKET'].includes(code);
+      const attempts = f.attempts + 1;
+      // Permanent: a 5xx answer (an address refused for now, 4xx, is tried again).
+      const permanent = (err.responseCode >= 500 && err.responseCode < 600) || (code === 'EENVELOPE' && !(err.responseCode >= 400 && err.responseCode < 500));
+      if (timeout) set({ state: 'uncertain', error: `${err.message} (it may still have been delivered)` });
+      else set({ state: 'failed', error: err.message, retry_at: !permanent && attempts < MAX_ATTEMPTS ? this.clock() + RETRY_AFTER * 2 ** (attempts - 1) : null });
+      if (permanent && isRecipientRefusal(err)) this.recordBounce({ email: f.email, campaignId: c.id, permanent: true, reason: err.message });
+      this.log(c.id, 'error', `Follow-up ${f.step} to ${f.email}: ${err.message}`);
+      this.emit('failed', { id: c.id, email: f.email, error: err.message, paused: false });
+    } finally {
+      this.emit('change', { id: c.id });
+    }
+  }
+
+  // --- a lead in a campaign: stop, interest, timeline --------------------------------
+
+  // Stops (or, on: false, allows again) every further email to a lead.
+  stopLead(id, email, on = true) {
+    const e = String(email || '').toLowerCase();
+    const r = this.db.prepare('SELECT * FROM email_recipients WHERE campaign_id = ? AND email = ?').get(Number(id), e);
+    if (!r) return { ok: false, error: 'That person is not in this campaign.' };
+    const now = this.clock();
+    if (on) {
+      this.db.prepare('UPDATE email_recipients SET stopped_at = ?, updated_at = ? WHERE campaign_id = ? AND email = ?').run(now, now, r.campaign_id, e);
+      this.db.prepare("UPDATE email_recipients SET state = 'skipped', error = 'Stopped by you', updated_at = ? WHERE campaign_id = ? AND email = ? AND state IN ('queued', 'failed')").run(now, r.campaign_id, e);
+      this.cancelFollowups(r.campaign_id, e, 'Stopped by you');
+      this.log(r.campaign_id, 'info', `${e}: sequence stopped by you`);
+    } else {
+      this.db.prepare('UPDATE email_recipients SET stopped_at = NULL, updated_at = ? WHERE campaign_id = ? AND email = ?').run(now, r.campaign_id, e);
+      this.db.prepare("UPDATE email_recipients SET state = 'queued', error = NULL, attempts = 0, updated_at = ? WHERE campaign_id = ? AND email = ? AND state = 'skipped' AND error = 'Stopped by you'").run(now, r.campaign_id, e);
+      this.db.prepare("UPDATE email_followups SET state = 'queued', error = NULL, attempts = 0, updated_at = ? WHERE campaign_id = ? AND email = ? AND state = 'cancelled' AND error = 'Stopped by you'").run(now, r.campaign_id, e);
+      this.chainFollowups(this.row(r.campaign_id), e);
+      this.log(r.campaign_id, 'info', `${e}: sequence resumed`);
+      // A campaign that had finished goes on for this lead.
+      const c = this.row(r.campaign_id);
+      if (c.status === 'completed' && (this.followupCounts(c.id).pending || this.counts(c.id).queued)) {
+        this.setFields(c.id, { status: 'running', finishedAt: null, nextDueAt: now });
+        this.kick();
+      }
+    }
+    this.emit('change', { id: r.campaign_id });
+    return { ok: true };
+  }
+
+  // value: interested | not_interested | null. Not interested ends the sequence.
+  setInterest(id, email, value) {
+    const e = String(email || '').toLowerCase();
+    const v = ['interested', 'not_interested'].includes(value) ? value : null;
+    const r = this.db.prepare('UPDATE email_recipients SET interest = ?, updated_at = ? WHERE campaign_id = ? AND email = ?').run(v, this.clock(), Number(id), e);
+    if (!r.changes) return { ok: false, error: 'That person is not in this campaign.' };
+    if (v === 'not_interested') this.cancelFollowups(id, e, 'Not interested');
+    this.emit('change', { id: Number(id) });
+    return { ok: true };
+  }
+
+  // Everything that happened with a lead in a campaign, oldest first:
+  // [{ at, kind, step, subject, text, state, error, account }].
+  timeline(id, email) {
+    const e = String(email || '').toLowerCase();
+    const c = this.row(id);
+    const r = this.db.prepare('SELECT * FROM email_recipients WHERE campaign_id = ? AND email = ?').get(Number(id), e);
+    if (!c || !r) return null;
+    const name = (acc) => (acc ? this.accounts.get(acc)?.email || acc : null);
+    const out = [{ at: r.added_at, kind: 'added', text: `Added to “${c.name}”` }];
+    const firstText = r.sent_text || r.ai_body || (r.state === 'sent' ? null : null);
+    out.push({ at: r.sent_at || r.updated_at, kind: 'email', step: 0, subject: r.sent_subject || r.ai_subject || null, text: firstText, state: r.state, error: r.error, account: name(r.sent_account) });
+    for (const f of this.db.prepare('SELECT * FROM email_followups WHERE campaign_id = ? AND email = ? ORDER BY step').all(c.id, e)) {
+      out.push({ at: f.sent_at || (f.state === 'queued' ? f.due_at : f.updated_at), kind: 'followup', step: f.step, subject: f.subject, text: f.body, state: f.state, error: f.error, account: name(f.sent_account), dueAt: f.state === 'queued' ? f.due_at : null });
+    }
+    for (const k of this.db.prepare('SELECT url, at FROM email_clicks WHERE campaign_id = ? AND email = ? AND bot = 0 ORDER BY at').all(c.id, e)) out.push({ at: k.at, kind: 'click', text: k.url });
+    if (r.replied_at) out.push({ at: r.replied_at, kind: 'reply', subject: r.reply_subject });
+    if (r.auto_reply_at) out.push({ at: r.auto_reply_at, kind: 'auto_reply', text: 'An automatic reply (out of office): the sequence goes on' });
+    if (r.bounced_at) out.push({ at: r.bounced_at, kind: 'bounce', text: r.bounce_reason });
+    if (r.stopped_at) out.push({ at: r.stopped_at, kind: 'stopped', text: 'Sequence stopped by you' });
+    return out.filter((x) => x.at).sort((a, b) => a.at - b.at || (a.step ?? 0) - (b.step ?? 0));
+  }
+
+  // The status of a lead in a campaign, from its records (see recipientRows).
+  static leadStatus(r, fu, optedOut) {
+    if (r.bounced_at) return 'bounced';
+    if (optedOut) return 'unsubscribed';
+    if (r.verify === 'excluded' && r.verifyStatus === 'invalid') return 'invalid';
+    if (r.stopped_at) return 'stopped';
+    if (r.interest === 'interested') return 'interested';
+    if (r.interest === 'not_interested') return 'not_interested';
+    if (r.replied_at) return 'replied';
+    if (r.state === 'sending' || fu?.sending) return 'sending';
+    if (fu?.queued) return 'followup_scheduled';
+    if (r.clicked_at) return 'clicked';
+    if (r.state === 'sent' && fu?.sent && !fu.queued) return 'sequence_completed';
+    if (r.state === 'sent') return 'sent';
+    if (r.state === 'failed') return r.retry_at ? 'retrying' : 'failed';
+    if (r.state === 'uncertain') return 'uncertain';
+    if (r.state === 'skipped') return r.verify_skip ? 'invalid' : 'skipped';
+    if (r.state === 'queued') return r.verify === 'ready' ? 'ready' : 'new';
+    return r.state;
+  }
+
+  // The whole email activity, from the records: { campaigns: {running, paused, completed, ...}, today, scheduled, ... }.
+  dashboard() {
+    const now = this.clock();
+    const day = dayOf(now);
+    const one = (sql, ...p) => this.db.prepare(sql).get(...p).n;
+    const byStatus = {};
+    for (const r of this.db.prepare('SELECT status, COUNT(*) AS n FROM email_campaigns GROUP BY status').all()) byStatus[r.status] = r.n;
+    const sentFirst = one("SELECT COUNT(*) AS n FROM email_recipients WHERE state = 'sent'");
+    const sentFollow = one("SELECT COUNT(*) AS n FROM email_followups WHERE state = 'sent'");
+    const replies = one('SELECT COUNT(*) AS n FROM email_recipients WHERE replied_at IS NOT NULL');
+    const bounced = one('SELECT COUNT(*) AS n FROM email_recipients WHERE bounced_at IS NOT NULL');
+    const unsub = one("SELECT COUNT(*) AS n FROM email_recipients r WHERE r.state = 'sent' AND r.bounced_at IS NULL AND r.email IN (SELECT email FROM email_optouts)");
+    const leads = one('SELECT COUNT(DISTINCT email) AS n FROM email_recipients');
+    return {
+      campaigns: { running: byStatus.running || 0, paused: byStatus.paused || 0, completed: byStatus.completed || 0, draft: byStatus.draft || 0, stopped: byStatus.stopped || 0 },
+      leads,
+      sentToday: one("SELECT COUNT(*) AS n FROM email_recipients WHERE state = 'sent' AND sent_day = ?", day) + one("SELECT COUNT(*) AS n FROM email_followups WHERE state = 'sent' AND sent_day = ?", day),
+      scheduled: one("SELECT COUNT(*) AS n FROM email_recipients r JOIN email_campaigns c ON c.id = r.campaign_id WHERE r.state = 'queued' AND c.status IN ('running', 'paused')"),
+      followupsPending: one("SELECT COUNT(*) AS n FROM email_followups WHERE state = 'queued'"),
+      sent: sentFirst,
+      followupsSent: sentFollow,
+      replies,
+      interested: one("SELECT COUNT(*) AS n FROM email_recipients WHERE interest = 'interested'"),
+      failed: one("SELECT COUNT(*) AS n FROM email_recipients WHERE state = 'failed'") + one("SELECT COUNT(*) AS n FROM email_followups WHERE state = 'failed'"),
+      bounced,
+      unsubscribed: unsub,
+      replyRate: sentFirst ? Math.round((replies / sentFirst) * 1000) / 10 : 0,
+      bounceRate: sentFirst ? Math.round((bounced / sentFirst) * 1000) / 10 : 0,
+      unsubscribeRate: sentFirst ? Math.round((unsub / sentFirst) * 1000) / 10 : 0,
+    };
   }
 
   // --- category campaigns ------------------------------------------------------------
@@ -1024,7 +1587,7 @@ class EmailCampaigns extends EventEmitter {
     if (r.ai_body) return { subject: r.ai_subject || c.subject, body: r.ai_body };
     if (!this.writer) throw Object.assign(new Error('no AI key is saved'), { code: 'no_key' });
     const sender = this.accounts.get(this.senders(c)[0]);
-    const out = await this.writer({ instructions: c.body, subject: '', sender: { name: sender?.senderName || sender?.name || '', email: sender?.email || '' }, business: this.leadDetails(r) });
+    const out = await this.writer({ instructions: c.body, subject: '', sender: { name: sender?.senderName || sender?.name || '', email: sender?.email || '' }, business: this.leadDetails(r), signature: c.config.signature || '' });
     const subject = String(out?.subject || c.subject || '').replace(/[\r\n]+/g, ' ').trim().slice(0, 200);
     const body = String(out?.body || '').trim().slice(0, 8000);
     if (!subject || body.length < 20) throw Object.assign(new Error('the AI did not write a usable email'), { code: 'ai_empty' });
@@ -1038,7 +1601,7 @@ class EmailCampaigns extends EventEmitter {
   lastSentTo(email) {
     const r = this.db.prepare("SELECT r.*, c.name AS campaign_name, c.subject AS c_subject, c.body AS c_body FROM email_recipients r JOIN email_campaigns c ON c.id = r.campaign_id WHERE r.email = ? AND r.state IN ('sent', 'uncertain') ORDER BY r.sent_at DESC LIMIT 1").get(String(email || '').toLowerCase());
     if (!r) return null;
-    const msg = r.ai_body ? { subject: r.ai_subject, text: r.ai_body } : compose({ subject: r.c_subject, body: r.c_body }, { name: r.name, business: r.business, email: r.email });
+    const msg = r.sent_text ? { subject: r.sent_subject, text: r.sent_text } : r.ai_body ? { subject: r.ai_subject, text: r.ai_body } : compose({ subject: r.c_subject, body: r.c_body }, { name: r.name, business: r.business, email: r.email });
     return { campaignId: r.campaign_id, campaignName: r.campaign_name, leadId: r.lead_id, name: r.name || r.business || null, business: r.business, subject: msg.subject, text: String(msg.text).split('\n--\n')[0] };
   }
 
@@ -1053,6 +1616,8 @@ class EmailCampaigns extends EventEmitter {
     for (const id of [...(ids || [])].reverse()) {
       const r = this.db.prepare("SELECT r.email, r.campaign_id AS campaignId, c.name AS campaignName FROM email_recipients r JOIN email_campaigns c ON c.id = r.campaign_id WHERE r.message_id = ? AND r.state IN ('sent', 'uncertain') LIMIT 1").get(id);
       if (r) return { ...r, test: false };
+      const f = this.db.prepare("SELECT f.email, f.campaign_id AS campaignId, c.name AS campaignName, f.step FROM email_followups f JOIN email_campaigns c ON c.id = f.campaign_id WHERE f.message_id = ? AND f.state IN ('sent', 'uncertain') LIMIT 1").get(id);
+      if (f) return { ...f, test: false };
       const t = this.db.prepare('SELECT t.email, t.campaign_id AS campaignId, c.name AS campaignName, t.subject, t.text FROM email_test_sends t LEFT JOIN email_campaigns c ON c.id = t.campaign_id WHERE t.message_id = ?').get(id);
       if (t) return { ...t, test: true };
     }
@@ -1075,6 +1640,9 @@ class EmailCampaigns extends EventEmitter {
       this.db.prepare('UPDATE email_recipients SET replied_at = ?, reply_subject = ? WHERE campaign_id = ? AND email = ?').run(at, String(subject).slice(0, 200), r.id, e);
       this.log(r.id, 'info', `${e} replied${subject ? `: “${String(subject).slice(0, 80)}”` : ''}`);
     }
+    // A reply ends the lead's follow-ups.
+    const cancelled = this.cancelFollowups(r.id, e, 'Replied');
+    if (cancelled) this.log(r.id, 'info', `${e}: ${cancelled} follow-up${cancelled === 1 ? '' : 's'} cancelled (replied)`);
     let unsubscribed = false;
     if (unsubscribe && !this.isOptedOut(e)) {
       this.optOut(e, 'Replied asking to unsubscribe');
@@ -1083,6 +1651,43 @@ class EmailCampaigns extends EventEmitter {
     }
     this.emit('change', { id: r.id });
     return { ok: true, first, unsubscribed, campaignId: r.id };
+  }
+
+  // An automatic reply (out of office, autoresponder): noted on the lead;
+  // its sequence goes on (it is not a reply from a person).
+  recordAutoReply(email, { campaignId = null, at = this.clock() } = {}) {
+    const e = String(email || '').trim().toLowerCase();
+    const r = campaignId ? { id: Number(campaignId) } : this.db.prepare("SELECT campaign_id AS id FROM email_recipients WHERE email = ? AND state IN ('sent', 'uncertain') ORDER BY sent_at DESC LIMIT 1").get(e);
+    if (!r) return { ok: false };
+    const n = this.db.prepare('UPDATE email_recipients SET auto_reply_at = ? WHERE campaign_id = ? AND email = ?').run(at, r.id, e).changes;
+    if (n) this.log(r.id, 'info', `${e}: automatic reply (out of office); the sequence goes on`);
+    this.emit('change', { id: r.id });
+    return { ok: Boolean(n), campaignId: r.id };
+  }
+
+  // A bounce (the mail server's delivery failure report, or a refusal while
+  // sending). Permanent: the lead is marked bounced, gets no more emails
+  // (in any campaign: it goes on the suppression list) and its address is
+  // marked invalid. Temporary: only noted.
+  recordBounce({ email, messageId = null, campaignId = null, permanent = true, reason = '', at = this.clock() }) {
+    const match = messageId ? this.sentByMessageId([messageId]) : null;
+    const e = String(match?.email || email || '').trim().toLowerCase();
+    if (!e) return { ok: false };
+    const r = match ? { id: match.campaignId } : campaignId ? { id: Number(campaignId) } : this.db.prepare("SELECT campaign_id AS id FROM email_recipients WHERE email = ? AND state IN ('sent', 'uncertain', 'failed') ORDER BY COALESCE(sent_at, updated_at) DESC LIMIT 1").get(e);
+    if (!r) return { ok: false };
+    const why = String(reason || 'delivery failed').replace(/\s+/g, ' ').trim().slice(0, 300);
+    if (!permanent) {
+      this.log(r.id, 'warn', `${e}: temporary delivery problem (${why})`);
+      return { ok: true, campaignId: r.id, permanent: false };
+    }
+    const first = this.db.prepare('UPDATE email_recipients SET bounced_at = ?, bounce_reason = ? WHERE campaign_id = ? AND email = ? AND bounced_at IS NULL').run(at, why, r.id, e).changes;
+    this.cancelFollowups(r.id, e, 'Bounced');
+    if (!this.isOptedOut(e)) this.db.prepare('INSERT INTO email_optouts (email, reason, at) VALUES (?, ?, ?) ON CONFLICT (email) DO NOTHING').run(e, `Bounced: ${why}`.slice(0, 300), at);
+    this.db.prepare("UPDATE email_recipients SET state = 'skipped', error = ?, updated_at = ? WHERE email = ? AND state IN ('queued', 'failed')").run(`Bounced: ${why}`.slice(0, 300), at, e);
+    this.verification?.markBounced?.(e, why);
+    if (first) this.log(r.id, 'warn', `${e} bounced (${why}): no more emails to it`);
+    this.emit('change', { id: r.id });
+    return { ok: true, campaignId: r.id, permanent: true, first: Boolean(first) };
   }
 
   // Links in this campaign's emails are tracked now.
@@ -1158,6 +1763,17 @@ class EmailCampaigns extends EventEmitter {
       trackClicks: c.config.trackClicks !== false,
       tracking: this.tracking(c),
       verify: this.verifyCounts(c.id),
+      followups: c.config.followups || FOLLOWUP_DEFAULTS,
+      followupCounts: this.followupCounts(c.id),
+      schedule: c.config.schedule || SCHEDULE_DEFAULTS,
+      // Outside the sending days and hours: when they start again.
+      windowOpensAt: c.status === 'running' && !inWindow(c.config.schedule, this.clock()) ? nextWindow(c.config.schedule, this.clock()) : null,
+      delayMaxSeconds: c.config.delayMaxSeconds || null,
+      maxPerDay: c.config.maxPerDay || null,
+      signature: c.config.signature || '',
+      bounced: this.db.prepare('SELECT COUNT(*) AS n FROM email_recipients WHERE campaign_id = ? AND bounced_at IS NOT NULL').get(c.id).n,
+      interested: this.db.prepare("SELECT COUNT(*) AS n FROM email_recipients WHERE campaign_id = ? AND interest = 'interested'").get(c.id).n,
+      unsubscribed: this.db.prepare("SELECT COUNT(*) AS n FROM email_recipients WHERE campaign_id = ? AND email IN (SELECT email FROM email_optouts) AND bounced_at IS NULL").get(c.id).n,
       nextDueAt: c.nextDueAt,
       createdAt: c.createdAt,
       startedAt: c.startedAt,
@@ -1186,18 +1802,37 @@ class EmailCampaigns extends EventEmitter {
   // The recipients (waiting ones in sending order), each with its email's verification.
   recipientRows(id, limit) {
     const v = this.verification;
-    const cols = 'r.email, r.lead_id AS leadId, r.name, r.business, r.state, r.attempts, r.error, r.sent_at AS sentAt, r.retry_at AS retryAt, r.replied_at AS repliedAt, r.clicked_at AS clickedAt, r.clicks, r.priority, r.ai_subject AS aiSubject, r.ai_body AS aiBody';
+    const cols = 'r.email, r.lead_id AS leadId, r.name, r.business, r.state, r.attempts, r.error, r.sent_at AS sentAt, r.retry_at AS retryAt, r.replied_at AS repliedAt, r.clicked_at AS clickedAt, r.clicks, r.priority, r.ai_subject AS aiSubject, r.ai_body AS aiBody, r.bounced_at AS bouncedAt, r.bounce_reason AS bounceReason, r.stopped_at AS stoppedAt, r.interest, r.auto_reply_at AS autoReplyAt, r.verify_skip AS verifySkip';
     const verify = v ? ', v.status AS verifyStatus, v.reason AS verifyReason, v.state AS verifyState, v.expires_at AS verifyExpires, v.role AS verifyRole, v.next_at AS verifyNext' : '';
     const join = v ? ' LEFT JOIN email_verifications v ON v.email = r.email' : '';
-    const rows = this.db.prepare(`SELECT ${cols}${verify} FROM email_recipients r${join} WHERE r.campaign_id = ? ORDER BY CASE r.state WHEN 'sending' THEN 0 WHEN 'failed' THEN 1 WHEN 'uncertain' THEN 2 WHEN 'queued' THEN 3 ELSE 4 END, CASE WHEN r.state = 'queued' THEN -r.priority ELSE 0 END, CASE WHEN r.state = 'queued' THEN r.added_at ELSE -r.updated_at END, r.email LIMIT ?`).all(id, limit);
-    if (!v) return rows;
+    const base = this.db.prepare(`SELECT ${cols}${verify} FROM email_recipients r${join} WHERE r.campaign_id = ? ORDER BY CASE r.state WHEN 'sending' THEN 0 WHEN 'failed' THEN 1 WHEN 'uncertain' THEN 2 WHEN 'queued' THEN 3 ELSE 4 END, CASE WHEN r.state = 'queued' THEN -r.priority ELSE 0 END, CASE WHEN r.state = 'queued' THEN r.added_at ELSE -r.updated_at END, r.email LIMIT ?`).all(id, limit);
+    // Follow-ups per lead: how many sent, the next one and when.
+    const fu = new Map();
+    for (const f of this.db.prepare('SELECT email, state, step, due_at FROM email_followups WHERE campaign_id = ?').all(id)) {
+      const x = fu.get(f.email) || { sent: 0, queued: 0, sending: 0, nextAt: null, nextStep: null };
+      if (f.state === 'sent' || f.state === 'uncertain') x.sent++;
+      if (f.state === 'sending') x.sending++;
+      if (f.state === 'queued') {
+        x.queued++;
+        if (x.nextAt == null || f.due_at < x.nextAt) [x.nextAt, x.nextStep] = [f.due_at, f.step];
+      }
+      fu.set(f.email, x);
+    }
+    const out = (r) => {
+      const f = fu.get(r.email);
+      const row = { ...r, followupsSent: f?.sent || 0, nextFollowupAt: f?.nextAt || null, nextFollowupStep: f?.nextStep || null };
+      row.status = EmailCampaigns.leadStatus({ ...row, replied_at: r.repliedAt, bounced_at: r.bouncedAt, stopped_at: r.stoppedAt, clicked_at: r.clickedAt, retry_at: r.retryAt, verify_skip: r.verifySkip }, f, this.isOptedOut(r.email));
+      return row;
+    };
+    const rows = base;
+    if (!v) return rows.map(out);
     const now = this.clock();
     const allowed = v.allowed();
     // verify: ready (passed, may be sent) | checking | excluded | expired (checked again before sending).
     return rows.map((r) => {
       const fresh = r.verifyStatus && r.verifyExpires > now;
       const verify = !r.verifyStatus || r.verifyState !== 'done' ? 'checking' : !fresh ? 'expired' : allowed.includes(r.verifyStatus) ? 'ready' : 'excluded';
-      return { ...r, verifyRole: Boolean(r.verifyRole), verify };
+      return out({ ...r, verifyRole: Boolean(r.verifyRole), verify });
     });
   }
 
@@ -1225,12 +1860,12 @@ class EmailCampaigns extends EventEmitter {
       if (!r) return { ok: false, error: 'Add recipients first: the AI writes for a real business.' };
       try {
         const t = await this.aiText({ ...c, subject: subject ?? c.subject, body: body ?? c.body }, { ...r, ai_body: null }, { save: false });
-        return { ok: true, to: r.email, ai: true, ...compose(t, { name: r.name, business: r.business, email: r.email }) };
+        return { ok: true, to: r.email, ai: true, ...compose(t, { name: r.name, business: r.business, email: r.email }, c.config.signature) };
       } catch (err) {
         return { ok: false, error: `The AI could not write it: ${err.message}.` };
       }
     }
-    const msg = compose({ subject: subject ?? c.subject, body: body ?? c.body }, { name: r?.name || null, business: r?.business || null, email: r?.email || 'recipient@example.com' });
+    const msg = compose({ subject: subject ?? c.subject, body: body ?? c.body }, { name: r?.name || null, business: r?.business || null, email: r?.email || 'recipient@example.com' }, c.config.signature);
     return { ok: true, to: r?.email || null, ...msg };
   }
 }

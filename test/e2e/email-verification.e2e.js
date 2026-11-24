@@ -93,7 +93,7 @@ test('Email verification: background checks, counts, Leads filter, only valid em
   const recipients = win.getByRole('region', { name: 'Recipients' });
   await recipients.getByLabel('Recipients by verification').waitFor();
   const down = recipients.locator('tr', { hasText: 'z@unreachable.test' });
-  assert.equal(await down.locator('.em-state').first().textContent(), 'Waiting');
+  assert.equal(await down.locator('.em-state').first().textContent(), 'Verifying', 'still being verified (asked again later)');
   assert.match(await down.locator('.em-vbadge').textContent(), /Checking again later|Verifying/);
   await win.screenshot({ path: path.join(os.tmpdir(), 'lf-verify.png') });
 

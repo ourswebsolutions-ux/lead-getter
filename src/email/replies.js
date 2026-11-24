@@ -20,6 +20,7 @@ const FIRST = 20_000;
 const SETTLE = 2_000; // a new message: read after this (several arriving together: one read)
 const LOOK_BACK = 14 * 24 * 3600_000;
 const STATE_KEY = 'email.replies';
+const BOUNCES_KEY = 'email.bounces'; // bounce reports already counted (Message-IDs)
 
 // An unsubscribe request, in the subject or the reply's own text (quoted
 // earlier messages are ignored).
@@ -38,6 +39,38 @@ function ownText(text) {
     out.push(l);
   }
   return out.join('\n').trim().slice(0, 2000);
+}
+
+// An automatic reply (out of office, autoresponder, vacation): by the
+// headers mail systems set on them (RFC 3834 Auto-Submitted, Microsoft's
+// and others'), or a subject that says so. Not a reply from a person.
+function isAutoReply(headers = {}, subject = '') {
+  const h = (k) => String(headers[k] ?? '').toLowerCase();
+  if (/auto-(replied|generated|notified)/.test(h('auto-submitted'))) return true;
+  if (h('x-autoreply') || h('x-autorespond') || h('x-autoresponder')) return true;
+  if (/auto_reply|autoreply/.test(h('precedence')) || /oof|autoreply/i.test(h('x-auto-response-suppress')) && /out of office|automatic reply/i.test(subject)) return true;
+  return /^\s*(automatic reply|auto(matic)?[- ]?(reply|response|antwort)|autoreply|out of (the )?office|away from (the )?office|on (vacation|leave|holiday)|abwesenheit|réponse automatique|respuesta automática|risposta automatica|ooo\b)|\bout of (the )?office\b/i.test(String(subject || ''));
+}
+
+// A delivery failure report (bounce) from a mail server: { email, messageId,
+// permanent, reason }, or null. The failed address is read from the report
+// (Final-Recipient, or the words of common mail systems); the email it is
+// about by the Message-ID of the original message inside it.
+function parseBounce(m) {
+  const raw = String(m.raw || m.text || '');
+  const subject = String(m.subject || '');
+  const dsn = /mailer-daemon|postmaster|mail delivery (sub)?system/i.test(`${m.from} ${m.fromName || ''}`) || /report-type="?delivery-status/i.test(raw) || /^\s*(undeliverable|undelivered mail|delivery status notification|mail delivery failed|returned mail|failure notice|delivery failure|message not delivered|address not found|delivery has failed|non[- ]?delivery)/i.test(subject);
+  if (!dsn) return null;
+  const pick = (re) => re.exec(raw)?.[1]?.replace(/[>.,;]+$/, '').toLowerCase() || null;
+  const email = pick(/Final-Recipient:\s*rfc822;\s*<?([^\s<>;]+@[^\s<>;]+)/i) || pick(/Original-Recipient:\s*rfc822;\s*<?([^\s<>;]+@[^\s<>;]+)/i) || pick(/(?:wasn'?t|was not|couldn'?t be|could not be|failed to be) delivered to\s*<?([^\s<>]+@[^\s<>]+)/i) || pick(/<([^\s<>]+@[^\s<>]+)>:?\s*(?:host|recipient|user|5\d\d|said)/i) || pick(/^\s*([^\s<>@]+@[^\s<>@]+\.[a-z]{2,})\s*$/im);
+  const body = raw.slice(raw.search(/\r?\n\r?\n/) + 1);
+  const messageId = /^Message-ID:\s*(<[^>\s]+>)/im.exec(body)?.[1] || null;
+  const status = /^Status:\s*([245])\.\d{1,3}\.\d{1,3}/im.exec(raw)?.[1];
+  const delay = /\(delay\)|delayed|will (keep trying|retry)|not yet been delivered/i.test(`${subject} ${raw.slice(0, 4000)}`);
+  const permanent = status ? status === '5' : !delay && /\b5\.\d\.\d+\b|\b55\d\b|permanent|does not exist|doesn'?t exist|user unknown|address not found|no such user|mailbox unavailable|recipient rejected|invalid recipient/i.test(raw);
+  const reason = (/^Diagnostic-Code:\s*[^;\n]*;\s*([^\n]+)/im.exec(raw)?.[1] || (permanent ? 'the address does not accept email' : 'a temporary delivery problem')).replace(/\s+/g, ' ').trim().slice(0, 200);
+  if (!email && !messageId) return null;
+  return { email, messageId, permanent, reason };
 }
 
 // The Message-IDs a message answers (its In-Reply-To and References).
@@ -70,12 +103,18 @@ async function* imapInbox({ account, pass }, since, { allowInsecure = false } = 
         const from = msg.envelope?.from?.[0]?.address || '';
         let text = '';
         let references = null;
+        const headers = {};
         try {
           const parsed = await simpleParser(msg.source);
           text = parsed.text || '';
           references = parsed.references || null;
+          for (const k of ['auto-submitted', 'x-autoreply', 'x-autorespond', 'x-autoresponder', 'precedence', 'x-auto-response-suppress']) {
+            const v = parsed.headers?.get(k);
+            if (v != null) headers[k] = typeof v === 'object' ? v.value || JSON.stringify(v) : String(v);
+          }
         } catch {}
-        yield { from, subject: msg.envelope?.subject || '', text, date: msg.envelope?.date ? new Date(msg.envelope.date).getTime() : null, messageId: msg.envelope?.messageId || `uid:${msg.uid}`, inReplyTo: msg.envelope?.inReplyTo || null, references };
+        const subject = msg.envelope?.subject || '';
+        yield { from, fromName: msg.envelope?.from?.[0]?.name || '', subject, text, raw: msg.source ? msg.source.toString('utf8') : '', auto: isAutoReply(headers, subject), date: msg.envelope?.date ? new Date(msg.envelope.date).getTime() : null, messageId: msg.envelope?.messageId || `uid:${msg.uid}`, inReplyTo: msg.envelope?.inReplyTo || null, references };
       }
     } finally {
       lock.release();
@@ -256,9 +295,23 @@ class ReplyWatcher {
     const started = this.clock();
     let replies = 0;
     let unsubscribed = 0;
+    let bounces = 0;
     try {
       for await (const m of this.openInbox(login, since)) {
         const from = String(m.from || '').trim().toLowerCase();
+        // A delivery failure report about one of our emails: a bounce.
+        const bounce = parseBounce(m);
+        if (bounce) {
+          const seenB = this.state.get(BOUNCES_KEY) || [];
+          if (!seenB.includes(m.messageId)) {
+            const r = this.campaigns.recordBounce?.(bounce);
+            if (r?.ok) {
+              bounces++;
+              this.state.set(BOUNCES_KEY, [...seenB, m.messageId].slice(-1000));
+            }
+          }
+          continue;
+        }
         // The email it answers: one of ours (campaign or test), else its sender.
         const match = this.campaigns.sentByMessageId?.(answers(m)) || null;
         if (!match && (!sent.has(from) || from === own)) {
@@ -266,6 +319,11 @@ class ReplyWatcher {
           continue;
         }
         const recipient = match?.email || from;
+        // An automatic reply (out of office): noted; the sequence goes on, no Inbox alert.
+        if (m.auto) {
+          if (!match?.test) this.campaigns.recordAutoReply?.(recipient, { campaignId: match?.campaignId || null, at: m.date || this.clock() });
+          continue;
+        }
         // A reply to a test email (the user's own address) never unsubscribes anyone.
         const unsubscribe = !match?.test && isUnsubscribe(m.subject, m.text);
         const r = match?.test ? {} : this.campaigns.recordReply(recipient, { subject: m.subject, unsubscribe, at: m.date || this.clock() });
@@ -277,8 +335,8 @@ class ReplyWatcher {
       }
       this.accounts.setImapStatus(accountId, 'ok', 'Replies checked');
       this.state.set(STATE_KEY, { ...(this.state.get(STATE_KEY) || {}), [accountId]: started });
-      if (replies || unsubscribed) this.log(`email replies: ${replies} new, ${unsubscribed} unsubscribed`);
-      return { replies, unsubscribed };
+      if (replies || unsubscribed || bounces) this.log(`email replies: ${replies} new, ${unsubscribed} unsubscribed, ${bounces} bounced`);
+      return { replies, unsubscribed, ...(bounces ? { bounces } : {}) };
     } catch (err) {
       const why = /auth|login|credentials|invalid/i.test(`${err.authenticationFailed ? 'auth' : ''} ${err.responseText || err.message}`) ? 'the inbox rejected the login (IMAP may be off for this account)' : /ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|timeout/i.test(`${err.code} ${err.message}`) ? 'the inbox server could not be reached' : 'the inbox could not be read';
       this.accounts.setImapStatus(accountId, 'failed', why);
@@ -288,4 +346,4 @@ class ReplyWatcher {
   }
 }
 
-module.exports = { ReplyWatcher, imapInbox, watchInbox, isUnsubscribe, ownText, answers };
+module.exports = { ReplyWatcher, imapInbox, watchInbox, isUnsubscribe, isAutoReply, parseBounce, ownText, answers };

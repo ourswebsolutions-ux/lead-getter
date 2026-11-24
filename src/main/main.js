@@ -3277,7 +3277,21 @@ function initEmailAndAI() {
         }
       : {}),
   });
-  registerEmailIpc({ handle, email, requirePlan, pickFiles, saveFile, pickTable, send, listCategories: () => store.listCategories().categories });
+  registerEmailIpc({
+    handle,
+    email,
+    requirePlan,
+    pickFiles,
+    saveFile,
+    pickTable,
+    send,
+    listCategories: () => store.listCategories().categories,
+    // A lead's email conversation in the Inbox (for its timeline).
+    inboxMessages: (address) => {
+      const t = inbox && store.db.prepare("SELECT id FROM inbox_threads WHERE channel = 'email' AND address = ?").get(address);
+      return t ? inbox.messages(t.id).filter((m) => m.via !== 'campaign') : [];
+    },
+  });
   // Images and documents for WhatsApp campaigns (and any other attachment).
   handle('files:pick', () => pickFiles({ title: 'Attach images or documents' }));
   initInbox();
