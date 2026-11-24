@@ -3,8 +3,9 @@
 // Email campaign sequences and sending schedules (used by campaigns.js):
 //   follow-ups  steps sent after the first email when the lead has not
 //               replied: { on, steps: [{ days, subject, body }] } (days after
-//               the previous email; an empty subject replies in the same
-//               thread, "Re: ...")
+//               the previous email). Each is written by the AI from the
+//               earlier email(s), in the same thread ("Re: ..."); subject and
+//               body are optional extra instructions for that step.
 //   schedule    the days and hours a campaign may send, in a time zone:
 //               { on, days: [0-6, Sunday 0], start, end (minutes of the day), tz }
 //   signature   the sender's sign-off every email ends with (never replaced by the AI)
@@ -41,8 +42,7 @@ function checkFollowups(raw) {
     out.push({ days, subject, body });
   }
   const on = raw.on === true;
-  if (on && !out.length) return { ok: false, error: 'Add a follow-up, or turn follow-ups off.' };
-  if (on && out.some((s) => !s.body)) return { ok: false, error: `Write follow-up ${out.findIndex((s) => !s.body) + 1} (its email, or its prompt for the AI).` };
+  if (on && !out.length) return { ok: false, error: 'Add a follow-up day, or turn follow-ups off.' };
   return { ok: true, value: { on, steps: out } };
 }
 

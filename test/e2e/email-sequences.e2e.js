@@ -17,7 +17,7 @@ const { unlock, activationEnv } = require('./helpers');
 
 const root = path.join(__dirname, '..', '..');
 
-test('Email sequences: follow-ups, schedule, signature, lead status and history, stop, duplicate, dashboard', { timeout: 300_000 }, async (t) => {
+test('Email sequences: a category campaign with follow-up days, schedule, its own email checks, hidden recipients, stop', { timeout: 300_000 }, async (t) => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lf-seq-e2e-'));
   const userData = path.join(tmp, 'app');
   fs.mkdirSync(userData);
@@ -52,27 +52,29 @@ test('Email sequences: follow-ups, schedule, signature, lead status and history,
   await win.getByRole('region', { name: 'Email dashboard' }).getByText('Follow-ups scheduled').waitFor();
 
   const acc = await win.evaluate((port) => window.leadFinder.emailAccountAdd({ name: 'Local', senderName: 'Ali', email: 'sender@example.com', host: '127.0.0.1', port, username: 'sender@example.com', password: 'pw', encryption: 'none', imapOn: false }), smtp.port);
-  const camp = await win.evaluate(() => window.leadFinder.emailCreate('Agencies outreach'));
-  await win.evaluate(([id, a]) => window.leadFinder.emailUpdate(id, { accountIds: [a], subject: 'Website for {business}', body: 'Hello,\n\nWe build websites.' }), [camp.id, acc.account.id]);
-  await win.getByRole('region', { name: 'Campaign list' }).getByText('Agencies outreach').click();
-  const compose = win.getByRole('region', { name: 'Email', exact: true });
-  await compose.getByLabel('Signature').fill('Best,\nAli');
-  await compose.getByRole('button', { name: 'Save', exact: true }).click();
+  // The category's campaign (the only kind made in the window now).
+  const key = (await win.evaluate(() => window.leadFinder.emailCategories())).categories.find((c) => c.name === 'Agencies').key;
+  const camp = await win.evaluate((k) => window.leadFinder.emailCategoryCampaign(k), key);
+  await win.evaluate(([id, a]) => window.leadFinder.emailUpdate(id, { accountIds: [a], subject: 'Website for {business}', body: 'Hello,\n\nWe build websites.\n\nBest,\nAli' }), [camp.id, acc.account.id]);
+  const cats = win.getByRole('region', { name: 'Category campaigns' });
+  await cats.getByText('Agencies', { exact: true }).click();
+  // Email verification: this category's checks only.
+  const ver = win.getByRole('region', { name: 'Email verification' });
+  await ver.getByText(/Agencies: 2 emails/).waitFor({ timeout: 30_000 });
+  await ver.getByRole('group', { name: 'Verification counts' }).getByText('Valid').locator('..').getByText('2', { exact: true }).waitFor({ timeout: 30_000 });
+  assert.equal(await win.getByRole('region', { name: 'Campaign list' }).count(), 0, 'no list of own campaigns');
+  assert.equal(await win.getByRole('region', { name: 'Campaign history' }).count(), 0, 'no history list');
 
-  // Follow-ups: two steps.
+  // Follow-ups: a switch and days (day 3, 6, 10 at first).
   const fu = win.getByRole('region', { name: 'Follow-ups' });
   await fu.getByRole('switch', { name: 'Send follow-ups' }).click();
-  await fu.getByRole('button', { name: 'Add follow-up' }).click();
-  await fu.getByLabel('Follow-up 1 email').fill('Just following up, {name}.');
-  await fu.getByRole('button', { name: 'Add follow-up' }).click();
-  await fu.getByLabel('Follow-up 2: days to wait').fill('4');
-  await fu.getByLabel('Follow-up 2 email').fill('Last note.');
-  await fu.getByRole('listitem', { name: 'Follow-up 2' }).getByText('Day 7').waitFor();
-  await fu.getByRole('button', { name: 'Save follow-ups' }).click();
-  await win.getByText('Follow-ups saved: 2 steps.').waitFor();
+  await win.getByText('Follow-ups on: day 3, day 6, day 10.').waitFor();
+  await fu.getByLabel('Follow-up 3 day').fill('12');
+  await fu.getByRole('button', { name: 'Save', exact: true }).click();
+  await win.getByText('Follow-ups on: day 3, day 6, day 12.').waitFor();
   const saved = await win.evaluate((id) => window.leadFinder.emailCampaign(id), camp.id);
-  assert.deepEqual(saved.campaign.followups.steps.map((x) => x.days), [2, 4]);
-  assert.equal(saved.campaign.signature, 'Best,\nAli');
+  assert.deepEqual(saved.campaign.followups.steps.map((x) => x.days), [2, 3, 6], 'kept as days after the previous email');
+  assert.equal(await fu.locator('textarea').count(), 0, 'no follow-up text to write: the AI writes them');
 
   // Schedule: on, every day, all day (so this test can send now), Karachi time.
   const sch = win.getByRole('region', { name: 'Sending schedule' });
@@ -86,41 +88,23 @@ test('Email sequences: follow-ups, schedule, signature, lead status and history,
   const sc = (await win.evaluate((id) => window.leadFinder.emailCampaign(id), camp.id)).campaign.schedule;
   assert.deepEqual([sc.on, sc.days, sc.start, sc.end, sc.tz], [true, [0, 1, 2, 3, 4, 5, 6], 0, 1439, 'Asia/Karachi']);
 
-  // Sent: the first emails, each lead's follow-up 1 scheduled.
-  const added = await win.evaluate((id) => window.leadFinder.emailAddLeads(id, {}), camp.id);
-  assert.equal(added.added, 2, JSON.stringify(added));
-  const started = await win.evaluate((id) => window.leadFinder.emailStart(id), camp.id);
-  assert.ok(started.ok, started.error);
+  // Switched on: the first emails, each lead's follow-up 1 scheduled.
+  await cats.getByRole('switch', { name: 'Agencies email campaign' }).click();
   await until(() => smtp.messages.length >= 1, 30_000, 'the first email');
   assert.match(smtp.messages[0].text, /We build websites\.\n\nBest,\nAli/);
   const rows = win.getByRole('region', { name: 'Recipients' });
+  assert.equal(await rows.locator('tr').count(), 0, 'the recipients are hidden until asked for');
+  await rows.getByRole('button', { name: /^Show \(/ }).click();
   const first = smtp.messages[0].to[0];
   const row = rows.locator('tr', { hasText: first });
   await row.getByText('Follow-up scheduled').waitFor({ timeout: 15_000 });
-  await row.getByText(/follow-up 1/).waitFor();
-  // Its history: the first email, then follow-up 1 scheduled.
-  await row.getByRole('button', { name: `History of ${first}` }).click();
-  const hist = win.getByRole('dialog', { name: 'Email history' });
-  await hist.getByText('First email').waitFor();
-  await hist.getByText('Follow-up 1').waitFor();
-  await hist.getByText(/scheduled for/).waitFor();
-  await win.screenshot({ path: path.join(os.tmpdir(), 'lf-seq-history.png') });
-  await hist.getByRole('button', { name: 'Close' }).click();
+  await row.getByText(/Next: follow-up 1/).waitFor();
   // Stopped by hand.
   await row.getByRole('button', { name: `Stop ${first}` }).click();
   await row.getByText('Stopped', { exact: true }).waitFor();
   const t1 = (await win.evaluate((id) => window.leadFinder.emailCampaign(id), camp.id)).campaign;
   assert.ok(t1.followupCounts.cancelled >= 1);
   await win.screenshot({ path: path.join(os.tmpdir(), 'lf-seq.png'), fullPage: true });
-
-  // A copy: the same follow-ups and schedule, as a draft.
-  await win.getByRole('button', { name: 'Duplicate campaign' }).click();
-  await win.getByText('“Agencies outreach (copy)” created (a draft).').waitFor();
-  const all = (await win.evaluate(() => window.leadFinder.emailCampaigns())).campaigns;
-  const copy = all.find((c) => c.name === 'Agencies outreach (copy)');
-  assert.deepEqual(copy.followups.steps.map((x) => x.days), [2, 4]);
-  assert.equal(copy.status, 'draft');
   const dash = (await win.evaluate(() => window.leadFinder.emailDashboard())).dashboard;
   assert.ok(dash.sent >= 1);
-  assert.ok(dash.followupsPending >= 0);
 });

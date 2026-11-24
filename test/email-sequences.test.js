@@ -30,7 +30,10 @@ const LEADS = [
   { id: 3, name: 'Bright Homes', email: 'sara@good.test', categoryId: 1 },
 ];
 
-async function setup(t, { start = Date.parse('2026-11-23T05:00:00Z'), writer = null } = {}) {
+// The AI in these tests: a follow-up written from what it is given.
+const testWriter = async (x) => ({ subject: x.subject, body: `Just following up on my email, ${(x.business?.contact_name || 'there').split(' ')[0]}.` });
+
+async function setup(t, { start = Date.parse('2026-11-23T05:00:00Z'), writer = testWriter } = {}) {
   const smtp = await startSmtp();
   const mx = await startMx({ exists: (e) => !e.includes('nouser') });
   const state = memState();
@@ -284,9 +287,10 @@ test('Settings are checked; a copy keeps the sequence; account switches and dail
   await h.run(DAY + 10 * MIN, 10 * MIN);
   assert.equal(h.to('zahid@good.test').length, 2);
   const fw = writes.at(-1);
-  assert.match(fw.instructions, /^Remind them kindly\./);
-  assert.match(fw.instructions, /follow-up 1/);
-  assert.match(fw.instructions, /AI follow-up for Zahid Properties|Offer a website|AI/);
+  assert.match(fw.instructions, /Offer a website\./, 'the campaign’s prompt');
+  assert.match(fw.instructions, /For this follow-up: Remind them kindly\./);
+  assert.match(fw.instructions, /This is follow-up 1/);
+  assert.match(fw.instructions, /Earlier email[^]*AI follow-up for Zahid Properties/, 'the email it follows up on');
   assert.equal(fw.signature, 'Best,\nAli');
   // An account switched off is never used; a daily limit across campaigns.
   assert.ok(h.accounts.setLimits(h.acc.id, { enabled: false }).ok);

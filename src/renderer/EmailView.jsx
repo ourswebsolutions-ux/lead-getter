@@ -44,32 +44,41 @@ const zones = (() => {
   }
 })();
 
-// The follow-ups of a campaign: steps after the first email, each sent only
-// if the lead has not replied (saved on its own: also while it runs).
+// Follow-ups: a switch and the days they go on (day 1 = the first email).
+// Each is written by the AI from the earlier email and sent by itself, only
+// to leads who have not replied (saved on its own: also while it runs).
 function FollowUps({ snap, notify, reload }) {
-  const [f, setF] = useState(() => JSON.parse(JSON.stringify(snap.followups || { on: false, steps: [] })));
+  // Steps are kept as days after the previous email; shown as days of the sequence.
+  const toDays = (steps) => {
+    let d = 1;
+    return steps.map((x) => (d += Number(x.days) || 0));
+  };
+  const key = JSON.stringify(snap.followups || {});
+  const [on, setOn] = useState(Boolean(snap.followups?.on));
+  const [days, setDays] = useState(() => toDays(snap.followups?.steps || []));
   const [dirty, setDirty] = useState(false);
-  const key = JSON.stringify(snap.followups);
   useEffect(() => {
-    if (!dirty) setF(JSON.parse(key || '{"on":false,"steps":[]}'));
+    if (dirty) return;
+    const f = JSON.parse(key || '{}');
+    setOn(Boolean(f.on));
+    setDays(toDays(f.steps || []));
   }, [key, dirty]);
-  const edit = (fn) => {
-    setF((x) => {
-      const y = JSON.parse(JSON.stringify(x));
-      fn(y);
-      return y;
-    });
+  const change = (fn) => {
+    fn();
     setDirty(true);
   };
-  async function save() {
-    const r = await api.emailUpdate(snap.id, { followups: { on: f.on, steps: f.steps.map((x) => ({ ...x, days: Number(x.days) })) } });
+  async function save(nextOn = on, list = days) {
+    const nums = list.map(Number);
+    if (nextOn && !nums.length) return notify({ type: 'error', text: 'Add a follow-up day.' });
+    if (nums.some((d, i) => !Number.isFinite(d) || d <= (i ? nums[i - 1] : 1) || d > 120)) return notify({ type: 'error', text: 'Each follow-up day must come after the one before (the first email is day 1).' });
+    const steps = nums.map((d, i) => ({ days: d - (i ? nums[i - 1] : 1), subject: '', body: '' }));
+    const r = await api.emailUpdate(snap.id, { followups: { on: nextOn, steps } });
     if (!r.ok) return notify({ type: 'error', text: r.error });
     setDirty(false);
-    notify({ type: 'ok', text: f.on ? `Follow-ups saved: ${f.steps.length} step${f.steps.length === 1 ? '' : 's'}.` : 'Follow-ups off.' });
+    notify({ type: 'ok', text: nextOn ? `Follow-ups on: day ${nums.join(', day ')}.` : 'Follow-ups off.' });
     reload();
   }
   const c = snap.followupCounts || {};
-  let day = 1;
   return (
     <section className="panel em-seq" aria-label="Follow-ups">
       <div className="or-card-head">
@@ -81,47 +90,52 @@ function FollowUps({ snap, notify, reload }) {
             {c.sent} sent · {c.pending} scheduled{c.nextAt ? ` · next ${when(c.nextAt)}` : ''}
           </span>
         )}
-        <button type="button" role="switch" aria-checked={f.on} aria-label="Send follow-ups" className={`switch ${f.on ? 'on' : ''}`} onClick={() => edit((x) => (x.on = !x.on))}>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={on}
+          aria-label="Send follow-ups"
+          className={`switch ${on ? 'on' : ''}`}
+          onClick={() => {
+            const next = !on;
+            const list = next && !days.length ? [3, 6, 10] : days;
+            setOn(next);
+            setDays(list);
+            save(next, list);
+          }}
+        >
           <span className="switch-knob" />
         </button>
       </div>
-      <p className="muted small">Sent only to leads who have not replied. A reply, bounce, unsubscribe or stop ends a lead’s follow-ups. {snap.aiWrite ? 'With AI on, each step is a prompt: the AI writes it from the earlier email.' : 'An empty subject replies in the same thread (Re: …).'}</p>
-      <ol className="em-steps-list">
-        <li className="em-step first">
-          <span className="em-step-day">Day 1</span>
-          <span>First email (above)</span>
-        </li>
-        {f.steps.map((st, i) => {
-          day += Number(st.days) || 0;
-          return (
-            <li key={i} className="em-step" aria-label={`Follow-up ${i + 1}`}>
-              <div className="em-step-top">
-                <span className="em-step-day">Day {Math.round(day * 10) / 10}</span>
-                <strong>Follow-up {i + 1}</strong>
-                <label className="em-step-wait">
-                  wait
-                  <input type="number" min={1} max={60} step={0.5} value={st.days} aria-label={`Follow-up ${i + 1}: days to wait`} onChange={(e) => edit((x) => (x.steps[i].days = e.target.value))} />
-                  days after the previous email, if no reply
-                </label>
-                <button type="button" className="icon-btn" aria-label={`Remove follow-up ${i + 1}`} onClick={() => edit((x) => x.steps.splice(i, 1))}>
-                  <Icon name="trash" size={12} />
+      {on && (
+        <>
+          <div className="em-fu-days" role="group" aria-label="Follow-up days">
+            {days.map((d, i) => (
+              <label key={i} className="em-fu-day">
+                <span>Follow-up {i + 1}</span>
+                <span className="em-fu-in">
+                  day
+                  <input type="number" min={2} max={120} value={d} aria-label={`Follow-up ${i + 1} day`} onChange={(e) => change(() => setDays((x) => x.map((v, j) => (j === i ? e.target.value : v))))} />
+                </span>
+                <button type="button" className="icon-btn" aria-label={`Remove follow-up ${i + 1}`} onClick={() => change(() => setDays((x) => x.filter((_, j) => j !== i)))}>
+                  <Icon name="x" size={11} />
                 </button>
-              </div>
-              <input aria-label={`Follow-up ${i + 1} subject`} placeholder="Subject (empty: reply in the same thread)" value={st.subject} maxLength={200} onChange={(e) => edit((x) => (x.steps[i].subject = e.target.value))} />
-              <textarea rows={4} aria-label={`Follow-up ${i + 1} email`} placeholder={snap.aiWrite ? 'Prompt, e.g. A friendly nudge: ask if they saw my email about a website; offer a quick call.' : 'Hello {name},\n\nJust following up on my email…'} value={st.body} onChange={(e) => edit((x) => (x.steps[i].body = e.target.value))} />
-            </li>
-          );
-        })}
-      </ol>
-      <div className="em-actions">
-        <button type="button" className="btn btn-ghost btn-sm" disabled={f.steps.length >= 5} onClick={() => edit((x) => x.steps.push({ days: x.steps.length ? 3 : 2, subject: '', body: '' }))}>
-          <Icon name="plus" size={13} /> Add follow-up
-        </button>
-        <span className="grow" />
-        <button type="button" className="btn btn-primary btn-sm" disabled={!dirty} onClick={save}>
-          <Icon name="check" size={13} /> Save follow-ups
-        </button>
-      </div>
+              </label>
+            ))}
+            {days.length < 5 && (
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => change(() => setDays((x) => [...x, (Number(x.at(-1)) || 1) + (x.length ? 4 : 2)]))}>
+                <Icon name="plus" size={12} /> Add
+              </button>
+            )}
+            {dirty && (
+              <button type="button" className="btn btn-primary btn-sm" onClick={() => save()}>
+                <Icon name="check" size={12} /> Save
+              </button>
+            )}
+          </div>
+          <p className="muted small">The first email is day 1. The AI writes each follow-up from the earlier email and sends it on its day, only if the lead has not replied.</p>
+        </>
+      )}
     </section>
   );
 }
@@ -193,60 +207,6 @@ function Schedule({ snap, notify, reload }) {
         </button>
       </div>
     </section>
-  );
-}
-
-// Everything that happened with one lead in a campaign.
-const EVENT = { added: 'Added', email: 'First email', followup: 'Follow-up', click: 'Clicked a link', reply: 'Replied', reply_text: 'Their reply', answer: 'Your answer', auto_reply: 'Automatic reply', bounce: 'Bounced', stopped: 'Stopped' };
-function LeadTimeline({ campaignId, email, onClose }) {
-  const [events, setEvents] = useState(null);
-  const [error, setError] = useState('');
-  useEsc(onClose);
-  useEffect(() => {
-    api.emailTimeline(campaignId, email).then((r) => (r.ok ? setEvents(r.events) : setError(r.error)));
-  }, [campaignId, email]);
-  return (
-    <div className="modal-scrim" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="em-modal wide" role="dialog" aria-modal="true" aria-label="Email history">
-        <header className="em-modal-head">
-          <span className="em-mark">
-            <Icon name="mail" size={16} />
-          </span>
-          <div>
-            <h2>{email}</h2>
-            <p>Every email, follow-up, reply and event, oldest first</p>
-          </div>
-          <button type="button" className="icon-btn" aria-label="Close" onClick={onClose}>
-            <Icon name="x" size={14} />
-          </button>
-        </header>
-        {error && <p className="em-error">{error}</p>}
-        {!events ? (
-          <p className="muted small">Loading…</p>
-        ) : (
-          <ol className="em-timeline">
-            {events.map((e, i) => (
-              <li key={i} className={`ev-${e.kind}`}>
-                <div className="em-tl-head">
-                  <strong>
-                    {EVENT[e.kind] || e.kind}
-                    {e.kind === 'followup' ? ` ${e.step}` : ''}
-                  </strong>
-                  <span className="muted small">
-                    {e.dueAt ? `scheduled for ${when(e.dueAt)}` : when(e.at)}
-                    {e.state && e.state !== 'sent' && !e.dueAt ? ` · ${STATE[e.state] || e.state}` : ''}
-                    {e.account ? ` · from ${e.account}` : ''}
-                  </span>
-                </div>
-                {e.subject && <div className="em-tl-subject">{e.subject}</div>}
-                {e.error && <div className="em-err-text">{e.error}</div>}
-                {e.text && <pre>{e.text}</pre>}
-              </li>
-            ))}
-          </ol>
-        )}
-      </div>
-    </div>
   );
 }
 
@@ -527,8 +487,8 @@ function ImportRecipients({ campaigns, defaultId, onClose, onDone, notify }) {
   const own = [...campaigns].sort((a, b) => (b.counts?.queued || 0) - (a.counts?.queued || 0));
   const start = own.find((c) => c.id === defaultId) || own[0];
   const [text, setText] = useState('');
-  const [target, setTarget] = useState(start ? String(start.id) : '__new');
-  const [name, setName] = useState('');
+  // Into a category campaign (Uncategorized when there is none yet).
+  const [target, setTarget] = useState(start ? String(start.id) : '__none');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [result, setResult] = useState(null);
@@ -545,7 +505,7 @@ function ImportRecipients({ campaigns, defaultId, onClose, onDone, notify }) {
   async function run() {
     setBusy(true);
     setError('');
-    const r = await api.emailImportRecipients(text, target === '__new' ? { name } : { id: Number(target) });
+    const r = await api.emailImportRecipients(text, target === '__none' ? { uncategorized: true } : { id: Number(target) });
     setBusy(false);
     if (!r.ok) return setError(r.error);
     setResult(r);
@@ -595,9 +555,8 @@ function ImportRecipients({ campaigns, defaultId, onClose, onDone, notify }) {
                     {c.counts?.queued ? ` · ${c.counts.queued} waiting` : ''}
                   </option>
                 ))}
-                <option value="__new">New campaign…</option>
+                {!own.some((c) => c.category === 'none') && <option value="__none">Uncategorized</option>}
               </select>
-              {target === '__new' && <input aria-label="New campaign name" placeholder="e.g. My clients" value={name} maxLength={80} onChange={(e) => setName(e.target.value)} />}
             </div>
           </>
         )}
@@ -617,7 +576,7 @@ function ImportRecipients({ campaigns, defaultId, onClose, onDone, notify }) {
             {result ? 'Done' : 'Cancel'}
           </button>
           {!result && (
-            <button type="button" className="btn btn-primary" disabled={busy || !count || (target === '__new' && name.trim().length < 2)} onClick={run}>
+            <button type="button" className="btn btn-primary" disabled={busy || !count} onClick={run}>
               <Icon name="check" size={13} /> {busy ? 'Adding…' : `Add ${count || ''} ${count === 1 ? 'person' : 'people'}`.replace('  ', ' ')}
             </button>
           )}
@@ -868,7 +827,7 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
   const [dirty, setDirty] = useState(false);
   const [picker, setPicker] = useState(false);
   const [rFilter, setRFilter] = useState('all'); // recipients shown: all | ready | checking | excluded
-  const [history, setHistory] = useState(null); // the lead whose email history is open
+  const [showRecipients, setShowRecipients] = useState(false); // the recipients list, shown on click
   const [preview, setPreview] = useState(null);
   const [testTo, setTestTo] = useState('');
   const [busy, setBusy] = useState('');
@@ -959,12 +918,6 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
     }
     reload();
   }
-  async function duplicate() {
-    const r = await api.emailDuplicate(snap.id);
-    if (!r.ok) return notify({ type: 'error', text: r.error });
-    notify({ type: 'ok', text: `“${r.campaign.name}” created (a draft).` });
-    reload(r.id);
-  }
   async function remove() {
     if (!window.confirm(`Delete “${snap.name}” and its history?`)) return;
     const r = await api.emailDelete(snap.id);
@@ -1003,9 +956,6 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
                 <Icon name="stop" size={13} /> Stop
               </button>
             )}
-            <button type="button" className="icon-btn" title="Duplicate campaign (its emails, follow-ups and settings)" aria-label="Duplicate campaign" onClick={duplicate}>
-              <Icon name="copy" size={14} />
-            </button>
             {!running && (
               <button type="button" className="icon-btn" title="Delete campaign" aria-label="Delete campaign" onClick={remove}>
                 <Icon name="trash" size={14} />
@@ -1022,30 +972,38 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
             <strong>{n.sent}</strong>
             <span>Sent</span>
           </div>
-          <div className={n.failed ? 'bad' : ''}>
-            <strong>{n.failed}</strong>
-            <span>Failed</span>
-          </div>
           <div>
             <strong>{n.remaining}</strong>
             <span>Remaining</span>
           </div>
+          {snap.followups?.on && (
+            <div title="Follow-ups sent · scheduled">
+              <strong>{snap.followupCounts?.sent || 0}</strong>
+              <span>Follow-ups · {snap.followupCounts?.pending || 0} next</span>
+            </div>
+          )}
           <div>
             <strong>{snap.replies}</strong>
             <span>Replies</span>
           </div>
-          <div className={snap.clicks ? 'ok' : ''} title={snap.tracking ? 'People who clicked a link' : 'Click tracking is off'}>
-            <strong>{snap.tracking || snap.clicks ? snap.clicks : '—'}</strong>
-            <span>Clicked</span>
-          </div>
-          <div title="Follow-ups sent · scheduled">
-            <strong>{snap.followupCounts?.sent || 0}</strong>
-            <span>Follow-ups · {snap.followupCounts?.pending || 0} next</span>
-          </div>
-          <div className={snap.bounced ? 'bad' : ''}>
-            <strong>{snap.bounced}</strong>
-            <span>Bounced</span>
-          </div>
+          {snap.tracking && (
+            <div className={snap.clicks ? 'ok' : ''} title="People who clicked a link">
+              <strong>{snap.clicks}</strong>
+              <span>Clicked</span>
+            </div>
+          )}
+          {n.failed > 0 && (
+            <div className="bad">
+              <strong>{n.failed}</strong>
+              <span>Failed</span>
+            </div>
+          )}
+          {snap.bounced > 0 && (
+            <div className="bad">
+              <strong>{snap.bounced}</strong>
+              <span>Bounced</span>
+            </div>
+          )}
           <div>
             <strong>{snap.sentToday}</strong>
             <span>Today / {snap.dailyLimit}</span>
@@ -1161,10 +1119,6 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
           />
           <small className="muted">{d.aiWrite ? 'Each business’s name, category, area, website, phone and description go to the AI with this prompt. Every written email is kept and shown with its recipient.' : 'Plain text or HTML. An unsubscribe line is added to every email.'}</small>
         </label>
-        <label className="em-field">
-          <span>Signature (every email and follow-up ends with it; the AI never changes it)</span>
-          <textarea rows={2} value={d.signature} disabled={running} maxLength={500} placeholder={'Best,\nAli'} aria-label="Signature" onChange={(e) => set('signature', e.target.value)} />
-        </label>
         <div className="em-attach">
           {snap.attachments.map((a) => (
             <span key={a.id} className="em-file">
@@ -1236,12 +1190,14 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
               {snap.verify.excluded > 0 && <span className="v-invalid">{snap.verify.excluded} not verified</span>}
             </span>
           )}
-          <select className="em-vfilter" aria-label="Show recipients" value={rFilter} onChange={(e) => setRFilter(e.target.value)}>
-            <option value="all">All</option>
-            <option value="ready">Ready for outreach</option>
-            <option value="checking">Verifying</option>
-            <option value="excluded">Not verified</option>
-          </select>
+          {showRecipients && (
+            <select className="em-vfilter" aria-label="Show recipients" value={rFilter} onChange={(e) => setRFilter(e.target.value)}>
+              <option value="all">All</option>
+              <option value="ready">Ready for outreach</option>
+              <option value="checking">Verifying</option>
+              <option value="excluded">Not verified</option>
+            </select>
+          )}
           {n.failed + n.uncertain > 0 && (
             <button type="button" className="btn btn-sm" onClick={async () => {
               const r = await api.emailRetry(snap.id, false);
@@ -1252,12 +1208,9 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
             </button>
           )}
           {snap.category ? (
-            <>
-              <span className="muted small">New leads of this category are added by themselves</span>
-              <button type="button" className="btn btn-sm" onClick={onImportPeople}>
-                <Icon name="download" size={13} /> Import emails
-              </button>
-            </>
+            <button type="button" className="btn btn-sm" onClick={onImportPeople}>
+              <Icon name="download" size={13} /> Import emails
+            </button>
           ) : (
             <>
               <button type="button" className="btn btn-sm" onClick={onImportPeople}>
@@ -1268,8 +1221,11 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
               </button>
             </>
           )}
+          <button type="button" className="btn btn-ghost btn-sm" aria-expanded={showRecipients} onClick={() => setShowRecipients((v) => !v)}>
+            {showRecipients ? 'Hide' : `Show (${n.total})`}
+          </button>
         </div>
-        {!snap.recipients.length ? (
+        {!showRecipients ? null : !snap.recipients.length ? (
           <p className="muted small">No recipients yet. Add leads with an email address.</p>
         ) : (
           <div className="em-table-wrap">
@@ -1323,9 +1279,6 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
                       )}
                     </td>
                     <td className="em-row-actions">
-                      <button type="button" className="icon-btn" title="Email history" aria-label={`History of ${r.email}`} onClick={() => setHistory(r.email)}>
-                        <Icon name="inbox" size={12} />
-                      </button>
                       {!['bounced', 'unsubscribed', 'invalid'].includes(r.status) && (
                         <button type="button" className="icon-btn" title={r.stoppedAt ? 'Resume this lead’s emails' : 'Stop all further emails to this lead'} aria-label={`${r.stoppedAt ? 'Resume' : 'Stop'} ${r.email}`} onClick={async () => {
                           const x = await api.emailStopLead(snap.id, r.email, !r.stoppedAt);
@@ -1334,16 +1287,6 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
                         }}>
                           <Icon name={r.stoppedAt ? 'play' : 'stop'} size={12} />
                         </button>
-                      )}
-                      {r.state === 'sent' && (
-                        <select className="em-interest" aria-label={`Interest of ${r.email}`} value={r.interest || ''} onChange={async (e) => {
-                          await api.emailInterest(snap.id, r.email, e.target.value || null);
-                          reload();
-                        }}>
-                          <option value="">Mark…</option>
-                          <option value="interested">Interested</option>
-                          <option value="not_interested">Not interested</option>
-                        </select>
                       )}
                       {['queued', 'failed', 'skipped'].includes(r.state) && !running && (
                         <button type="button" className="icon-btn" aria-label={`Remove ${r.email}`} onClick={async () => {
@@ -1362,22 +1305,7 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
         )}
       </section>
 
-      <section className="panel em-log" aria-label="Campaign history">
-        <div className="or-card-head">
-          <h3>
-            <Icon name="calendar" size={14} /> History
-          </h3>
-        </div>
-        <ul>
-          {snap.log.slice(0, 30).map((l, i) => (
-            <li key={i} className={`lv-${l.level}`}>
-              <span className="mono">{when(l.at)}</span> {l.text}
-            </li>
-          ))}
-        </ul>
-      </section>
       {picker && <RecipientPicker campaign={snap} categories={categories} notify={notify} onClose={() => setPicker(false)} onAdded={() => { setPicker(false); reload(); }} />}
-      {history && <LeadTimeline campaignId={snap.id} email={history} onClose={() => setHistory(null)} />}
     </>
   );
 }
@@ -1548,28 +1476,35 @@ function VerifyBadge({ status, reason, state, role }) {
   );
 }
 
-function EmailVerification({ notify }) {
+// Email verification of the category that is open (its leads' emails only).
+function EmailVerification({ notify, category, categoryName }) {
   const [st, setSt] = useState(null);
-  const [log, setLog] = useState([]);
+  const [scope, setScope] = useState(null); // { counts, log } of the open category
   const [open, setOpen] = useState(false);
   const [showLog, setShowLog] = useState(false);
-  const load = useCallback(() => api.emailVerifyStatus().then((r) => r.ok && (setSt(r.status), setLog(r.log || []))), []);
+  const load = useCallback(() => {
+    api.emailVerifyStatus().then((r) => r.ok && setSt(r.status));
+    if (category) api.emailVerifyScope(category).then((r) => r.ok && setScope(r));
+    else setScope(null);
+  }, [category]);
   useEffect(() => {
     load();
-    return api.onEmailVerify((s) => {
-      setSt(s);
-      if (showLog) load();
+    let t = 0;
+    const off = api.onEmailVerify(() => {
+      if (t) return;
+      t = setTimeout(() => ((t = 0), load()), 1500);
     });
-  }, [load, showLog]);
+    return () => {
+      off?.();
+      clearTimeout(t);
+    };
+  }, [load]);
   if (!st) return null;
-  const c = st.counts;
-  const p = st.progress;
-  const pct = p.total ? Math.round((p.done / p.total) * 100) : 100;
-  async function recheck(statuses, what) {
-    const r = await api.emailVerifyRecheck(statuses);
-    notify({ type: 'ok', text: r.queued ? `${r.queued} ${what} being checked again.` : `No ${what} to check again.` });
+  const c = scope?.counts;
+  async function recheck() {
+    const r = await api.emailVerifyRecheck(['unknown']);
+    notify({ type: 'ok', text: r.queued ? `${r.queued} Unknown addresses being checked again.` : 'No Unknown addresses to check again.' });
   }
-  const allowedExtra = Object.entries(st.settings.allow).filter(([, on]) => on).map(([k]) => VERIFY[k]);
   return (
     <section className="panel em-card" aria-label="Email verification">
       <div className="or-card-head">
@@ -1580,56 +1515,45 @@ function EmailVerification({ notify }) {
           <Icon name="sliders" size={13} />
         </button>
       </div>
-      <p className="muted small">
-        Every email is verified before outreach. Only <strong>Valid</strong> addresses are sent to{allowedExtra.length ? <> (you also allow {allowedExtra.join(', ')})</> : null}.
-      </p>
-      <div className="em-vcounts" role="group" aria-label="Verification counts">
-        {Object.keys(VERIFY).map((k) => (
-          <div key={k} className={`em-vcount v-${k}`} title={VERIFY_HELP[k]}>
-            <strong>{c[k]}</strong>
-            <span>{VERIFY[k]}</span>
-          </div>
-        ))}
-      </div>
-      {p.pending > 0 ? (
-        <div className="em-vprogress" role="progressbar" aria-label="Verification progress" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
-          <div className="em-vbar">
-            <span style={{ width: `${pct}%` }} />
-          </div>
-          <span className="muted small">
-            Verifying… {p.done} of {p.total} ({p.pending} left)
-          </span>
-        </div>
+      {!category || !c ? (
+        <p className="muted small">Open a category to see its email checks. Only Valid addresses are emailed.</p>
       ) : (
-        <span className="muted small">{c.total ? 'All addresses checked.' : 'New lead emails are checked automatically.'}</span>
+        <>
+          <p className="muted small">
+            {categoryName}: {c.total} email{c.total === 1 ? '' : 's'}
+            {c.checking ? ` · ${c.checking} being checked` : ''}
+          </p>
+          <div className="em-vcounts" role="group" aria-label="Verification counts">
+            {Object.keys(VERIFY).map((k) => (
+              <div key={k} className={`em-vcount v-${k}`} title={VERIFY_HELP[k]}>
+                <strong>{c[k]}</strong>
+                <span>{VERIFY[k]}</span>
+              </div>
+            ))}
+          </div>
+        </>
       )}
-      <div className="em-vengine">
-        {st.settings.engine === 'reacher' ? (
-          <span className="em-acc-ok">
-            <Icon name="check" size={11} /> Reacher server · {hostOf(st.settings.reacherUrl)}
-          </span>
-        ) : st.port25 === 'blocked' ? (
-          <span className="em-acc-error" role="alert">
-            This network blocks mail servers (port 25): addresses cannot be confirmed from this computer, so they stay Unknown and are not sent to. Use a Reacher server in the settings.
-          </span>
-        ) : (
-          <span className="muted small">Checked from this computer{st.port25 === 'ok' ? ' · mail servers reachable' : ''}</span>
-        )}
-      </div>
-      <div className="em-vactions">
-        {c.unknown > 0 && (
-          <button type="button" className="btn btn-ghost btn-sm" onClick={() => recheck(['unknown'], 'Unknown addresses')}>
-            <Icon name="refresh" size={12} /> Recheck Unknown
+      {st.settings.engine !== 'reacher' && st.port25 === 'blocked' && (
+        <span className="em-acc-error" role="alert">
+          This network blocks mail servers (port 25): addresses stay Unknown and are not emailed. Use a Reacher server in the settings.
+        </span>
+      )}
+      {category && c && (
+        <div className="em-vactions">
+          {c.unknown > 0 && (
+            <button type="button" className="btn btn-ghost btn-sm" onClick={recheck}>
+              <Icon name="refresh" size={12} /> Recheck Unknown
+            </button>
+          )}
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => setShowLog((v) => !v)}>
+            {showLog ? 'Hide log' : 'Log'}
           </button>
-        )}
-        <button type="button" className="btn btn-ghost btn-sm" onClick={() => (setShowLog((v) => !v), load())}>
-          {showLog ? 'Hide log' : 'Log'}
-        </button>
-      </div>
-      {showLog && (
+        </div>
+      )}
+      {showLog && category && (
         <ul className="em-vlog" aria-label="Verification log">
-          {!log.length && <li className="muted small">Nothing checked yet.</li>}
-          {log.map((l, i) => (
+          {!scope?.log?.length && <li className="muted small">Nothing checked yet.</li>}
+          {(scope?.log || []).map((l, i) => (
             <li key={i}>
               <span className="mono">{l.email}</span> {l.status === 'retry' ? <span className="em-vbadge v-checking">Asked again later</span> : <VerifyBadge status={l.status} />}
               <span className="muted small">
@@ -1898,12 +1822,6 @@ export default function EmailView({ notify, hidden }) {
     if (!selected && campaigns.length) setSelected(campaigns[0].id);
   }, [campaigns, selected]);
 
-  async function create() {
-    const r = await api.emailCreate('');
-    if (!r.ok) return notify({ type: 'error', text: r.error });
-    await loadCampaigns();
-    setSelected(r.id);
-  }
   async function openCategory(c) {
     const r = await api.emailCategoryCampaign(c.key);
     if (!r.ok) return notify({ type: 'error', text: r.error });
@@ -1940,20 +1858,16 @@ export default function EmailView({ notify, hidden }) {
       <aside className="or-side">
         <Accounts accounts={accounts.accounts} persistent={accounts.persistent} onChange={loadAccounts} notify={notify} onImportPeople={() => setImportPeople(true)} />
         <ClickTracking notify={notify} />
-        <EmailVerification notify={notify} />
+        <EmailVerification notify={notify} category={snap?.category || null} categoryName={catList.find((x) => x.key === snap?.category)?.name || 'This category'} />
         <CategoryCampaigns list={catList} selected={selected} onOpen={openCategory} onToggle={toggleCategory} toggling={toggling} />
+        {campaigns.some((c) => !c.category) && (
         <section className="panel em-card" aria-label="Campaign list">
           <div className="or-card-head">
             <h3>
-              <Icon name="send" size={14} /> Campaigns <span className="or-count">{campaigns.filter((c) => !c.category).length}</span>
+              <Icon name="send" size={14} /> Other campaigns <span className="or-count">{campaigns.filter((c) => !c.category).length}</span>
             </h3>
-            <button type="button" className="btn btn-sm btn-primary" onClick={create}>
-              <Icon name="plus" size={13} /> New
-            </button>
           </div>
-          {!campaigns.filter((c) => !c.category).length ? (
-            <p className="muted small">Your own campaigns (any leads you choose).</p>
-          ) : (
+          {(
             <ul className="em-campaigns">
               {campaigns.filter((c) => !c.category).map((c) => (
                 <li key={c.id}>
@@ -1971,18 +1885,14 @@ export default function EmailView({ notify, hidden }) {
             </ul>
           )}
         </section>
+        )}
         <OptOuts notify={notify} />
       </aside>
       <div className="or-main">
         {!snap ? (
           <div className="panel or-blank">
             <Icon name="mail" size={28} />
-            <p>{campaigns.length ? 'Choose a campaign' : 'Create your first email campaign'}</p>
-            {!campaigns.length && (
-              <button type="button" className="btn btn-primary btn-sm" onClick={create}>
-                <Icon name="plus" size={13} /> New campaign
-              </button>
-            )}
+            <p>Open a category on the left: its email campaign is set up there, and switched on to send.</p>
           </div>
         ) : null}
         {!snap ? (

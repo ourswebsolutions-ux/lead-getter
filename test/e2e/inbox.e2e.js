@@ -144,7 +144,7 @@ test('Inbox: replies from WhatsApp and email, alerts to the admin, answers relay
     const el = [...document.querySelectorAll('.outreach-shell > .outreach')].find((x) => !x.hidden);
     const main = el.querySelector('.or-main');
     main.scrollTop = main.scrollHeight;
-    const hist = el.querySelector('[aria-label="Campaign history"]').getBoundingClientRect();
+    const hist = el.querySelector('[aria-label="Recipients"]').getBoundingClientRect();
     return { bottom: el.getBoundingClientRect().bottom, height: window.innerHeight, histBottom: hist.bottom };
   });
   assert.ok(frame.bottom <= frame.height + 1, `the frame ends inside the window (${frame.bottom} > ${frame.height})`);

@@ -162,7 +162,9 @@ test('Email campaigns, Groq settings, the Assistant and AI on WhatsApp, in the r
   await accounts.getByText('sales.one@gmail.com').first().waitFor();
 
   // --- A campaign: account, subject, body, recipients, start.
-  await win.getByRole('region', { name: 'Campaign list' }).getByRole('button', { name: 'New' }).click();
+  // (Own campaigns are no longer made in the window: this one is made through the app's call.)
+  await win.evaluate(() => window.leadFinder.emailCreate(''));
+  await win.getByRole('region', { name: 'Campaign list' }).getByText('Email campaign 1').click();
   const compose = win.getByRole('region', { name: 'Email', exact: true });
   await compose.getByRole('group', { name: 'Send from' }).getByLabel('Send from Local SMTP').check();
   await compose.getByRole('group', { name: 'Send from' }).getByLabel('Send from sales.one@gmail.com').check();
@@ -176,6 +178,7 @@ test('Email campaigns, Groq settings, the Assistant and AI on WhatsApp, in the r
   await picker.getByLabel('Category').selectOption({ label: 'Real Estate' });
   await picker.getByText(/2\s*can be added/).waitFor();
   await picker.getByRole('button', { name: /Add all 2/ }).click();
+  await win.getByRole('region', { name: 'Recipients' }).getByRole('button', { name: /^Show \(/ }).click();
   await win.getByRole('region', { name: 'Recipients' }).getByText('zahid@realty.pk').waitFor();
   await win.getByRole('button', { name: 'Start' }).click(); // the confirm dialog is accepted
   // 30 seconds between the two emails (the campaign's delay, whichever account sends).

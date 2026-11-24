@@ -201,7 +201,7 @@ contextBridge.exposeInMainWorld('leadFinder', {
   emailRemoveOptOut: (email) => ipcRenderer.invoke('email:removeOptOut', String(email ?? '')),
   emailAttach: () => ipcRenderer.invoke('email:attach'),
   emailRecipientsFile: () => ipcRenderer.invoke('email:recipientsFile'),
-  emailImportRecipients: (text, target) => ipcRenderer.invoke('email:importRecipients', String(text ?? ''), target && typeof target === 'object' ? { id: target.id == null ? null : Number(target.id), name: String(target.name ?? '') } : {}),
+  emailImportRecipients: (text, target) => ipcRenderer.invoke('email:importRecipients', String(text ?? ''), target && typeof target === 'object' ? { id: target.id == null ? null : Number(target.id), name: String(target.name ?? ''), uncategorized: target.uncategorized === true } : {}),
   onEmail: (cb) => subscribe('email:state', cb),
   // Click tracking (the user's tracking address; the signing key stays in the main process)
   emailTracking: () => ipcRenderer.invoke('email:tracking'),
@@ -213,6 +213,7 @@ contextBridge.exposeInMainWorld('leadFinder', {
   onEmailTracking: (cb) => subscribe('email:tracking', cb),
   // Email verification before outreach (the Reacher secret is only ever sent, never read back)
   emailVerifyStatus: () => ipcRenderer.invoke('email:verifyStatus'),
+  emailVerifyScope: (categoryKey) => ipcRenderer.invoke('email:verifyScope', String(categoryKey ?? '')),
   emailVerifySave: (patch) => ipcRenderer.invoke('email:verifySave', patch && typeof patch === 'object' ? patch : {}),
   emailVerifyRecheck: (statuses) => ipcRenderer.invoke('email:verifyRecheck', Array.isArray(statuses) ? statuses.map(String) : null),
   emailVerifyCheck: (email) => ipcRenderer.invoke('email:verifyCheck', String(email ?? '')),

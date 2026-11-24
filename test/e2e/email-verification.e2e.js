@@ -59,6 +59,9 @@ test('Email verification: background checks, counts, Leads filter, only valid em
   await win.getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: 'Outreach' }).click();
   await win.getByRole('navigation', { name: 'Campaign channel' }).getByRole('button', { name: 'Email' }).click();
   const card = win.getByRole('region', { name: 'Email verification' });
+  // The checks of the category that is open.
+  await win.getByRole('region', { name: 'Category campaigns' }).getByText('Agencies', { exact: true }).click();
+  await card.getByText(/Agencies: 6 emails/).waitFor({ timeout: 30_000 });
   const count = (label) => card.getByRole('group', { name: 'Verification counts' }).getByText(label, { exact: true }).locator('..').locator('strong');
   await until(async () => (await count('Valid').textContent()) === '1' && (await count('Invalid').textContent()) === '2' && (await count('Risky').textContent()) === '1' && (await count('Catch-all').textContent()) === '1', 60_000, 'the background checks');
   assert.ok(!mx.rcpts.includes('x@mailinator.com'), 'a disposable address is known without asking its server');
@@ -91,6 +94,7 @@ test('Email verification: background checks, counts, Leads filter, only valid em
   await win.getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: 'Outreach' }).click();
   await win.getByRole('region', { name: 'Campaign list' }).getByText('Verified only').click();
   const recipients = win.getByRole('region', { name: 'Recipients' });
+  await recipients.getByRole('button', { name: /^Show \(/ }).click();
   await recipients.getByLabel('Recipients by verification').waitFor();
   const down = recipients.locator('tr', { hasText: 'z@unreachable.test' });
   assert.equal(await down.locator('.em-state').first().textContent(), 'Verifying', 'still being verified (asked again later)');

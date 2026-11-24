@@ -94,6 +94,7 @@ test('Click tracking: set up, tracked campaign links, clicks shown', { timeout: 
   await win.getByText('1 new click.').waitFor();
   const stats = win.getByRole('group', { name: 'Progress' });
   await stats.getByText('Clicked').locator('..').getByText('1', { exact: true }).waitFor();
+  await win.getByRole('region', { name: 'Recipients' }).getByRole('button', { name: /^Show \(/ }).click();
   await win.getByRole('region', { name: 'Recipients' }).getByText('Clicked', { exact: true }).waitFor();
   await win.screenshot({ path: path.join(os.tmpdir(), 'lf-tracking.png') });
 
@@ -103,19 +104,19 @@ test('Click tracking: set up, tracked campaign links, clicks shown', { timeout: 
   const imp = win.getByRole('dialog', { name: 'Import people to email' });
   await imp.getByLabel('People to email').fill('ahmed@gmail.com, Ahmed Khan, Khan Traders\nclient@company.com\nzahid@realty.pk');
   await imp.getByText('3 addresses found.').waitFor();
-  await imp.getByLabel('Campaign').selectOption('__new');
-  await imp.getByLabel('New campaign name').fill('My clients');
+  await imp.getByLabel('Campaign').selectOption('__none'); // Uncategorized (its campaign is made)
   await imp.getByRole('button', { name: 'Add 3 people' }).click();
-  await imp.getByRole('status').getByText(/2\s*people added to “My clients”/).waitFor();
+  await imp.getByRole('status').getByText(/2\s*people added to “Uncategorized · email”/).waitFor();
   await imp.getByText(/1 already emailed by another campaign/).waitFor(); // Zahid got “Website offer”
   await imp.getByText('2 new contacts were saved in Leads (Imported).').waitFor();
   await win.screenshot({ path: path.join(os.tmpdir(), 'lf-import-people.png') });
   await imp.getByRole('button', { name: 'Done' }).click();
   const rcpts = win.getByRole('region', { name: 'Recipients' });
+  await rcpts.getByRole('button', { name: /^Show \(/ }).click();
   await rcpts.getByText('ahmed@gmail.com').waitFor();
   await rcpts.getByText('Khan Traders').waitFor();
   assert.equal(await rcpts.getByText('Sent first', { exact: true }).count(), 2, 'imported people are at the top of the waiting list');
-  assert.equal(await win.getByRole('textbox', { name: 'Campaign name' }).inputValue(), 'My clients');
+  assert.equal(await win.getByRole('textbox', { name: 'Campaign name' }).inputValue(), 'Uncategorized · email');
   // Several sending accounts: from the Add account form.
   await accounts.getByRole('button', { name: 'Add', exact: true }).click();
   await win.getByRole('button', { name: 'Add several accounts' }).click();

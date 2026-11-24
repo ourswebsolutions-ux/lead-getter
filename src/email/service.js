@@ -5,7 +5,7 @@
 // passwords go in once (add / edit) and stay in the main process.
 
 const { EmailAccounts } = require('./accounts');
-const { EmailCampaigns } = require('./campaigns');
+const { EmailCampaigns, emailOf } = require('./campaigns');
 const { ReplyWatcher, imapInbox, watchInbox } = require('./replies');
 const { EmailVerification } = require('./verification');
 const { extractAccounts, providerFor } = require('./credentials');
@@ -136,10 +136,13 @@ function createEmail({ store, vault, files, canSend, allowInsecure = false, log 
     const { list, invalid } = parseRecipients(text);
     if (!list.length) return { ok: false, error: invalid ? 'Those email addresses are not valid.' : 'No email address found. Write one per line: email, name, business (name and business are optional).' };
     let cid = Number(target.id) || null;
+    // target.uncategorized: the Uncategorized category's campaign (made after
+    // the people are saved: a category campaign exists while it has emails).
+    const uncategorized = !cid && target.uncategorized === true;
     if (cid) {
       const c = campaigns.row(cid);
       if (!c) return { ok: false, error: 'That email campaign no longer exists.' };
-    } else {
+    } else if (!uncategorized) {
       const name = String(target.name || '').trim();
       if (name.length < 2) return { ok: false, error: 'Give the new campaign a name.' };
       const r = campaigns.create({ name });
@@ -162,6 +165,11 @@ function createEmail({ store, vault, files, canSend, allowInsecure = false, log 
         byEmail.set(r.email, id);
       }
       ids.push(id);
+    }
+    if (uncategorized) {
+      const r = campaigns.categoryCampaign('none', 'Uncategorized');
+      if (!r.ok) return r;
+      cid = r.id;
     }
     const out = { added: 0, already: 0, optedOut: 0, previous: 0, unverified: 0, overLimit: 0 };
     for (let i = 0; i < ids.length; i += 1000) {
@@ -310,7 +318,7 @@ function registerEmailIpc({ handle, email, requirePlan, pickFiles, send, listCat
     return r.ok ? { ok: true, file: t.file, text: r.lines.join('\n'), count: r.lines.length } : r;
   });
   handle('email:importRecipients', (text, target) => {
-    const tg = target && typeof target === 'object' ? { id: id(target.id), name: str(target.name).slice(0, 80) } : {};
+    const tg = target && typeof target === 'object' ? { id: id(target.id), name: str(target.name).slice(0, 80), uncategorized: target.uncategorized === true } : {};
     return email.importRecipients(str(text).slice(0, 2_000_000), tg);
   });
 
@@ -334,6 +342,22 @@ function registerEmailIpc({ handle, email, requirePlan, pickFiles, send, listCat
     const r = verification.save({ engine: str(p.engine) || undefined, reacherUrl: typeof p.reacherUrl === 'string' ? p.reacherUrl.slice(0, 500) : undefined, secret: typeof p.secret === 'string' ? p.secret : undefined, allow, roleRisky: typeof p.roleRisky === 'boolean' ? p.roleRisky : undefined });
     if (r.ok) send('email:state', { id: null });
     return r.ok ? { ok: true, status: verification.status() } : r;
+  });
+  // One category's email checks only (its leads' emails): counts and log.
+  handle('email:verifyScope', (key) => {
+    const k = str(key);
+    if (!k) return { ok: true, counts: null, log: [] };
+    const leads = campaigns.leads({ category: k === 'none' ? 'none' : Number(k) }) || [];
+    const emails = [...new Set(leads.map((l) => emailOf(l)).filter(Boolean))];
+    const seen = verification.lookup(emails);
+    const counts = { valid: 0, invalid: 0, risky: 0, unknown: 0, catch_all: 0, checking: 0, total: emails.length };
+    for (const e of emails) {
+      const v = seen.get(e);
+      if (!v || !v.status || v.state !== 'done') counts.checking++;
+      else if (v.status in counts) counts[v.status]++;
+    }
+    const set = new Set(emails);
+    return { ok: true, counts, log: verification.logs(2000).filter((l) => set.has(l.email)).slice(0, 60) };
   });
   // Checked again now: these statuses (or all).
   handle('email:verifyRecheck', (statuses) => ({ ok: true, queued: verification.recheck(Array.isArray(statuses) ? statuses.map(str) : null) }));

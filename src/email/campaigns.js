@@ -1268,34 +1268,33 @@ class EmailCampaigns extends EventEmitter {
     }
   }
 
-  // The follow-up's text: the step's email (or, with AI on, written from the
-  // step's prompt and the earlier emails), in the same thread ("Re: ...")
-  // unless the step has its own subject. Kept on the follow-up once written.
+  // The follow-up's text, always written by the AI from the earlier
+  // email(s) of the thread (and the campaign's prompt, when it has one:
+  // same offer, language, tone and sign-off), in the same thread ("Re: ...").
+  // Kept on the follow-up once written (a retry sends the same text).
   async followupText(c, r, f) {
-    const step = c.config.followups.steps[f.step - 1];
+    const step = c.config.followups.steps[f.step - 1] || {};
     const values = { name: r.name, business: r.business, email: r.email };
     const thread = `Re: ${String(r.sent_subject || render(c.subject, values) || '').replace(/^(re:\s*)+/i, '')}`.trim();
     if (f.body) return { subject: f.subject || thread, body: f.body, ai: true };
-    let subject = step.subject ? render(step.subject, values) : thread;
-    let body = step.body;
-    if (c.config.aiWrite) {
-      if (!this.writer) throw Object.assign(new Error('no AI key is saved'), { code: 'no_key' });
-      const earlier = [r.sent_text, ...this.db.prepare("SELECT body FROM email_followups WHERE campaign_id = ? AND email = ? AND step < ? AND state = 'sent' ORDER BY step").all(c.id, r.email, f.step).map((x) => x.body)].filter(Boolean);
-      const sender = this.accounts.get(this.senders(c)[0]);
-      const out = await this.writer({
-        instructions: `${step.body}\n\n---\nThis is follow-up ${f.step} of an email sequence. The business has not replied to the earlier email${earlier.length > 1 ? 's' : ''} below. Write a short follow-up in the same thread that refers back to ${earlier.length > 1 ? 'them' : 'it'} naturally, without repeating ${earlier.length > 1 ? 'them' : 'it'}.\n\nEarlier email${earlier.length > 1 ? 's' : ''}:\n${earlier.map((t, i) => `[${i + 1}]\n${String(t).slice(0, 2500)}`).join('\n\n')}`,
-        subject: step.subject || thread,
-        sender: { name: sender?.senderName || sender?.name || '', email: sender?.email || '' },
-        business: this.leadDetails(r),
-        signature: c.config.signature || '',
-      });
-      body = String(out?.body || '').trim().slice(0, 8000);
-      if (body.length < 10) throw Object.assign(new Error('the AI did not write a usable follow-up'), { code: 'ai_empty' });
-      if (step.subject) subject = String(out?.subject || subject).replace(/[\r\n]+/g, ' ').trim().slice(0, 200);
-      this.db.prepare('UPDATE email_followups SET subject = ?, body = ? WHERE campaign_id = ? AND email = ? AND step = ?').run(subject, body, c.id, r.email, f.step);
-      return { subject, body, ai: true };
-    }
-    return { subject, body, ai: false };
+    if (!this.writer) throw Object.assign(new Error('no AI key is saved (follow-ups are written by the AI)'), { code: 'no_key' });
+    const earlier = [r.sent_text, ...this.db.prepare("SELECT body FROM email_followups WHERE campaign_id = ? AND email = ? AND step < ? AND state = 'sent' ORDER BY step").all(c.id, r.email, f.step).map((x) => x.body)].filter(Boolean);
+    const many = earlier.length > 1;
+    const brief = [
+      c.config.aiWrite && c.body ? `The sender’s instructions for this campaign (follow them: offer, language, tone, sign-off):\n${c.body}` : 'Write in the same language, tone and sign-off as the earlier email.',
+      step.body ? `For this follow-up: ${step.body}` : '',
+      `This is follow-up ${f.step}. The business has not replied to the earlier email${many ? 's' : ''} below. Write a short, polite follow-up (40 to 110 words unless the instructions say otherwise) in the same thread: refer back to ${many ? 'them' : 'it'} naturally, add one new helpful point or a simple question, and do not repeat ${many ? 'them' : 'it'}. Sign off exactly as the earlier email does.`,
+      `Earlier email${many ? 's' : ''} (oldest first):\n${earlier.map((t, i) => `[${i + 1}]\n${String(t).slice(0, 2500)}`).join('\n\n') || '(not available)'}`,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+    const sender = this.accounts.get(this.senders(c)[0]);
+    const out = await this.writer({ instructions: brief, subject: step.subject || thread, sender: { name: sender?.senderName || sender?.name || '', email: sender?.email || '' }, business: this.leadDetails(r), signature: c.config.signature || '' });
+    const body = String(out?.body || '').trim().slice(0, 8000);
+    if (body.length < 10) throw Object.assign(new Error('the AI did not write a usable follow-up'), { code: 'ai_empty' });
+    const subject = step.subject ? String(out?.subject || render(step.subject, values)).replace(/[\r\n]+/g, ' ').trim().slice(0, 200) : thread;
+    this.db.prepare('UPDATE email_followups SET subject = ?, body = ? WHERE campaign_id = ? AND email = ? AND step = ?').run(subject, body, c.id, r.email, f.step);
+    return { subject, body, ai: true };
   }
 
   // One follow-up: checked again (reply, bounce, unsubscribe, stop,
