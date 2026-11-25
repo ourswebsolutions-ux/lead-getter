@@ -90,6 +90,8 @@ process.on('SIGTERM', () => shutdown(0));
     appEnv.VITE_DEV_SERVER_URL = vite.resolvedUrls.local[0];
     log('ui', `Vite ready on ${appEnv.VITE_DEV_SERVER_URL}`);
   }
+  // Claude's MCP server (Settings > AI Integrations > Claude) as packaged.
+  if (!prod) require('node:child_process').execFileSync(process.execPath, [path.join(root, 'scripts', 'build-mcp.js')], { cwd: root, stdio: 'inherit' });
   log('app', 'starting Lead Finder');
   const electron = launchElectron(appEnv);
   electron.on('exit', async (code) => {

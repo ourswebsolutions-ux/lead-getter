@@ -236,6 +236,14 @@ contextBridge.exposeInMainWorld('leadFinder', {
   aiAttach: () => ipcRenderer.invoke('ai:attach'),
   onAiEvent: (cb) => subscribe('ai:event', cb),
   onAiShowLeads: (cb) => subscribe('ai:showLeads', cb),
+  // Claude Desktop (Settings > AI Integrations > Claude)
+  claudeStatus: () => ipcRenderer.invoke('claude:status'),
+  claudeSetup: () => ipcRenderer.invoke('claude:setup'),
+  claudeTest: () => ipcRenderer.invoke('claude:test'),
+  claudeDisconnect: () => ipcRenderer.invoke('claude:disconnect'),
+  claudeRestart: () => ipcRenderer.invoke('claude:restart'),
+  claudeDownload: () => ipcRenderer.invoke('claude:download'),
+  onClaude: (cb) => subscribe('claude:status', cb),
   // Automatic updates
   updateStatus: () => ipcRenderer.invoke('update:status'),
   openUpdateDownload: () => ipcRenderer.invoke('update:openDownload'),

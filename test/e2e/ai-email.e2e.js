@@ -197,7 +197,8 @@ test('Email campaigns, Groq settings, the Assistant and AI on WhatsApp, in the r
 
   // --- Settings > Groq AI: key, Save, Test.
   await nav().getByRole('button', { name: 'Settings' }).click();
-  await win.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'AI', exact: true }).click();
+  await win.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'AI Integrations', exact: true }).click();
+  await win.getByRole('tab', { name: 'Groq & OpenRouter' }).click();
   const groqCard = win.getByRole('group', { name: 'Groq settings' });
   await groqCard.getByLabel('Groq API Key').fill(KEY);
   await groqCard.getByRole('button', { name: 'Save API Key' }).click();

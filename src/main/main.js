@@ -2348,7 +2348,9 @@ function smokeTest(reportFile) {
       };
       // The app must carry its activation settings (secret, email), or no plan could be activated.
       report.activation = activation.status().configured;
-      const ok = report.lockScreen && report.activation && Object.values(report.modules).every(Boolean);
+      // Claude Desktop's MCP server: run by the installed program (as Node), reaching this app.
+      report.claude = await claude.smoke().catch((err) => ({ ok: false, error: err.message }));
+      const ok = report.lockScreen && report.activation && Object.values(report.modules).every(Boolean) && report.claude.ok;
       finish(ok, ok ? undefined : 'checks failed');
     } catch (err) {
       finish(false, err.message);
@@ -2987,6 +2989,7 @@ app.on('before-quit', (e) => {
   Promise.all([search?.promise, podcastRun?.promise, pilot].map((p) => Promise.resolve(p).catch(() => {})))
     .then(() => outreach?.dispose())
     .then(() => email?.campaigns.dispose())
+    .then(() => claude?.stop())
     .then(() => email?.replies.stop())
     .then(() => email?.tracker.stop())
     .then(() => email?.verification.stop())
@@ -3353,6 +3356,71 @@ function initEmailAndAI() {
   // Emails written by the AI (the campaign's "Write with AI" switch).
   email.campaigns.writer = (x) => ai.writeEmail(x);
   email.campaigns.writerReady = () => ai.available();
+  initClaude();
+}
+
+// --- Claude (Settings > AI Integrations > Claude; src/claude) ---------------------
+// Claude Desktop uses Lead Finder's tools with the user's own Claude account.
+
+let claude = null;
+function initClaude() {
+  const { createClaude } = require('../claude/service');
+  const { buildClaudeTools } = require('../claude/tools');
+  const leadTools = buildClaudeTools({ store });
+  claude = createClaude({
+    app,
+    state: { get: (k) => store.getState(k), set: (k, v) => store.setState(k, v) },
+    tools: () => [...leadTools, ...ai.tools],
+    isLocked: () => !appLock?.unlocked,
+    onLocked: () => showWindow(),
+    confirm: confirmForClaude,
+    log: autoLog,
+    send,
+    // Tests only (never packaged): a stand-in home folder for Claude's settings.
+    detectOpts: !app.isPackaged && process.env.LEAD_FINDER_TEST_CLAUDE_HOME ? { home: process.env.LEAD_FINDER_TEST_CLAUDE_HOME, env: {} } : {},
+  });
+  claude.init();
+  handle('claude:status', () => claude.status());
+  handle('claude:setup', () => claude.setup());
+  handle('claude:test', () => claude.test());
+  handle('claude:disconnect', () => claude.disconnect());
+  handle('claude:restart', () => claude.restart());
+  handle('claude:download', () => shell.openExternal(claude.downloadUrl));
+}
+
+// Sending, deleting, starting or changing settings asked by Claude: only
+// when the user clicks Allow in this window (Claude cannot answer it).
+async function confirmForClaude({ summary, client, signal }) {
+  // Tests only (never packaged): the answer is read from a file.
+  if (!app.isPackaged && process.env.LEAD_FINDER_TEST_CLAUDE_CONFIRM) {
+    const answer = require('node:fs').readFileSync(process.env.LEAD_FINDER_TEST_CLAUDE_CONFIRM, 'utf8').trim();
+    autoLog(`claude: test confirmation (${answer}): ${summary}`);
+    return answer === 'allow';
+  }
+  if (!win || win.isDestroyed()) return false;
+  showWindow();
+  const { clientLabel } = require('../claude/host');
+  const ac = new AbortController();
+  const stop = () => ac.abort();
+  const timer = setTimeout(stop, 3 * 60_000);
+  signal?.addEventListener('abort', stop, { once: true });
+  try {
+    const { response } = await dialog.showMessageBox(win, {
+      type: 'question',
+      buttons: ['Allow', 'Don’t allow'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+      title: 'Allow Claude?',
+      message: `${clientLabel(client)} asks Lead Finder to do this:`,
+      detail: `${summary}\n\nNothing happens unless you click Allow.`,
+      signal: ac.signal,
+    });
+    return response === 0 && !ac.signal.aborted;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', stop);
+  }
 }
 
 module.exports = { validateKeyword };

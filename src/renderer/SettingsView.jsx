@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Icon from './icons.jsx';
+import ClaudeIntegration from './ClaudeIntegration.jsx';
 
 // Settings page: background running, Windows sign-in, Chrome, continuous
 // search and CAPTCHA. A section menu on the left; grouped rows with switches.
@@ -320,6 +321,7 @@ export default function SettingsView({ hidden, notify, categories = [] }) {
   const [error, setError] = useState('');
   const [login, setLogin] = useState({ status: null, user: '', password: '', agree: false, busy: false, error: '' });
   const [active, setActive] = useState('background');
+  const [aiTab, setAiTab] = useState('claude');
   const scroller = useRef(null);
 
   useEffect(() => {
@@ -339,7 +341,7 @@ export default function SettingsView({ hidden, notify, categories = [] }) {
       ['chrome', 'globe', 'Chrome'],
       ['search', 'repeat', 'Continuous search'],
       ['captcha', 'shield', 'CAPTCHA'],
-      ['groq', 'sparkle', 'AI'],
+      ['groq', 'sparkle', 'AI Integrations'],
     ],
     [win],
   );
@@ -608,8 +610,18 @@ export default function SettingsView({ hidden, notify, categories = [] }) {
             )}
 
             {active === 'groq' && (
-            <Section id="groq" icon="sparkle" title="AI" lead="Groq or OpenRouter powers the Assistant.">
-              <AiKeys notify={notify} />
+            <Section id="groq" icon="sparkle" title="AI Integrations" lead={aiTab === 'claude' ? 'Use Lead Finder from Claude Desktop.' : 'Groq or OpenRouter powers the Assistant and AI-written messages.'}>
+              <div className="segmented st-ai-tabs" role="tablist" aria-label="AI integrations">
+                {[
+                  ['claude', 'Claude'],
+                  ['keys', 'Groq & OpenRouter'],
+                ].map(([id, label]) => (
+                  <button key={id} type="button" role="tab" aria-selected={aiTab === id} className={aiTab === id ? 'on' : ''} onClick={() => setAiTab(id)}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {aiTab === 'claude' ? <ClaudeIntegration /> : <AiKeys notify={notify} />}
             </Section>
             )}
             {active === 'captcha' && (

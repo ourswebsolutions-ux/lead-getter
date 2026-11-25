@@ -35,4 +35,5 @@ try {
 const bin = (name) => path.join(root, 'node_modules', '.bin', process.platform === 'win32' ? `${name}.cmd` : name);
 const run = (cmd, args) => execFileSync(cmd, args, { cwd: root, stdio: 'inherit', shell: process.platform === 'win32' });
 run(bin('vite'), ['build']);
+run(process.execPath, [path.join(root, 'scripts', 'build-mcp.js')]); // Claude's MCP server (dist/claude)
 run(bin('electron-builder'), [...targets, '--publish', 'never', ...process.argv.slice(2)]);
