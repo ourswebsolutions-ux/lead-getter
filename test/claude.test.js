@@ -32,7 +32,7 @@ test('settings file locations: macOS, Linux, Windows classic and Microsoft Store
   const home = tmp();
   assert.deepEqual(desktop.locations({ platform: 'darwin', home, env: {} }).configs, [path.join(home, 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json')]);
   assert.deepEqual(desktop.locations({ platform: 'linux', home, env: {} }).configs, [path.join(home, '.config', 'Claude', 'claude_desktop_config.json')]);
-  assert.deepEqual(desktop.locations({ platform: 'linux', home, env: { XDG_CONFIG_HOME: '/x' } }).configs, ['/x/Claude/claude_desktop_config.json']);
+  assert.deepEqual(desktop.locations({ platform: 'linux', home, env: { XDG_CONFIG_HOME: '/x' } }).configs, [path.join('/x', 'Claude', 'claude_desktop_config.json')]);
   const local = path.join(home, 'Local');
   fs.mkdirSync(path.join(local, 'Packages', 'Claude_pzs8sxrjxfjjc'), { recursive: true });
   fs.mkdirSync(path.join(local, 'Packages', 'Microsoft.Something_1'), { recursive: true });

@@ -61,7 +61,12 @@ function createClaude({ app, state, tools, isLocked, onLocked, confirm, log = ()
 
   function entry() {
     const p = program();
-    return { command: p.command, args: [bridgeTarget(), '--data', dataDir, ...(p.launch ? ['--app', p.launch] : [])], env: { ELECTRON_RUN_AS_NODE: '1' } };
+    // An AppImage's launcher adds --no-sandbox in front of the arguments
+    // where the system restricts sandboxes (Ubuntu 24.04), which Node
+    // refuses; given at the end, the launcher adds nothing and Node passes
+    // it to the server, which ignores it.
+    const tail = env.APPIMAGE && app.isPackaged ? ['--no-sandbox'] : [];
+    return { command: p.command, args: [bridgeTarget(), '--data', dataDir, ...(p.launch ? ['--app', p.launch] : []), ...tail], env: { ELECTRON_RUN_AS_NODE: '1' } };
   }
 
   // Files to write: each settings folder Claude uses; the first known

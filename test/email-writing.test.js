@@ -12,7 +12,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const R = require('../src/ai/email-rules');
 
-const PROMPT = fs.readFileSync(path.join(__dirname, 'fixtures', 'mahi-prompt.txt'), 'utf8');
+const PROMPT = fs.readFileSync(path.join(__dirname, 'fixtures', 'mahi-prompt.txt'), 'utf8').replace(/\r\n/g, '\n');
 const SIG = 'Best,\nMahi';
 // What an AI may answer when asked for the rules: right, plus some it imagined.
 const READING = {

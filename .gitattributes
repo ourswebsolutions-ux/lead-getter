@@ -1,0 +1,2 @@
+# Test prompts compare exact text: the same line endings on every system.
+test/fixtures/*.txt text eol=lf

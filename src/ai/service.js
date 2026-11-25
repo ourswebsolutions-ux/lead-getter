@@ -156,7 +156,8 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
   //   twice; the best answer is used and what it still misses is in `problems`.
   // followup: { step, note, earlier: [text] } for a follow-up in the thread.
   async function writeEmail({ instructions, subject = '', sender = {}, business = {}, followup = null }) {
-    const brief = String(instructions || '').slice(0, 30_000).trim();
+    // Windows line endings (a prompt pasted from a file) read like any other.
+    const brief = String(instructions || '').replace(/\r\n?/g, '\n').slice(0, 30_000).trim();
     const rules = await emailRules(brief);
     const kind = followup ? 'followup' : 'email';
     const first = firstName(business);
