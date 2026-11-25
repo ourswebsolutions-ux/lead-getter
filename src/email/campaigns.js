@@ -29,7 +29,7 @@ const { extractName, cleanBusiness } = require('../whatsapp/templates');
 const { leadFacts } = require('../ai/lead-facts');
 const { newTrackId } = require('./tracking');
 const { chooseEmail } = require('./verification');
-const { checkFollowups, checkSchedule, inWindow, nextWindow, pauseMs, withSignature, FOLLOWUP_DEFAULTS, SCHEDULE_DEFAULTS, DAY } = require('./sequence');
+const { checkFollowups, checkSchedule, inWindow, nextWindow, pauseMs, FOLLOWUP_DEFAULTS, SCHEDULE_DEFAULTS, DAY } = require('./sequence');
 
 // How a verification result is named in a recipient's reason.
 const VERIFY_LABEL = { valid: 'Valid', invalid: 'Invalid', risky: 'Risky', unknown: 'Unknown', catch_all: 'Catch-all' };
@@ -39,8 +39,8 @@ const VERIFY_LABEL = { valid: 'Valid', invalid: 'Invalid', risky: 'Risky', unkno
 // and the business's details; the text is kept on the recipient.
 // trackClicks: links go through the user's click tracking address (tracking.js), when it is set up.
 // followups: steps after the first email; schedule: sending days/hours; delayMaxSeconds: a random
-// pause up to this; maxPerDay: the campaign's emails a day (all accounts); signature: every email ends with it.
-const DEFAULTS = { delaySeconds: 60, delayMaxSeconds: null, dailyLimit: 100, maxPerDay: null, allowPrevious: false, attachments: [], html: null, accountIds: [], senderNext: {}, senderDown: {}, aiWrite: false, trackClicks: true, followups: FOLLOWUP_DEFAULTS, schedule: SCHEDULE_DEFAULTS, signature: '' };
+// pause up to this; maxPerDay: the campaign's emails a day (all accounts).
+const DEFAULTS = { delaySeconds: 60, delayMaxSeconds: null, dailyLimit: 100, maxPerDay: null, allowPrevious: false, attachments: [], html: null, accountIds: [], senderNext: {}, senderDown: {}, aiWrite: false, trackClicks: true, followups: FOLLOWUP_DEFAULTS, schedule: SCHEDULE_DEFAULTS };
 const SYNC_EVERY = 60_000; // category campaigns look for new leads with an email
 const LIMITS = { delay: { min: 10, max: 3600 }, daily: { min: 1, max: 2000 }, attachments: 10, attachmentBytes: 20 * 1024 * 1024, recipients: 20_000 };
 const MAX_ATTEMPTS = 3;
@@ -204,15 +204,14 @@ function htmlToText(html) {
 
 const UNSUBSCRIBE_TEXT = 'If you would rather not receive these emails, reply with “unsubscribe” and you will not be emailed again.';
 
-// The email for one recipient: { subject, text, html }.
-// signature: the sender's sign-off, added at the end unless the body already ends with it.
-function compose({ subject, body }, values, signature = '') {
+// The email for one recipient: { subject, text, html }. Its sign-off is the
+// one in the template, or the one the AI wrote from the prompt: nothing is
+// added to it (an old saved "signature" setting is not used).
+function compose({ subject, body }, values) {
   const s = render(subject, values).replace(/[\r\n]+/g, ' ').trim();
-  const raw = render(body, values);
-  const b = signature && !looksHtml(raw) ? withSignature(raw, signature) : raw;
-  const sigHtml = signature && looksHtml(raw) ? `<p>${esc(signature).replace(/\n/g, '<br>')}</p>` : '';
-  const html = (looksHtml(b) ? cleanHtml(b) : textToHtml(b)) + sigHtml;
-  const text = looksHtml(b) ? withSignature(htmlToText(b), signature) : b;
+  const b = render(body, values);
+  const html = looksHtml(b) ? cleanHtml(b) : textToHtml(b);
+  const text = looksHtml(b) ? htmlToText(b) : b;
   return {
     subject: s,
     text: `${text.trim()}\n\n--\n${UNSUBSCRIBE_TEXT}`,
@@ -459,7 +458,6 @@ class EmailCampaigns extends EventEmitter {
       if (!sc.ok) return sc;
       config.schedule = sc.value;
     }
-    if (patch.signature !== undefined) config.signature = String(patch.signature || '').replace(/\r\n/g, '\n').trim().slice(0, 500);
     if (patch.allowPrevious !== undefined) config.allowPrevious = Boolean(patch.allowPrevious);
     if (patch.aiWrite !== undefined) config.aiWrite = Boolean(patch.aiWrite);
     if (patch.trackClicks !== undefined) config.trackClicks = Boolean(patch.trackClicks);
@@ -479,6 +477,11 @@ class EmailCampaigns extends EventEmitter {
       config.attachments = list;
     }
     this.setFields(id, { ...fields, config });
+    // A new prompt: what the AI wrote under the old one and has not sent is written again.
+    if ((fields.body !== undefined && fields.body !== c.body) || (patch.aiWrite !== undefined && config.aiWrite !== c.config.aiWrite)) {
+      this.db.prepare("UPDATE email_recipients SET ai_subject = NULL, ai_body = NULL WHERE campaign_id = ? AND state IN ('queued', 'failed')").run(id);
+      this.db.prepare("UPDATE email_followups SET subject = NULL, body = NULL WHERE campaign_id = ? AND state IN ('queued', 'failed')").run(id);
+    }
     // Follow-ups changed: the leads' next ones follow the new steps.
     if (patch.followups !== undefined) this.syncFollowups(this.row(id));
     this.emit('change', { id });
@@ -736,7 +739,7 @@ class EmailCampaigns extends EventEmitter {
     const r = this.db.prepare("SELECT * FROM email_recipients WHERE campaign_id = ? ORDER BY CASE WHEN state = 'queued' THEN 0 ELSE 1 END, priority DESC, added_at, email LIMIT 1").get(c.id);
     let msg;
     try {
-      msg = c.config.aiWrite ? compose(await this.aiText(c, r || { email: address, name: null, business: null }, { save: false }), { name: r?.name || null, business: r?.business || null, email: r?.email || address }, c.config.signature) : compose(c, { name: r?.name || null, business: r?.business || null, email: r?.email || address }, c.config.signature);
+      msg = c.config.aiWrite ? compose(await this.aiText(c, r || { email: address, name: null, business: null }, { save: false }), { name: r?.name || null, business: r?.business || null, email: r?.email || address }) : compose(c, { name: r?.name || null, business: r?.business || null, email: r?.email || address });
     } catch (err) {
       return { ok: false, error: `The AI could not write the test email: ${err.message}.` };
     }
@@ -778,7 +781,7 @@ class EmailCampaigns extends EventEmitter {
       const values = { name: r?.name || null, business: r?.business || null, email: r?.email || address };
       let msg;
       try {
-        msg = c.config.aiWrite ? compose(await this.aiText(c, r || { email: address, name: null, business: null }, { save: false }), values, c.config.signature) : compose(c, values, c.config.signature);
+        msg = c.config.aiWrite ? compose(await this.aiText(c, r || { email: address, name: null, business: null }, { save: false }), values) : compose(c, values);
       } catch (err) {
         results.push({ account: acc?.name || from, to: address, as, ok: false, error: `the AI could not write it: ${err.message}` });
         continue;
@@ -1075,8 +1078,7 @@ class EmailCampaigns extends EventEmitter {
     const reserved = this.db.prepare("UPDATE email_recipients SET state = 'sending', attempts = attempts + 1, updated_at = ? WHERE campaign_id = ? AND email = ? AND state IN ('queued', 'failed')").run(now, c.id, r.email).changes;
     if (!reserved) return;
     this.paced(c, accountId, now);
-    const sig = c.config.signature || '';
-    let msg = text ? compose({ subject: text.subject, body: text.body }, { name: r.name, business: r.business, email: r.email }, sig) : compose(c, { name: r.name, business: r.business, email: r.email }, sig);
+    let msg = text ? compose({ subject: text.subject, body: text.body }, { name: r.name, business: r.business, email: r.email }) : compose(c, { name: r.name, business: r.business, email: r.email });
     if (this.tracking(c)) {
       const t = r.track_id || newTrackId();
       if (!r.track_id) set({ track_id: t });
@@ -1278,18 +1280,10 @@ class EmailCampaigns extends EventEmitter {
     const thread = `Re: ${String(r.sent_subject || render(c.subject, values) || '').replace(/^(re:\s*)+/i, '')}`.trim();
     if (f.body) return { subject: f.subject || thread, body: f.body, ai: true };
     if (!this.writer) throw Object.assign(new Error('no AI key is saved (follow-ups are written by the AI)'), { code: 'no_key' });
-    const earlier = [r.sent_text, ...this.db.prepare("SELECT body FROM email_followups WHERE campaign_id = ? AND email = ? AND step < ? AND state = 'sent' ORDER BY step").all(c.id, r.email, f.step).map((x) => x.body)].filter(Boolean);
-    const many = earlier.length > 1;
-    const brief = [
-      c.config.aiWrite && c.body ? `The sender’s instructions for this campaign (follow them: offer, language, tone, sign-off):\n${c.body}` : 'Write in the same language, tone and sign-off as the earlier email.',
-      step.body ? `For this follow-up: ${step.body}` : '',
-      `This is follow-up ${f.step}. The business has not replied to the earlier email${many ? 's' : ''} below. Write a short, polite follow-up (40 to 110 words unless the instructions say otherwise) in the same thread: refer back to ${many ? 'them' : 'it'} naturally, add one new helpful point or a simple question, and do not repeat ${many ? 'them' : 'it'}. Sign off exactly as the earlier email does.`,
-      `Earlier email${many ? 's' : ''} (oldest first):\n${earlier.map((t, i) => `[${i + 1}]\n${String(t).slice(0, 2500)}`).join('\n\n') || '(not available)'}`,
-    ]
-      .filter(Boolean)
-      .join('\n\n');
+    const earlier = [r.sent_text, ...this.db.prepare("SELECT body FROM email_followups WHERE campaign_id = ? AND email = ? AND step < ? AND state = 'sent' ORDER BY step").all(c.id, r.email, f.step).map((x) => x.body)].filter((t) => t).map((t) => String(t).split('\n--\n')[0]);
     const sender = this.accounts.get(this.senders(c)[0]);
-    const out = await this.writer({ instructions: brief, subject: step.subject || thread, sender: { name: sender?.senderName || sender?.name || '', email: sender?.email || '' }, business: this.leadDetails(r), signature: c.config.signature || '' });
+    const out = await this.writer({ instructions: c.config.aiWrite ? c.body : '', subject: step.subject || thread, sender: { name: sender?.senderName || sender?.name || '', email: sender?.email || '' }, business: this.leadDetails(r), followup: { step: f.step, note: step.body ? render(step.body, values) : '', earlier } });
+    if (out?.problems?.length) this.log(c.id, 'info', `Follow-up ${f.step} for ${r.email}: the AI's text still misses: ${out.problems.join(' ').slice(0, 300)}`);
     const body = String(out?.body || '').trim().slice(0, 8000);
     if (body.length < 10) throw Object.assign(new Error('the AI did not write a usable follow-up'), { code: 'ai_empty' });
     const subject = step.subject ? String(out?.subject || render(step.subject, values)).replace(/[\r\n]+/g, ' ').trim().slice(0, 200) : thread;
@@ -1338,7 +1332,7 @@ class EmailCampaigns extends EventEmitter {
     if (!reserved) return;
     this.paced(c, accountId, now);
     const values = { name: r.name, business: r.business, email: r.email };
-    let msg = compose({ subject: text.subject, body: text.body }, values, c.config.signature || '');
+    let msg = compose({ subject: text.subject, body: text.body }, values);
     if (this.tracking(c)) {
       const t = r.track_id || newTrackId();
       if (!r.track_id) this.db.prepare('UPDATE email_recipients SET track_id = ? WHERE campaign_id = ? AND email = ?').run(t, c.id, r.email);
@@ -1586,7 +1580,8 @@ class EmailCampaigns extends EventEmitter {
     if (r.ai_body) return { subject: r.ai_subject || c.subject, body: r.ai_body };
     if (!this.writer) throw Object.assign(new Error('no AI key is saved'), { code: 'no_key' });
     const sender = this.accounts.get(this.senders(c)[0]);
-    const out = await this.writer({ instructions: c.body, subject: '', sender: { name: sender?.senderName || sender?.name || '', email: sender?.email || '' }, business: this.leadDetails(r), signature: c.config.signature || '' });
+    const out = await this.writer({ instructions: c.body, subject: '', sender: { name: sender?.senderName || sender?.name || '', email: sender?.email || '' }, business: this.leadDetails(r) });
+    if (out?.problems?.length) this.log(c.id, 'info', `The AI's email for ${r.email} still misses: ${out.problems.join(' ').slice(0, 300)}`);
     const subject = String(out?.subject || c.subject || '').replace(/[\r\n]+/g, ' ').trim().slice(0, 200);
     const body = String(out?.body || '').trim().slice(0, 8000);
     if (!subject || body.length < 20) throw Object.assign(new Error('the AI did not write a usable email'), { code: 'ai_empty' });
@@ -1769,7 +1764,6 @@ class EmailCampaigns extends EventEmitter {
       windowOpensAt: c.status === 'running' && !inWindow(c.config.schedule, this.clock()) ? nextWindow(c.config.schedule, this.clock()) : null,
       delayMaxSeconds: c.config.delayMaxSeconds || null,
       maxPerDay: c.config.maxPerDay || null,
-      signature: c.config.signature || '',
       bounced: this.db.prepare('SELECT COUNT(*) AS n FROM email_recipients WHERE campaign_id = ? AND bounced_at IS NOT NULL').get(c.id).n,
       interested: this.db.prepare("SELECT COUNT(*) AS n FROM email_recipients WHERE campaign_id = ? AND interest = 'interested'").get(c.id).n,
       unsubscribed: this.db.prepare("SELECT COUNT(*) AS n FROM email_recipients WHERE campaign_id = ? AND email IN (SELECT email FROM email_optouts) AND bounced_at IS NULL").get(c.id).n,
@@ -1859,12 +1853,12 @@ class EmailCampaigns extends EventEmitter {
       if (!r) return { ok: false, error: 'Add recipients first: the AI writes for a real business.' };
       try {
         const t = await this.aiText({ ...c, subject: subject ?? c.subject, body: body ?? c.body }, { ...r, ai_body: null }, { save: false });
-        return { ok: true, to: r.email, ai: true, ...compose(t, { name: r.name, business: r.business, email: r.email }, c.config.signature) };
+        return { ok: true, to: r.email, ai: true, ...compose(t, { name: r.name, business: r.business, email: r.email }) };
       } catch (err) {
         return { ok: false, error: `The AI could not write it: ${err.message}.` };
       }
     }
-    const msg = compose({ subject: subject ?? c.subject, body: body ?? c.body }, { name: r?.name || null, business: r?.business || null, email: r?.email || 'recipient@example.com' }, c.config.signature);
+    const msg = compose({ subject: subject ?? c.subject, body: body ?? c.body }, { name: r?.name || null, business: r?.business || null, email: r?.email || 'recipient@example.com' });
     return { ok: true, to: r?.email || null, ...msg };
   }
 }

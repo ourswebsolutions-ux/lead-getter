@@ -264,7 +264,6 @@ function registerEmailIpc({ handle, email, requirePlan, pickFiles, send, listCat
     if (Array.isArray(p.accountIds)) clean.accountIds = p.accountIds.map(String).slice(0, 50);
     if (Array.isArray(p.attachments)) clean.attachments = p.attachments.map((a) => (typeof a === 'string' ? a : str(a?.id))).slice(0, 20);
     for (const k of ['delayMaxSeconds', 'maxPerDay']) if (p[k] !== undefined) clean[k] = p[k] === null || p[k] === '' ? null : Number(p[k]);
-    if (typeof p.signature === 'string') clean.signature = p.signature;
     if (p.followups && typeof p.followups === 'object') clean.followups = { on: p.followups.on === true, steps: (Array.isArray(p.followups.steps) ? p.followups.steps : []).slice(0, 10).map((x) => ({ days: Number(x?.days), subject: str(x?.subject), body: str(x?.body) })) };
     if (p.schedule && typeof p.schedule === 'object') clean.schedule = { on: p.schedule.on === true, days: Array.isArray(p.schedule.days) ? p.schedule.days.map(Number) : [], start: Number(p.schedule.start), end: Number(p.schedule.end), tz: str(p.schedule.tz) };
     return campaigns.update(cid, clean);

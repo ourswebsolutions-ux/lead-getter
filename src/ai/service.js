@@ -8,7 +8,9 @@
 const { Groq, OpenRouter, Providers } = require('./groq');
 const { buildTools } = require('./tools');
 const { Operator } = require('./operator');
+const crypto = require('node:crypto');
 const { extractAccounts } = require('../email/credentials');
+const { RULES_SYSTEM, sanitizeRules, fallbackRules, mergeRules, firstName, expectedGreeting, setGreeting, setSignoff, problems } = require('./email-rules');
 
 // Per provider: where its status is kept and its key's name in the vault.
 const PROVIDERS = {
@@ -16,6 +18,18 @@ const PROVIDERS = {
   openrouter: { Class: OpenRouter, statusKey: 'ai.openrouter', vaultName: 'openrouter', hint: 'it starts with sk-or-' },
 };
 const MAIN_KEY = 'ai.main';
+// The rules read from email prompts (per prompt).
+const RULES_KEY = 'ai.emailRules';
+
+// The JSON object in an answer (even inside a code block), or null.
+function parseJson(content) {
+  const text = String(content || '');
+  try {
+    return JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
+  } catch {
+    return null;
+  }
+}
 
 // bases: { groq, openrouter } API addresses (tests only).
 function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fetchImpl, base, bases = {} }) {
@@ -96,77 +110,126 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
     return { ok: true, settings: view() };
   }
 
-  // One personalised email: the user's instructions + the business's facts.
-  // Resolves { subject, body } (plain text; the app adds the unsubscribe line).
-  // The instructions are the brief and come first: they decide the offer,
-  // what is said, tone, language, length, structure, greeting, sign-off and
-  // call to action; a template or example in them is followed and only
-  // personalised. The app's own rules are defaults for what they leave open,
-  // except never inventing facts. An answer that is not usable (not JSON,
-  // empty, placeholders left in it) is asked for once more.
-  // signature: the sender's sign-off; the email ends with exactly it (the AI never replaces the sender).
-  async function writeEmail({ instructions, subject = '', sender = {}, business = {}, signature = '' }) {
-    const brief = String(instructions || '').slice(0, 6000).trim();
-    const system = [
-      'You write ONE outreach email on behalf of the sender, to one business. You are the sender’s copywriter: do exactly what the sender’s instructions ask.',
-      '',
-      '=== THE SENDER’S INSTRUCTIONS (top priority) ===',
-      brief || '(none: write a short, friendly introduction of the sender’s services)',
-      '=== END OF INSTRUCTIONS ===',
-      '',
-      'How to follow them:',
-      '- They decide the offer, what to say and what not to say, the tone, the language, the length, the structure, the greeting, the sign-off and the call to action. Follow every point they make, in their order.',
-      '- If they contain a template or an example email, keep its structure, wording and paragraphs, and only personalise it for this business (its name, category, area, website situation). Replace any placeholder in it ({name}, {business}, [Business Name], <company>...) with the business’s real value, or rephrase the sentence if the value is unknown.',
-      '- If they give facts about the sender (services, prices, links, phone, portfolio), use them as given, word for word where they are exact (links, numbers, names).',
-      '',
-      'Defaults, only where the instructions say nothing:',
-      '- Language: the language the instructions are written in (Roman Urdu stays Roman Urdu).',
-      '- Length: about 80 to 180 words.',
-      '- Greeting: the contact’s first name if contact_name is a person’s name; otherwise a neutral greeting (no "Dear Sir/Madam" unless asked).',
-      signature ? '' : '- Sign off with the sender’s name (and nothing invented after it).',
-      '',
-      'Always:',
-      '- Make it specific to this business using the facts in the user message (category, area, website or not, rating, what they do).',
-      '- Never invent anything that is not in the facts or the instructions: no made-up names, numbers, reviews, prices, results or claims.',
-      signature ? `- End the email with exactly this sign-off, unchanged, and no other sign-off or name after it (never write as anyone else):\n${String(signature).slice(0, 500)}` : '',
-      '- Plain text only: no markdown, no ** or #, no placeholders left, no subject line inside the body, no unsubscribe line (the app adds one).',
-      subject ? `- Subject: use exactly this subject, filling {name} / {business} from the facts (drop a placeholder whose value is unknown): ${subject}` : '- Subject: short and specific (at most 9 words), in the email’s language, as the instructions ask if they say anything about it; no clickbait, no ALL CAPS.',
-      '',
+  // The checkable rules of a prompt (sign-off, greeting, required lines,
+  // bullets, questions, length; see email-rules.js), read once by the AI and
+  // kept per prompt.
+  const rulesSeen = new Map();
+  async function emailRules(prompt) {
+    const p = String(prompt || '').trim();
+    if (!p) return {};
+    const key = crypto.createHash('sha256').update(p).digest('hex').slice(0, 32);
+    if (rulesSeen.has(key)) return rulesSeen.get(key);
+    const kept = store.getState(RULES_KEY) || {};
+    if (kept[key]) {
+      rulesSeen.set(key, kept[key].rules);
+      return kept[key].rules;
+    }
+    let read = null;
+    try {
+      const { message } = await ai.chat([{ role: 'system', content: RULES_SYSTEM }, { role: 'user', content: p }], [], { maxTokens: 1500 });
+      read = parseJson(message?.content);
+    } catch (err) {
+      if (['no_key', 'invalid_key', 'credits'].includes(err.code)) throw err;
+    }
+    const rules = mergeRules(fallbackRules(p), read ? sanitizeRules(read, p) : {});
+    if (read) {
+      // Read again next time if the AI could not be asked now.
+      rulesSeen.set(key, rules);
+      const next = Object.fromEntries(Object.entries({ ...kept, [key]: { rules, at: Date.now() } }).sort((a, b) => b[1].at - a[1].at).slice(0, 30));
+      store.setState(RULES_KEY, next);
+    }
+    return rules;
+  }
+
+  // One personalised email (or a follow-up) from the sender's prompt and the
+  // business's facts. Resolves { subject, body, problems } (plain text; the
+  // app adds the unsubscribe line).
+  //   The prompt is the system message, first and whole: it decides the
+  //   offer, wording, structure, greeting, length, call to action and
+  //   sign-off. The app's notes after it only add what it leaves open and
+  //   never compete with it (no sender name when the prompt has a sign-off).
+  //   The user message has only the facts of this business (and, for a
+  //   follow-up, the earlier emails).
+  //   What comes back is checked against the prompt's rules: the greeting
+  //   and sign-off are set exactly by the app (whatever the AI signed with);
+  //   anything else that is wrong is sent back to the AI to rewrite, at most
+  //   twice; the best answer is used and what it still misses is in `problems`.
+  // followup: { step, note, earlier: [text] } for a follow-up in the thread.
+  async function writeEmail({ instructions, subject = '', sender = {}, business = {}, followup = null }) {
+    const brief = String(instructions || '').slice(0, 30_000).trim();
+    const rules = await emailRules(brief);
+    const kind = followup ? 'followup' : 'email';
+    const first = firstName(business);
+    const greeting = expectedGreeting(rules, first);
+    const has = (k) => rules[k] != null;
+    const notes = [
+      followup
+        ? `You write follow-up ${followup.step} for the sender, to one business that has not replied to the earlier email${followup.earlier?.length > 1 ? 's' : ''} (in the user message). Use the brief’s language, tone, offer, greeting and sign-off, but not its first-email structure, list or length: a short, polite follow-up (40 to 110 words unless the brief says how long follow-ups are) that refers back to the earlier email naturally, adds one new helpful point or one simple question, and does not repeat it.${followup.note ? ` For this follow-up: ${String(followup.note).slice(0, 1000)}` : ''}`
+        : 'You write ONE email from the sender to the one business in the user message. Follow every rule of the brief above exactly: its structure, greeting, required wording, services, length, call to action, subject and sign-off. If it has a template or an example email, keep its structure and wording and only personalise it for this business. Replace every placeholder with the real value from the facts, or rephrase the sentence if the value is unknown.',
+      'The user message has only facts about this business. Personalise with them. Never invent anything that is not in the facts or the brief: no compliments, reviews, ratings, numbers, results, people or details about their website (its content was not read: say only what the facts say about it).',
+      greeting ? `Greeting: exactly “${greeting}” on its own line.` : first ? `Greeting: by the first name, ${first}.` : 'Greeting: no person’s name is known; never greet the business’s name as if it were a person.',
+      rules.signoff ? `Sign-off: end with exactly these lines, and nothing after them (no other name, title, company, email address or phone):\n${rules.signoff}` : followup ? 'Sign-off: the same as the earlier email’s.' : 'Sign-off: as the brief says; if it says nothing, the sender_name in the user message.',
+      ...(followup
+        ? []
+        : [
+            ...(rules.required_lines || []).map((l) => `Include this line word for word: ${l}`),
+            has('bullets') ? `Bullet points: ${rules.bullets.min === rules.bullets.max ? rules.bullets.min : `${rules.bullets.min} to ${rules.bullets.max}`}, one item each, each on its own line starting with "- ".` : '',
+            has('questions') ? `Questions: ${rules.questions.min === rules.questions.max ? `exactly ${rules.questions.min}` : `${rules.questions.min} to ${rules.questions.max}`} in the whole email (the call to action).` : '',
+            has('words') ? `Length: ${rules.words.min} to ${rules.words.max} words in the body (aim for about ${Math.round((rules.words.min + rules.words.max) / 2)}; count them before you answer).` : 'Length: as the brief says; if it says nothing, about 80 to 180 words.',
+          ]),
+      'Language: the brief’s (Roman Urdu stays Roman Urdu), unless it says otherwise.',
+      'Plain text only: no markdown, no ** or #, no placeholders left, no subject line inside the body, no unsubscribe line (the app adds one).',
+      subject ? `Subject: exactly this, filling {name} / {business} from the facts (drop a placeholder whose value is unknown): ${subject}` : 'Subject: as the brief says; otherwise short and specific to this business (at most 9 words), no clickbait, no ALL CAPS.',
       'Reply with JSON only, nothing before or after it: {"subject": "...", "body": "..."}',
+    ].filter(Boolean);
+    const system = [
+      '=== THE SENDER’S BRIEF (follow it exactly; it overrides everything below) ===',
+      brief || (followup ? '(none: write as the earlier email does: same language, tone, offer and sign-off)' : '(none: write a short, friendly introduction of the sender’s services)'),
+      '=== END OF THE BRIEF ===',
+      '',
+      'Notes from the app (they never change the brief):',
+      ...notes.map((n) => `- ${n}`),
     ].join('\n');
-    const user = JSON.stringify({ instructions: brief, sender, business });
+    const facts = { ...business, ...(first ? { first_name: first } : {}) };
+    delete facts.email;
+    const user = JSON.stringify({
+      business: facts,
+      first_name: first || null,
+      ...(greeting ? { greeting } : {}),
+      ...(rules.signoff ? {} : { sender_name: sender.name || '' }),
+      ...(followup ? { earlier_emails: (followup.earlier || []).map((t) => String(t).slice(0, 2500)) } : {}),
+    });
     const read = (message) => {
-      const text = String(message?.content || '');
-      const json = text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1);
-      try {
-        const out = JSON.parse(json);
-        return out && typeof out.body === 'string' && out.body.trim() ? out : null;
-      } catch {
-        return null;
-      }
+      const out = parseJson(message?.content);
+      return out && typeof out.body === 'string' && out.body.trim() ? out : null;
     };
-    // Placeholders the AI left: filled from the facts, or reported.
+    // Placeholders the AI left: filled from the facts.
     const fill = (t) =>
       String(t || '')
-        .replace(/\{\s*(business(?: name)?|company)\s*\}|\[\s*(business|company)(?: name)?\s*\]/gi, business.business_name || business.company || '')
-        .replace(/\{\s*(name|first name|contact)\s*\}|\[\s*(name|first name|contact(?: name)?)\s*\]/gi, (business.contact_name || '').split(/\s+/)[0] || '')
+        .replace(/\{\s*(business(?:[ _]name)?|company)\s*\}|\[\s*(business|company)(?: name)?\s*\]/gi, business.business_name || business.company || '')
+        .replace(/\{\s*(name|first[ _]name|contact)\s*\}|\[\s*(name|first name|contact(?: name)?)\s*\]/gi, first || '')
         .replace(/\{\s*(sender|your name)\s*\}|\[\s*(your name|sender(?: name)?)\s*\]/gi, sender.name || '');
-    const leftover = (t) => /\[[A-Z][A-Za-z ]{2,30}\]|\{[a-z ]{2,30}\}|<(?:company|name|business)>/i.test(t);
+    // The greeting and sign-off set by the app; then what is still wrong.
+    const finish = (out) => {
+      let body = fill(out.body).replace(/\r\n/g, '\n').replace(/\*\*(.+?)\*\*/g, '$1').replace(/^#+\s*/gm, '').trim();
+      body = setGreeting(body, greeting);
+      body = setSignoff(body, rules.signoff, [sender.name, business.contact_name]);
+      const email = { subject: fill(String(out.subject || subject || '')).replace(/\s+/g, ' ').trim(), body };
+      return { ...email, problems: problems(email, rules, business, { kind }) };
+    };
     const opts = { maxTokens: 4000, reasoning: 'medium' };
     const messages = [{ role: 'system', content: system }, { role: 'user', content: user }];
-    let out = read((await ai.chat(messages, [], opts)).message);
-    let body = out ? fill(out.body) : '';
-    if (!out || leftover(body)) {
-      // Once more, saying what was wrong.
-      const again = [...messages, { role: 'assistant', content: out ? JSON.stringify(out) : '(no usable answer)' }, { role: 'user', content: out ? 'The body still has placeholders. Replace every placeholder with the real value from the facts (or rephrase without it) and answer with the JSON only.' : 'Answer with the JSON only: {"subject": "...", "body": "..."}, following the instructions.' }];
-      const second = read((await ai.chat(again, [], opts)).message);
-      if (second) {
-        out = second;
-        body = fill(second.body);
-      }
+    let best = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const out = read((await ai.chat(messages, [], opts)).message);
+      const got = out ? finish(out) : null;
+      if (got && (!best || got.problems.length < best.problems.length)) best = got;
+      if (best && !best.problems.length) break;
+      messages.push({ role: 'assistant', content: out ? JSON.stringify(out) : '(no usable answer)' });
+      messages.push({ role: 'user', content: got ? `This email does not follow the brief yet:\n${got.problems.map((p) => `- ${p}`).join('\n')}\nRewrite it so it follows every rule of the brief and the notes, for the same business, and answer with the JSON only.` : 'Answer with the JSON only: {"subject": "...", "body": "..."}, following the brief.' });
     }
-    if (!out) throw Object.assign(new Error('the AI did not answer in the expected form'), { code: 'ai_empty' });
-    return { subject: fill(String(out.subject || subject || '')).replace(/\s+/g, ' ').trim(), body: body.replace(/\r\n/g, '\n').replace(/\*\*(.+?)\*\*/g, '$1').trim() };
+    if (!best) throw Object.assign(new Error('the AI did not answer in the expected form'), { code: 'ai_empty' });
+    return best;
   }
 
   // One personalised WhatsApp message: the user's prompt + the business's facts.

@@ -142,7 +142,8 @@ test('The email writer: instructions and business facts go to the AI; its JSON a
   assert.match(out.body, /^Hi Zahid,\n\nI noticed/);
   const userMsg = JSON.parse(sent.messages[1].content);
   assert.equal(userMsg.business.address, 'DHA Lahore');
-  assert.equal(userMsg.instructions, 'We build websites. Friendly, English.');
+  assert.ok(sent.messages[0].content.includes('We build websites. Friendly, English.'), 'the prompt is the system message');
+  assert.equal(userMsg.instructions, undefined, 'and only the facts are the user message');
   assert.match(sent.messages[0].content, /Never invent/);
   assert.equal(sent.tools, undefined, 'no tools for writing');
 });
@@ -156,17 +157,21 @@ test('The email writer follows the prompt: it is the brief (first, in the system
   vault.set('groq', KEY);
   const bodies = [];
   const answers = ['Sure! Here is your email: Subject - Hello', JSON.stringify({ subject: 'Website for [Business Name]', body: 'Assalam o Alaikum {name},\n\n[Business Name] ki website nahi hai. Hum 25,000 mein bana dete hain.\n\nAli' })];
+  const { RULES_SYSTEM } = require('../src/ai/email-rules');
   const fetchImpl = async (url, init) => {
-    bodies.push(JSON.parse(init.body));
-    return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ choices: [{ message: { role: 'assistant', content: answers.shift() } }] }) };
+    const body = JSON.parse(init.body);
+    // The prompt's rules are read first (this one has none to check).
+    const rules = body.messages[0].content === RULES_SYSTEM;
+    if (!rules) bodies.push(body);
+    return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ choices: [{ message: { role: 'assistant', content: rules ? '{"signoff": null}' : answers.shift() } }] }) };
   };
   const ai = createAI({ store, vault, toolDeps: { email: null, files: null, store: null }, fetchImpl });
   const prompt = 'Roman Urdu mein likho. Template:\nAssalam o Alaikum {name},\n[Business Name] ki website nahi hai. Hum 25,000 mein bana dete hain.\nAli';
   const out = await ai.writeEmail({ instructions: prompt, sender: { name: 'Ali' }, business: { business_name: 'Zahid Properties', contact_name: 'Zahid Khan' } });
   assert.equal(bodies.length, 2, 'the unusable first answer was asked for again');
   const sys = bodies[0].messages[0].content;
-  assert.ok(sys.indexOf(prompt) > 0 && sys.indexOf(prompt) < sys.indexOf('Defaults'), 'the prompt comes before the defaults');
-  assert.match(sys, /keep its structure, wording/);
+  assert.ok(sys.indexOf(prompt) > 0 && sys.indexOf(prompt) < sys.indexOf('Notes from the app'), 'the prompt comes before the app’s notes');
+  assert.match(sys, /keep its structure and wording/);
   assert.equal(bodies[0].max_completion_tokens, 4000);
   assert.equal(bodies[0].reasoning_effort, 'medium', 'gpt-oss thinks a little more for emails');
   assert.equal(out.subject, 'Website for Zahid Properties');

@@ -8,7 +8,6 @@
 //               body are optional extra instructions for that step.
 //   schedule    the days and hours a campaign may send, in a time zone:
 //               { on, days: [0-6, Sunday 0], start, end (minutes of the day), tz }
-//   signature   the sender's sign-off every email ends with (never replaced by the AI)
 
 const DAY = 24 * 3600_000;
 const MAX_STEPS = 5;
@@ -90,15 +89,4 @@ function pauseMs(config, random = Math.random) {
   return Math.round((min + random() * (max - min)) * 1000);
 }
 
-// The signature at the end of a text body, unless it already ends with it
-// (the AI was asked to end with it; a template may include it).
-function withSignature(text, signature) {
-  const sig = String(signature || '').trim();
-  if (!sig) return text;
-  const norm = (s) => s.replace(/\s+/g, ' ').trim().toLowerCase();
-  const body = String(text || '').trimEnd();
-  if (norm(body.slice(-sig.length - 40)).endsWith(norm(sig))) return body;
-  return `${body}\n\n${sig}`;
-}
-
-module.exports = { checkFollowups, checkSchedule, inWindow, nextWindow, localTime, pauseMs, withSignature, validTz, FOLLOWUP_DEFAULTS, SCHEDULE_DEFAULTS, MAX_STEPS, DAY };
+module.exports = { checkFollowups, checkSchedule, inWindow, nextWindow, localTime, pauseMs, validTz, FOLLOWUP_DEFAULTS, SCHEDULE_DEFAULTS, MAX_STEPS, DAY };

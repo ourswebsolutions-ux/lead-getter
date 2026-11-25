@@ -3,7 +3,7 @@
 // lead has not replied; replies, bounces, unsubscribes, stops and
 // verification end a lead's sequence; out-of-office replies do not; pause,
 // resume, restart, retries with doubling waits, several campaigns and
-// accounts, sending days and hours in a time zone, the signature, threads,
+// accounts, sending days and hours in a time zone, the sign-off, threads,
 // timelines and the dashboard. All on local test servers.
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -14,7 +14,7 @@ const { EmailAccounts } = require('../src/email/accounts');
 const { EmailCampaigns } = require('../src/email/campaigns');
 const { EmailVerification } = require('../src/email/verification');
 const { ReplyWatcher, parseBounce, isAutoReply } = require('../src/email/replies');
-const { inWindow, nextWindow, checkFollowups, withSignature } = require('../src/email/sequence');
+const { inWindow, nextWindow, checkFollowups } = require('../src/email/sequence');
 const { Vault } = require('../src/main/vault');
 
 const DAY = 24 * 3600_000;
@@ -68,9 +68,8 @@ function sequence(campaigns, accId, extra = {}) {
   const r = campaigns.update(c.id, {
     accountIds: [accId],
     subject: 'Website for {business}',
-    body: 'Hello {name},\n\nWe build websites.',
+    body: 'Hello {name},\n\nWe build websites.\n\nBest,\nAli',
     delaySeconds: 60,
-    signature: 'Best,\nAli',
     followups: { on: true, steps: [{ days: 2, subject: '', body: 'Just following up on my email, {name}.' }, { days: 3, subject: '', body: 'One last note.' }, { days: 4, subject: '', body: 'Closing the loop.' }] },
     ...extra,
   });
@@ -78,7 +77,7 @@ function sequence(campaigns, accId, extra = {}) {
   return c.id;
 }
 
-test('Initial email, then follow-ups on days 3, 6 and 10 (2, 3, 4 days after the previous one), in the same thread, with the signature', { timeout: 60_000 }, async (t) => {
+test('Initial email, then follow-ups on days 3, 6 and 10 (2, 3, 4 days after the previous one), in the same thread, with the template’s sign-off', { timeout: 60_000 }, async (t) => {
   const h = await setup(t);
   const id = sequence(h.campaigns, h.acc.id);
   h.campaigns.addLeads(id, { ids: [1] });
@@ -87,7 +86,7 @@ test('Initial email, then follow-ups on days 3, 6 and 10 (2, 3, 4 days after the
   const first = h.to('zahid@good.test');
   assert.equal(first.length, 1, 'the first email');
   assert.match(first[0].text, /Subject: Website for Zahid Properties/);
-  assert.match(first[0].text, /We build websites\.\n\nBest,\nAli\n/, 'the signature at the end');
+  assert.match(first[0].text, /We build websites\.\n\nBest,\nAli\n/, 'the template’s sign-off, nothing added');
   const sentAt = h.campaigns.db.prepare("SELECT sent_at FROM email_recipients WHERE email = 'zahid@good.test'").get().sent_at;
   const row = h.campaigns.recipientRows(id, 10)[0];
   assert.equal(row.status, 'followup_scheduled');
@@ -102,7 +101,7 @@ test('Initial email, then follow-ups on days 3, 6 and 10 (2, 3, 4 days after the
   assert.ok(fu1, 'follow-up 1 on day 3');
   assert.match(fu1.text, /Subject: Re: Website for Zahid Properties/);
   assert.match(fu1.text, /In-Reply-To: <.+>/);
-  assert.match(fu1.text, /Just following up on my email, Zahid\.\n\nBest,\nAli/);
+  assert.match(fu1.text, /Just following up on my email, Zahid\.\n\n--\n/, 'the AI’s follow-up, nothing added to it');
   await h.run(3 * DAY + 30 * MIN, 30 * MIN);
   assert.equal(h.to('zahid@good.test').length, 3, 'follow-up 2 on day 6');
   assert.match(h.to("zahid@good.test")[2].text, /References: <[^>]+>\s+<[^>]+>/, "it answers both earlier emails");
@@ -274,7 +273,6 @@ test('Settings are checked; a copy keeps the sequence; account switches and dail
   assert.equal(checkFollowups({ on: true, steps: [] }).ok, false);
   assert.equal(checkFollowups({ on: true, steps: [{ days: 0, body: 'x' }] }).ok, false);
   assert.equal(checkFollowups({ on: true, steps: Array(6).fill({ days: 1, body: 'x' }) }).ok, false);
-  assert.equal(withSignature('Hello\n\nBest,\nAli', 'Best,\nAli'), 'Hello\n\nBest,\nAli', 'not twice');
   const id = sequence(h.campaigns, h.acc.id, { aiWrite: true, body: 'Offer a website.', followups: { on: true, steps: [{ days: 1, subject: '', body: 'Remind them kindly.' }] } });
   const copy = h.campaigns.duplicate(id);
   assert.ok(copy.ok);
@@ -287,11 +285,12 @@ test('Settings are checked; a copy keeps the sequence; account switches and dail
   await h.run(DAY + 10 * MIN, 10 * MIN);
   assert.equal(h.to('zahid@good.test').length, 2);
   const fw = writes.at(-1);
-  assert.match(fw.instructions, /Offer a website\./, 'the campaign’s prompt');
-  assert.match(fw.instructions, /For this follow-up: Remind them kindly\./);
-  assert.match(fw.instructions, /This is follow-up 1/);
-  assert.match(fw.instructions, /Earlier email[^]*AI follow-up for Zahid Properties/, 'the email it follows up on');
-  assert.equal(fw.signature, 'Best,\nAli');
+  assert.equal(fw.instructions, 'Offer a website.', 'the campaign’s prompt, as it is');
+  assert.equal(fw.followup.note, 'Remind them kindly.');
+  assert.equal(fw.followup.step, 1);
+  assert.match(fw.followup.earlier.join('\n'), /AI follow-up for Zahid Properties/, 'the email it follows up on');
+  assert.doesNotMatch(fw.followup.earlier.join('\n'), /unsubscribe/, 'without the unsubscribe line');
+  assert.equal(fw.signature, undefined, 'no separate signature');
   // An account switched off is never used; a daily limit across campaigns.
   assert.ok(h.accounts.setLimits(h.acc.id, { enabled: false }).ok);
   const id2 = h.campaigns.create({ name: 'Off' }).id;

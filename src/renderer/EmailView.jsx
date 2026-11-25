@@ -837,7 +837,7 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
   const sendersKey = snap.accountIds.join(',');
   useEffect(() => setSenderIds(sendersKey ? sendersKey.split(',') : []), [sendersKey]);
   useEffect(() => {
-    if (!dirty) setD({ name: snap.name, aiWrite: snap.aiWrite, trackClicks: snap.trackClicks, delayMinutes: Math.round((snap.delaySeconds / 60) * 10) / 10, delayMaxMinutes: snap.delayMaxSeconds ? Math.round((snap.delayMaxSeconds / 60) * 10) / 10 : '', maxPerDay: snap.maxPerDay || '', signature: snap.signature || '', subject: snap.subject, body: snap.body, delaySeconds: snap.delaySeconds, dailyLimit: snap.dailyLimit, allowPrevious: snap.allowPrevious });
+    if (!dirty) setD({ name: snap.name, aiWrite: snap.aiWrite, trackClicks: snap.trackClicks, delayMinutes: Math.round((snap.delaySeconds / 60) * 10) / 10, delayMaxMinutes: snap.delayMaxSeconds ? Math.round((snap.delayMaxSeconds / 60) * 10) / 10 : '', maxPerDay: snap.maxPerDay || '', subject: snap.subject, body: snap.body, delaySeconds: snap.delaySeconds, dailyLimit: snap.dailyLimit, allowPrevious: snap.allowPrevious });
   }, [snap, dirty]);
   if (!d) return null;
   const running = snap.status === 'running';

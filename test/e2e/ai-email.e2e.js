@@ -53,9 +53,13 @@ async function fakeGroq() {
       const { messages } = JSON.parse(body);
       calls.push(messages);
       // The email writer (no tools): a JSON email from the business facts.
-      if (/You write ONE outreach email on behalf of the sender/.test(messages[0].content)) {
+      // The prompt's rules (this prompt has none to check).
+      if (/^You read an email-writing brief/.test(messages[0].content)) return send(200, { choices: [{ message: { role: 'assistant', content: '{}' } }] });
+      // The email writer: the prompt is the system message, the facts the user message.
+      if (/Notes from the app/.test(messages[0].content)) {
         const u = JSON.parse(messages[1].content);
-        return send(200, { choices: [{ message: { role: 'assistant', content: JSON.stringify({ subject: `AI idea for ${u.business.business_name}`, body: `Salam,\n\n${u.business.business_name} in ${u.business.address} has no website yet. ${u.instructions}\n\n${u.sender.name}` }) } }] });
+        const brief = /=== THE SENDER’S BRIEF[^\n]*\n([^]*?)\n=== END OF THE BRIEF ===/.exec(messages[0].content)[1];
+        return send(200, { choices: [{ message: { role: 'assistant', content: JSON.stringify({ subject: `AI idea for ${u.business.business_name}`, body: `Salam,\n\n${u.business.business_name} in ${u.business.address} has no website yet. ${brief}\n\n${u.sender_name}` }) } }] });
       }
       const last = messages.at(-1);
       const reply = (content) => send(200, { choices: [{ message: { role: 'assistant', content } }] });
@@ -224,7 +228,7 @@ test('Email campaigns, Groq settings, the Assistant and AI on WhatsApp, in the r
   assert.deepEqual(aiMail.to, ['owner@karachigrill.pk']);
   assert.match(aiMail.text, /Subject: AI idea for Karachi Grill/);
   assert.match(aiMail.text, /Gulberg, Lahore has no website yet\. We build websites for restaurants/);
-  assert.ok(groq.calls.some((m) => /owner@karachigrill\.pk/.test(m[1]?.content || '')), 'the business details went to the AI');
+  assert.ok(groq.calls.some((m) => /Notes from the app/.test(m[0]?.content || '') && /"business_name":"Karachi Grill"[^]*Gulberg/.test(m[1]?.content || '')), 'the business details went to the AI');
   await win.screenshot({ path: path.join(os.tmpdir(), 'lf-email-ai.png'), fullPage: true });
 
   // --- WhatsApp: the same AI switch; on, only the prompt shows.
