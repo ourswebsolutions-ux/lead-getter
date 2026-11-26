@@ -138,7 +138,7 @@ function buildTools(d) {
       sending_accounts: s.senders.map((x) => ({ id: x.id, name: x.name, email: x.email, sent_today: x.sentToday, failing: x.down || undefined })),
       category_campaign: c.category ? true : undefined,
       ai_writes_each_email: Boolean(c.config.aiWrite),
-      ai_writer: c.config.writer === 'claude' ? 'claude (written in Claude Desktop with emails_to_write / save_written_emails)' : 'the app (Groq / OpenRouter key)',
+      ai_writer: { claude: 'Claude, when each email is sent', desktop: 'by hand in Claude Desktop (emails_to_write / save_written_emails)' }[c.config.writer] || 'the model chosen in Settings',
       written_by_claude: s.claude ? { written_not_sent: s.claude.written, still_to_write: s.claude.toWrite, follow_ups_written: s.claude.followupsWritten, follow_ups_to_write: s.claude.followupsToWrite } : undefined,
       subject: c.subject || null,
       body: c.body ? c.body.slice(0, 1500) : null,
@@ -386,8 +386,8 @@ function buildTools(d) {
     {
       name: 'update_whatsapp_campaign',
       kind: 'config',
-      description: 'Changes a WhatsApp campaign that is not running: name, account, minutes between contacts, daily limit, quiet hours, and AI writing (ai_write on: the AI writes one personal message per contact from ai_prompt and the business’s details, instead of the fixed messages).',
-      parameters: obj({ campaign_id: CAMPAIGN_ID, ai_write: { type: 'boolean' }, ai_prompt: { type: 'string', description: 'The user’s instructions for the AI: offer, tone, language' }, name: { type: 'string' }, account_id: { type: 'string' }, minutes_between_contacts: { type: 'integer' }, daily_limit: { type: 'integer' }, quiet_start_hour: { type: 'integer' }, quiet_end_hour: { type: 'integer' } }, ['campaign_id']),
+      description: 'Changes a WhatsApp campaign that is not running: name, account, minutes between contacts, daily limit, quiet hours, and AI writing (ai_write on: the AI writes one personal message per contact instead of the fixed messages; writer "claude": Claude writes them from ai_prompt and each lead’s details; writer "api": the model chosen in Settings).',
+      parameters: obj({ campaign_id: CAMPAIGN_ID, ai_write: { type: 'boolean' }, writer: { type: 'string', enum: ['claude', 'api'] }, ai_prompt: { type: 'string', description: 'The user’s instructions for the AI: offer, tone, language' }, name: { type: 'string' }, account_id: { type: 'string' }, minutes_between_contacts: { type: 'integer' }, daily_limit: { type: 'integer' }, quiet_start_hour: { type: 'integer' }, quiet_end_hour: { type: 'integer' } }, ['campaign_id']),
       run: (a) => {
         const r = waCampaign(a.campaign_id);
         if (!r.ok) return r;
@@ -403,6 +403,7 @@ function buildTools(d) {
         if (a.quiet_end_hour != null) patch.quietEnd = Number(a.quiet_end_hour);
         if (typeof a.ai_write === 'boolean') patch.aiWrite = a.ai_write;
         if (typeof a.ai_prompt === 'string') patch.aiPrompt = a.ai_prompt.slice(0, 4000);
+        if (a.writer === 'claude' || a.writer === 'api') patch.writer = a.writer;
         // Turned on with no message of its own: the default first message stays as the (unused) fallback.
         if (patch.aiWrite && r.c.config._aiFresh) {
           const st = r.o.load(r.c.id);
@@ -539,12 +540,12 @@ function buildTools(d) {
       name: 'update_email_campaign',
       kind: 'config',
       description: 'Changes an email campaign that is not running: name, account, subject, body (plain text or HTML; placeholders {name}, {business}, {email}), seconds between emails, daily limit.',
-      parameters: obj({ campaign_id: CAMPAIGN_ID, ai_write: { type: 'boolean', description: 'On: the AI writes each email from the body (used as the instructions/prompt) and the business’s details' }, writer: { type: 'string', enum: ['api', 'claude'], description: 'Who writes the AI emails and follow-ups: "api" (the app itself, with the Groq / OpenRouter key) or "claude" (Claude, in Claude Desktop: only emails Claude has written are sent)' }, name: { type: 'string' }, account_id: { type: 'string' }, account_ids: { type: 'array', items: { type: 'string' }, description: 'All the accounts it sends from, in turn (replaces the list)' }, subject: { type: 'string' }, body: { type: 'string' }, seconds_between_emails: { type: 'integer' }, minutes_between_emails: { type: 'number' }, daily_limit: { type: 'integer', description: 'Emails per day per sending account' } }, ['campaign_id']),
+      parameters: obj({ campaign_id: CAMPAIGN_ID, ai_write: { type: 'boolean', description: 'On: the AI writes each email from the body (used as the instructions/prompt) and the business’s details' }, writer: { type: 'string', enum: ['api', 'claude', 'desktop'], description: 'Who writes the AI emails and follow-ups from the campaign body (the prompt) and each lead’s details: "claude" (Claude, when each email is sent), "api" (the model chosen in Settings) or "desktop" (written by hand in Claude Desktop)' }, name: { type: 'string' }, account_id: { type: 'string' }, account_ids: { type: 'array', items: { type: 'string' }, description: 'All the accounts it sends from, in turn (replaces the list)' }, subject: { type: 'string' }, body: { type: 'string' }, seconds_between_emails: { type: 'integer' }, minutes_between_emails: { type: 'number' }, daily_limit: { type: 'integer', description: 'Emails per day per sending account' } }, ['campaign_id']),
       run: (a) => {
         const patch = {};
         if (Array.isArray(a.account_ids)) patch.accountIds = a.account_ids;
         if (typeof a.ai_write === 'boolean') patch.aiWrite = a.ai_write;
-        if (a.writer === 'api' || a.writer === 'claude') patch.writer = a.writer;
+        if (['api', 'claude', 'desktop'].includes(a.writer)) patch.writer = a.writer;
         if (a.name != null) patch.name = a.name;
         if (a.account_id != null) patch.accountId = a.account_id;
         if (a.subject != null) patch.subject = a.subject;
@@ -698,6 +699,83 @@ function buildTools(d) {
       run: async (a) => {
         const r = await d.email.accounts.test(String(a.account_id));
         return r.ok ? { ok: true, status: 'connected' } : { ok: false, error: r.error };
+      },
+    },
+
+    // ---------------- the AI Assistant (Claude), follow-ups, reports ----------------
+    {
+      name: 'claude_status',
+      kind: 'read',
+      description: 'Claude, the writer of campaigns whose writer is "claude": whether it can be reached (OpenRouter or Anthropic key), the model, and the last problem if any.',
+      parameters: obj({}),
+      run: () => {
+        const m = d.claudeMode?.();
+        if (!m) return { ok: false, error: 'Claude is not available.' };
+        const r = m.route();
+        return { ok: true, available: Boolean(r), via: r?.via || null, model: r?.model || null, last_problem: m.lastError(), how_to_use: 'In an email campaign: Write each email with AI on, writer Claude (update_email_campaign writer "claude"); WhatsApp: update_whatsapp_campaign ai_write true, writer "claude". Claude writes each message from the lead’s details and the campaign’s prompt when it is sent.' };
+      },
+    },
+    {
+      name: 'list_generated',
+      kind: 'read',
+      description: 'What Claude wrote recently for campaigns (emails, WhatsApp messages, follow-ups, with its short analysis of each business), newest first, with previews.',
+      parameters: obj({ limit: { type: 'integer', minimum: 1, maximum: 50, description: 'Default 15' }, errors_only: { type: 'boolean' } }),
+      run: (a) => {
+        const m = d.claudeMode?.();
+        if (!m) return { ok: false, error: 'Claude is not available.' };
+        const list = m.activities(300).filter((e) => (a.errors_only ? e.ok === false : e.type !== 'switch'));
+        return { ok: true, items: list.slice(0, a.limit || 15).map((e) => ({ at: new Date(e.at).toISOString(), type: e.type, ok: e.ok, title: e.title, subject: e.subject, preview: e.preview, analysis: e.analysis, error: e.ok === false ? e.detail : undefined })) };
+      },
+    },
+    {
+      name: 'set_email_followups',
+      kind: 'config',
+      description: 'Turns the follow-ups of an email campaign on or off and sets their days: each follow-up is sent that many days after the previous email, only while the lead has not replied. They are written by the campaign’s AI writer (Claude when its writer is "claude").',
+      parameters: obj({ campaign_id: CAMPAIGN_ID, on: { type: 'boolean' }, days: { type: 'array', items: { type: 'integer', minimum: 1, maximum: 60 }, maxItems: 5, description: 'Days after the previous email, e.g. [3, 4, 5]' } }, ['campaign_id', 'on']),
+      run: (a) => {
+        const r = emCampaign(a.campaign_id);
+        if (!r.ok) return r;
+        const cur = r.c.config.followups?.steps || [];
+        const days = Array.isArray(a.days) && a.days.length ? a.days : cur.map((x) => x.days);
+        const steps = (days.length ? days : [3, 3, 4]).map((dd, i) => ({ days: dd, subject: cur[i]?.subject || '', body: cur[i]?.body || '' }));
+        const u = d.email.campaigns.update(r.c.id, { followups: { on: a.on, steps } });
+        return u.ok ? { ok: true, followups: d.email.campaigns.row(r.c.id).config.followups, campaign: emView(d.email.campaigns.row(r.c.id)) } : u;
+      },
+    },
+    {
+      name: 'set_whatsapp_followups',
+      kind: 'config',
+      description: 'Turns the AI follow-ups of a WhatsApp campaign on or off and sets their days (1 to 3 follow-ups, each that many days after the previous message, only while the contact has not replied). Needs AI writing on in the campaign.',
+      parameters: obj({ campaign_id: CAMPAIGN_ID, on: { type: 'boolean' }, days: { type: 'array', items: { type: 'integer', minimum: 1, maximum: 60 }, maxItems: 3, description: 'e.g. [3, 7]' } }, ['campaign_id', 'on']),
+      run: (a) => {
+        const r = waCampaign(a.campaign_id);
+        if (!r.ok) return r;
+        if (a.on && !r.c.config.aiWrite) return { ok: false, error: 'WhatsApp follow-ups are written by the AI: turn on AI writing for this campaign first (update_whatsapp_campaign ai_write true).' };
+        return waConfigure(r.c.id, { followups: { on: a.on, days: Array.isArray(a.days) && a.days.length ? a.days : r.c.config.followups?.days || [3, 7] } });
+      },
+    },
+    {
+      name: 'campaign_report',
+      kind: 'read',
+      description: 'A performance report of a campaign: sent, delivered or failed, replies and reply rate, clicks, bounces, unsubscribes, follow-ups sent and waiting, today’s sends, and what it waits for.',
+      parameters: obj({ channel: CHANNEL, campaign_id: CAMPAIGN_ID }, ['channel', 'campaign_id']),
+      run: (a) => {
+        const pct = (x, y) => (y ? Math.round((x / y) * 1000) / 10 : 0);
+        if (a.channel === 'whatsapp') {
+          const r = waCampaign(a.campaign_id);
+          if (!r.ok) return r;
+          const v = waView(r.c, r.o);
+          const contacts = r.o.store.contacts(r.c.id);
+          const replied = contacts.filter((c) => c.repliedAt).length;
+          const messaged = contacts.filter((c) => c.stage >= 1).length;
+          return { ok: true, report: { name: v.name, status: v.status, recipients: v.recipients, messaged, replied, reply_rate_percent: pct(replied, messaged), by_state: v.by_state, follow_ups_sent: contacts.filter((c) => c.stage >= 2).length, follow_ups: r.c.config.followups || null, sent_today: v.sent_today, waiting_for: v.waiting_for } };
+        }
+        const r = emCampaign(a.campaign_id);
+        if (!r.ok) return r;
+        const s = d.email.campaigns.summary(r.c.id);
+        const fu = d.email.campaigns.followupCounts(r.c.id);
+        const sent = s.counts.sent;
+        return { ok: true, report: { name: r.c.name, status: STATUS_WORDS[r.c.status] || r.c.status, recipients: s.counts.total, sent, failed: s.counts.failed, uncertain: s.counts.uncertain, remaining: s.counts.remaining, replies: s.replies, reply_rate_percent: pct(s.replies, sent), clicks: s.clicks, click_rate_percent: pct(s.clicks, sent), follow_ups: fu, sent_today: s.sentToday, waiting_for: s.waiting, paused_because: s.pauseText, ai_writer: r.c.config.aiWrite ? r.c.config.writer || 'api' : null, written_by_claude: s.claude || undefined } };
       },
     },
 
@@ -971,6 +1049,9 @@ function buildTools(d) {
       },
     },
   ];
+  // Leads by country, city and more; one lead in full; reports (claude/tools.js).
+  const { buildClaudeTools } = require('../claude/tools');
+  for (const t of buildClaudeTools({ store: d.store, insight: (id) => d.claudeMode?.()?.insight(id) || null })) if (!tools.some((x) => x.name === t.name)) tools.push(t);
   return tools;
 }
 

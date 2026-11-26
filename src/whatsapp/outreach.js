@@ -54,6 +54,13 @@ const DEFAULT_CONFIG = {
   media: [], // [{ id, name, mime, size, kind: 'image' | 'document' }], sent after the voice files
   aiWrite: false, // one message per contact, written by the AI from aiPrompt and the business's details
   aiPrompt: '',
+  // Who writes the AI messages: 'api' (the model chosen in Settings) or
+  // 'claude' (Claude, from the lead's details and aiPrompt).
+  writer: 'api',
+  // AI follow-ups (AI writing only): days after the previous message, sent
+  // only while the contact has not replied; written by the AI from the
+  // earlier messages.
+  followups: { on: false, days: [3, 7] },
   attachStep: null, // the message links and voice files go with (null: the last one)
   quietStart: 21,
   quietEnd: 9,
@@ -78,6 +85,9 @@ const DEFAULT_INTERVAL_KEY = 'outreach.defaultInterval';
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 // Messages per contact: the campaign's messages, or one written by the AI.
 const stagesOf = (cfg) => (cfg.aiWrite ? 1 : cfg.templates.length);
+// AI follow-ups after the first message (days apart, each one written by the AI).
+const followupDays = (cfg) => (cfg.aiWrite && cfg.followups?.on ? (cfg.followups.days || []).slice(0, 3) : []);
+const DAY_MS = 24 * 60 * MIN;
 
 // Recipient time zone from the country calling code (one-zone countries).
 const ZONES = [
@@ -149,7 +159,32 @@ class Outreach extends EventEmitter {
     this.aiFailures = new Map();
     // The AI's message for each contact: written once, kept, reused on retries.
     this.store.db.exec('CREATE TABLE IF NOT EXISTS outreach_ai_texts (campaign_id INTEGER NOT NULL, phone TEXT NOT NULL, text TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (campaign_id, phone))');
+    // AI follow-ups, written ahead or when due; stage 2, 3, 4 (message 1 is outreach_ai_texts).
+    this.store.db.exec('CREATE TABLE IF NOT EXISTS outreach_ai_followups (campaign_id INTEGER NOT NULL, phone TEXT NOT NULL, stage INTEGER NOT NULL, text TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (campaign_id, phone, stage))');
   }
+
+  aiFollowupOf(id, phone, stage) {
+    return this.store.db.prepare('SELECT text FROM outreach_ai_followups WHERE campaign_id = ? AND phone = ? AND stage = ?').get(id, phone, stage)?.text || null;
+  }
+
+  // The messages already sent to a contact by this campaign (their text).
+  sentTexts(id, phone, beforeStage) {
+    return this.store.db.prepare("SELECT body FROM outreach_sends WHERE campaign_id = ? AND phone = ? AND stage < ? AND part = 0 AND body IS NOT NULL AND status IN ('sent', 'delivered', 'read') ORDER BY stage").all(id, phone, beforeStage).map((r) => r.body);
+  }
+
+  // An AI follow-up (stage 2+): written from the earlier messages, kept for the send.
+  async aiFollowup(st, contact, stage, { save = true } = {}) {
+    const kept = this.aiFollowupOf(st.id, contact.phone, stage);
+    if (kept) return kept;
+    if (!this.writer || (st.config.writer !== 'claude' && this.writerReady && !this.writerReady())) throw Object.assign(new Error('no AI key is saved (Settings > AI)'), { code: 'no_key' });
+    const earlier = this.sentTexts(st.id, contact.phone, stage);
+    const text = String((await this.writer({ instructions: st.config.aiPrompt, claude: st.config.writer === 'claude', leadId: contact.leadId ?? null, business: this.facts(contact), sender: { name: this.senderName?.(st.config.accountId) || '' }, followup: { step: stage - 1, earlier } })) || '').trim().slice(0, 3000);
+    if (text.length < 5) throw Object.assign(new Error('the AI did not write a usable follow-up'), { code: 'ai_empty' });
+    if (save) this.store.db.prepare('INSERT INTO outreach_ai_followups (campaign_id, phone, stage, text, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (campaign_id, phone, stage) DO NOTHING').run(st.id, contact.phone, stage, text, this.clock());
+    return save ? this.aiFollowupOf(st.id, contact.phone, stage) || text : text;
+  }
+
+
 
   aiTextOf(id, phone) {
     return this.store.db.prepare('SELECT text FROM outreach_ai_texts WHERE campaign_id = ? AND phone = ?').get(id, phone)?.text || null;
@@ -159,8 +194,9 @@ class Outreach extends EventEmitter {
   async aiMessage(st, contact, { save = true } = {}) {
     const kept = save ? this.aiTextOf(st.id, contact.phone) : null;
     if (kept) return kept;
-    if (!this.writer || (this.writerReady && !this.writerReady())) throw Object.assign(new Error('no AI key is saved (Settings > AI)'), { code: 'no_key' });
-    const text = String((await this.writer({ instructions: st.config.aiPrompt, business: this.facts(contact), sender: { name: this.senderName?.(st.config.accountId) || '' } })) || '').trim().slice(0, 3000);
+    const claude = st.config.writer === 'claude';
+    if (!this.writer || (!claude && this.writerReady && !this.writerReady())) throw Object.assign(new Error('no AI key is saved (Settings > AI)'), { code: 'no_key' });
+    const text = String((await this.writer({ instructions: st.config.aiPrompt, claude, leadId: contact.leadId ?? null, business: this.facts(contact), sender: { name: this.senderName?.(st.config.accountId) || '' } })) || '').trim().slice(0, 3000);
     if (text.length < 5) throw Object.assign(new Error('the AI did not write a usable message'), { code: 'ai_empty' });
     if (save) this.store.db.prepare('INSERT INTO outreach_ai_texts (campaign_id, phone, text, created_at) VALUES (?, ?, ?, ?) ON CONFLICT (campaign_id, phone) DO NOTHING').run(st.id, contact.phone, text, this.clock());
     return save ? this.aiTextOf(st.id, contact.phone) || text : text;
@@ -300,8 +336,25 @@ class Outreach extends EventEmitter {
       this.waiting.delete(id);
       return { ...r, id };
     }
+    // ON switches the category on: its queue fills, but nothing is sent until Start.
+    const st = this.load(id);
+    if (opts.accountId) {
+      if (this.transport.hasAccount && !this.transport.hasAccount(opts.accountId)) return { ok: false, error: 'That WhatsApp account is no longer connected to Lead Finder.' };
+      st.config.accountId = String(opts.accountId).slice(0, 40);
+    }
+    // One active campaign per WhatsApp account (as when starting).
+    if (!st.config.test) {
+      const other = this.store.campaigns().find((c) => c.id !== id && ['running', 'paused'].includes(c.status) && !this.load(c.id).config.test && (this.load(c.id).config.accountId || 'primary') === (st.config.accountId || 'primary'));
+      if (other) return { ok: false, error: `This WhatsApp account is already used by the campaign “${other.name}”. Choose another account, or stop that campaign first.`, accountInUse: true };
+    }
+    if (st.status !== 'running' && st.status !== 'paused') {
+      st.status = 'paused';
+      st.pauseReason = 'not_started';
+    }
+    this.save(st);
     this.syncQueue(id, this.clock(), true);
-    return { ...this.start(id, opts), id };
+    this.emit('change', { id });
+    return { ok: true, id, snapshot: this.snapshot(id) };
   }
 
   // Adds the category's new eligible leads to the campaign's queue.
@@ -345,6 +398,7 @@ class Outreach extends EventEmitter {
   static checkConfig(c) {
     const errors = validateTemplates(c.templates);
     if (c.aiWrite && !String(c.aiPrompt || '').trim()) errors.push('Write the prompt for the AI (what you offer, the tone, the language).');
+    if (c.followups?.on && (!Array.isArray(c.followups.days) || !c.followups.days.length || c.followups.days.some((d) => !Number.isInteger(d) || d < 1 || d > 60))) errors.push('Follow-ups: each one between 1 and 60 days after the previous message.');
     const int = (v) => Number.isInteger(v);
     if (!int(c.interval) || c.interval < LIMITS.interval.min || c.interval > LIMITS.interval.max) errors.push(`The interval must be between ${LIMITS.interval.min} and ${LIMITS.interval.max} minutes.`);
     if (!int(c.dailyCap) || c.dailyCap < LIMITS.capMin || c.dailyCap > CAP_SANITY) errors.push('The daily limit must be a whole number of contacts, at least 1.');
@@ -400,6 +454,9 @@ class Outreach extends EventEmitter {
     config.allowPrevious = Boolean(config.allowPrevious);
     config.aiWrite = Boolean(config.aiWrite);
     config.aiPrompt = String(config.aiPrompt || '').slice(0, 4000);
+    config.writer = config.writer === 'claude' ? 'claude' : 'api';
+    const fu = config.followups || {};
+    config.followups = { on: fu.on === true, days: (Array.isArray(fu.days) ? fu.days : [3, 7]).map(Number).slice(0, 3) };
     config.startDate = config.startDate || null;
     config.endDate = config.endDate || null;
     const f = config.filters || {};
@@ -639,9 +696,12 @@ class Outreach extends EventEmitter {
     const resumed = contacts.filter((c) => c.state === 'active' && c.stage >= 1 && c.stage < n).sort((a, b) => a.lastSentAt - b.lastSentAt);
     const fresh = contacts.filter((c) => c.state === 'queued' && c.stage === 0);
     const retries = contacts.filter((c) => c.state === 'failed' && c.attempts < MAX_ATTEMPTS && c.retryAt && c.retryAt <= now && c.stage < n);
+    // AI follow-ups due (days after the previous message), never after a reply.
+    const days = followupDays(cfg);
+    const follow = days.length ? contacts.filter((c) => c.state === 'done' && !c.repliedAt && c.stage >= 1 && c.stage <= days.length && (c.lastSentAt || 0) + days[c.stage - 1] * DAY_MS <= now).sort((a, b) => a.lastSentAt - b.lastSentAt) : [];
     let quietSeen = false;
     let capped = false;
-    for (const c of [...resumed, ...retries, ...fresh]) {
+    for (const c of [...resumed, ...retries, ...follow, ...fresh]) {
       if (this.store.isOptedOut(c.phone)) continue;
       if (quiet(c)) {
         quietSeen = true;
@@ -654,7 +714,8 @@ class Outreach extends EventEmitter {
       return { contact: c, stage: c.stage + 1, day };
     }
     const waitingRetry = contacts.some((c) => c.state === 'failed' && c.attempts < MAX_ATTEMPTS && c.retryAt && c.stage < n);
-    if (!resumed.length && !fresh.length && !retries.length) return { reason: waitingRetry ? 'retry_later' : 'done' };
+    const followLater = days.length && contacts.some((c) => c.state === 'done' && !c.repliedAt && c.stage >= 1 && c.stage <= days.length);
+    if (!resumed.length && !fresh.length && !retries.length && !follow.length) return { reason: waitingRetry ? 'retry_later' : followLater ? 'followups' : 'done' };
     return { reason: capped ? 'daily_cap' : quietSeen ? 'quiet_hours' : 'nothing_due' };
   }
 
@@ -669,6 +730,8 @@ class Outreach extends EventEmitter {
       const now = this.clock();
       const today = dayOf(now);
       for (const c of running) if (c.category) this.syncQueue(c.id, now);
+      // Switched on but paused (not started): the queue still fills; nothing is sent.
+      for (const c of this.store.campaigns()) if (c.category && c.status === 'paused') this.syncQueue(c.id, now);
       const lanes = new Map();
       for (const r of running) {
         const st = this.load(r.id);
@@ -808,7 +871,7 @@ class Outreach extends EventEmitter {
     let aiText = null;
     if (cfg.aiWrite) {
       try {
-        aiText = await this.aiMessage(st, contact);
+        aiText = stage > 1 ? await this.aiFollowup(st, contact, stage) : await this.aiMessage(st, contact);
         this.aiFailures.delete(id);
       } catch (err) {
         const n = (this.aiFailures.get(id) || 0) + 1;

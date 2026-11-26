@@ -76,7 +76,7 @@ test('Claude writes the campaign’s emails: nothing is sent before; checked, sa
 
   const acc = accounts.add({ name: 'SMTP', senderName: 'Info Axoraweb', email: 'info@axora.test', host: '127.0.0.1', port: smtp.port, username: 'u', password: 'pw', encryption: 'none' }).account;
   const c = campaigns.create({ name: 'Cleaning UK' });
-  assert.ok(campaigns.update(c.id, { accountIds: [acc.id], body: PROMPT, aiWrite: true, writer: 'claude', delaySeconds: 60, followups: { on: true, steps: [{ days: 2, subject: '', body: '' }] } }).ok);
+  assert.ok(campaigns.update(c.id, { accountIds: [acc.id], body: PROMPT, aiWrite: true, writer: 'desktop', delaySeconds: 60, followups: { on: true, steps: [{ days: 2, subject: '', body: '' }] } }).ok);
   campaigns.addLeads(c.id, {});
   assert.deepEqual(campaigns.problems(campaigns.row(c.id)), [], 'no Groq / OpenRouter key needed');
   assert.ok((await campaigns.start(c.id)).ok);
@@ -146,5 +146,5 @@ test('Claude writes the campaign’s emails: nothing is sent before; checked, sa
   // Back to the app's writer: Claude's tools say so.
   campaigns.pause(c.id, 'user');
   assert.ok(campaigns.update(c.id, { writer: 'api' }).ok);
-  assert.match((await tools.emails_to_write.run({ campaign_id: c.id })).error, /Claude does not write/);
+  assert.match((await tools.emails_to_write.run({ campaign_id: c.id })).error, /not written by hand/);
 });

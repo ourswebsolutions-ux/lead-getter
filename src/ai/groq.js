@@ -214,8 +214,10 @@ class Providers {
     let lastErr = null;
     const skipped = [];
     // A chosen model goes to the provider that offers it first.
-    const list = this.ordered();
+    let list = this.ordered();
     if (opts.model) list.sort((a, b) => b.accepts(opts.model) - a.accepts(opts.model));
+    // only: that model or nothing (no stand-in from another provider).
+    if (opts.only) list = list.filter((p) => p.accepts(opts.model));
     for (const p of list) {
       try {
         const r = await p.chat(messages, tools, opts);

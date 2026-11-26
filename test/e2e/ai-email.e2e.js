@@ -224,6 +224,10 @@ test('Email campaigns, Groq settings, the Assistant and AI on WhatsApp, in the r
   await until(async () => (await win.evaluate(() => window.leadFinder.emailCampaigns())).campaigns.some((c) => c.category && c.aiWrite));
   const before = smtp.messages.length;
   await catsCard.getByRole('switch', { name: 'Restaurants email campaign' }).click();
+  // Switched on: paused, nothing sent until Start.
+  await win.getByRole('button', { name: 'Start campaign' }).waitFor();
+  assert.equal(smtp.messages.length, before, 'switching a category on sends nothing');
+  await win.getByRole('button', { name: 'Start campaign' }).click();
   await until(() => smtp.messages.length > before);
   const aiMail = smtp.messages.at(-1);
   assert.deepEqual(aiMail.to, ['owner@karachigrill.pk']);

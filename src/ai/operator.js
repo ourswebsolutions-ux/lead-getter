@@ -43,6 +43,9 @@ How you work:
 - Files: the user attaches images, documents and audio with the paperclip in Lead Finder's Assistant tab, or sends them on WhatsApp; attached files appear in the conversation with their file_id. If they want a voice message, ask them to attach the recording (MP3, M4A, AAC, Ogg/Opus, AMR). You cannot record or generate voice; say so if asked.
 - Email accounts: the user can write their email address and app password in this chat (for Gmail: an App Password); the app adds and tests the account itself and tells you the result in a note — you never see passwords and never write one. Adding accounts in this chat IS supported: never say otherwise. If the user clearly tried to add an account but no note from the app came with the message, say the app could not read it and ask them to send it again as: email app-password (for example: name@gmail.com xxxx xxxx xxxx xxxx). Several accounts can be imported in Outreach > Email > Accounts > Import. A campaign can send from several accounts in turn (account_ids); accounts can be added to a running campaign. WhatsApp accounts are linked by QR code in Outreach.
 - Respect unsubscribes and opt-outs; never try to message people who opted out.
+- Leads: search_leads (country, city, category, email, website...), get_lead (one lead in full, with Claude’s analysis), lead_report (counts by category, country, city, source).
+- Claude as the writer: campaigns whose writer is "claude" have each message written by Claude when it is sent, from the lead's details and the campaign's prompt. list_generated shows what Claude wrote; campaign_report gives performance; set_email_followups / set_whatsapp_followups turn follow-ups on with their days.
+- Switching a category campaign on never sends: it stays paused until it is started (start_campaign). Writing messages and sending them are separate.
 - You cannot run programs, read files on the computer or access anything outside these tools.`;
 
 const trimJson = (v) => {
@@ -165,17 +168,24 @@ class Operator {
     }
 
     let reply = '';
+    // The app's state as of this message: the same for every round of the
+    // turn (Claude's reasoning stays valid within the turn).
+    const ctx = this.contextNow(source, conv);
     try {
       for (let round = 0; round < MAX_ROUNDS; round++) {
         this.onEvent({ channel, type: 'thinking' });
-        const { message } = await this.groq.chat(this.prompt(conv, source), this.specs);
+        const { message } = await this.groq.chat(this.prompt(conv, source, ctx), this.specs);
+        // Claude's own answer blocks (with its reasoning), sent back unchanged in this turn.
+        const raw = Array.isArray(message._claude) ? { _claude: message._claude } : {};
         const calls = Array.isArray(message.tool_calls) ? message.tool_calls.slice(0, 6) : [];
         if (!calls.length) {
           reply = String(message.content || '').trim();
-          conv.messages.push({ role: 'assistant', content: reply });
+          conv.messages.push({ role: 'assistant', content: reply, ...raw });
           break;
         }
-        conv.messages.push({ role: 'assistant', content: message.content || null, tool_calls: calls.map((c) => ({ id: c.id, type: 'function', function: { name: c.function?.name, arguments: c.function?.arguments || '{}' } })) });
+        // Every call Claude made is answered (a result for each), even past the first six.
+        if (raw._claude) for (const c of message.tool_calls.slice(6)) calls.push(c);
+        conv.messages.push({ role: 'assistant', content: message.content || null, tool_calls: calls.map((c) => ({ id: c.id, type: 'function', function: { name: c.function?.name, arguments: c.function?.arguments || '{}' } })), ...raw });
         for (const call of calls) {
           const name = call.function?.name;
           let args = {};
@@ -279,16 +289,16 @@ class Operator {
     }[name] || name.replace(/_/g, ' ');
   }
 
-  prompt(conv, source) {
-    const focus = Object.entries(conv.focus).map(([ch, f]) => `${ch} campaign being worked on: id ${f.id}${f.name ? ` (“${f.name}”)` : ''}`);
-    const files = conv.files.length ? `Files attached in this conversation: ${conv.files.map((f) => `${f.name} (file_id ${f.id}, ${f.kind})`).join('; ')}` : '';
-    const ctx = [
-      `Now: ${new Date(this.now()).toString()}`,
-      source === 'whatsapp' ? 'The user is writing from their WhatsApp (the admin number): plain text only, keep replies short. Photos, voice notes and documents they send on WhatsApp arrive here as attached files.' : 'The user is in Lead Finder’s Assistant tab.',
-      this.safeContext(),
-      ...focus,
-      files,
-    ].filter(Boolean).join('\n');
+  // The live part of the system message (time, app state, the campaigns
+  // being worked on, files), taken once per turn.
+  contextNow(source, conv) {
+    const focus = Object.entries(conv?.focus || {}).map(([ch, f]) => `${ch} campaign being worked on: id ${f.id}${f.name ? ` (“${f.name}”)` : ''}`);
+    const files = conv?.files?.length ? `Files attached in this conversation: ${conv.files.map((f) => `${f.name} (file_id ${f.id}, ${f.kind})`).join('; ')}` : '';
+    return [`Now: ${new Date(this.now()).toString()}`, source === 'whatsapp' ? 'The user is writing from their WhatsApp (the admin number): plain text only, keep replies short. Photos, voice notes and documents they send on WhatsApp arrive here as attached files.' : 'The user is in Lead Finder’s Assistant tab.', this.safeContext(), ...focus, files].filter(Boolean).join('\n');
+  }
+
+  prompt(conv, source, live = this.contextNow(source, conv)) {
+    const ctx = live;
     const history = conv.messages.slice(-SEND_MESSAGES);
     // Never start the history with tool results whose call was cut off.
     while (history.length && history[0].role !== 'user') history.shift();

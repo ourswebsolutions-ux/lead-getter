@@ -70,10 +70,16 @@ function world({ file } = {}) {
       clock.t += 30_000;
     }
   };
-  const on = (cat, name, inst = o) => inst.setCategoryEnabled(String(cat.id), name, true, { acknowledge: true });
+  // A category is switched on (paused: nothing is sent), then started.
+  const enable = (key, name, opts = {}, inst = o) => {
+    const r = inst.setCategoryEnabled(key, name, true, opts);
+    if (!r.ok) return r;
+    return { ...inst.start(r.id, opts), id: r.id };
+  };
+  const on = (cat, name, inst = o) => enable(String(cat.id), name, { acknowledge: true }, inst);
   const live = (id, inst = o) => assert.equal(inst.campaign(id).configure({ test: false, quietStart: 23, quietEnd: 6 }).ok, true);
   const seenPhones = () => db.listLeads({ campaign: 'seen' }).map((l) => l.phone).sort();
-  return { db, o, make, clock, sent, transport, cats, lead, run, on, live, seenPhones, file: file || path.join(dir, 'leads.db') };
+  return { db, o, make, clock, sent, transport, cats, lead, run, on, enable, live, seenPhones, file: file || path.join(dir, 'leads.db') };
 }
 
 test('switch ON: the category’s verified, Unseen leads are queued automatically and messaged one by one', async () => {
@@ -254,12 +260,12 @@ test('two categories on two WhatsApp accounts run in parallel, each with its own
     ids[name] = id;
   }
   // Both on the same WhatsApp account: the second is refused.
-  assert.equal(w.o.setCategoryEnabled(String(w.cats.garments.id), 'Garments', true, { acknowledge: true, accountId: 'wa-1' }).ok, true);
-  const clash = w.o.setCategoryEnabled(String(w.cats.restaurants.id), 'Restaurants', true, { accountId: 'wa-1' });
+  assert.equal(w.enable(String(w.cats.garments.id), 'Garments', { acknowledge: true, accountId: 'wa-1' }).ok, true);
+  const clash = w.enable(String(w.cats.restaurants.id), 'Restaurants', { accountId: 'wa-1' });
   assert.equal(clash.ok, false);
   assert.match(clash.error, /already used by the campaign “Garments”/);
   // On another account: both run, in parallel.
-  assert.equal(w.o.setCategoryEnabled(String(w.cats.restaurants.id), 'Restaurants', true, { accountId: 'wa-2' }).ok, true);
+  assert.equal(w.enable(String(w.cats.restaurants.id), 'Restaurants', { accountId: 'wa-2' }).ok, true);
   await w.run(3 * MIN);
   assert.deepEqual(new Set(w.sent.map((s) => s.account)), new Set(['wa-1', 'wa-2']), 'both accounts sent at the same time');
   assert.equal(w.sent.filter((s) => s.account === 'wa-1').length, 3);
@@ -277,7 +283,7 @@ test('two categories on two WhatsApp accounts run in parallel, each with its own
 test('uncategorized leads have their own switch; statuses OFF / Running / Paused / Completed', async () => {
   const w = world();
   const N = w.lead('Nameless Shop', '03001110007', null);
-  const r = w.o.setCategoryEnabled('none', 'Uncategorized', true, { acknowledge: true }); // test mode by default
+  const r = w.enable('none', 'Uncategorized', { acknowledge: true }); // test mode by default
   assert.equal(r.ok, true);
   const view = () => w.o.overview().campaigns.find((c) => c.id === r.id);
   assert.deepEqual(w.o.campaign(r.id).contacts().map((c) => c.phone), [N]);

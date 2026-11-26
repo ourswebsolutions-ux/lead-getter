@@ -33,6 +33,7 @@ const WAITING = {
 };
 const DISPLAY = { off: 'OFF', running: 'Running', paused: 'Paused', completed: 'Completed' };
 const PAUSED = {
+  not_started: 'Switched on: press Start to begin sending',
   user: 'Paused',
   restricted: 'Paused: WhatsApp refused messages (possible restriction). Check your account before resuming.',
   ai: 'Paused: the AI could not write the messages. Check Settings > AI, then resume.',
@@ -1439,7 +1440,11 @@ export default function OutreachView({ notify, hidden }) {
     if (existing && !existing.test) return setPicker2({ campaign: existing.id, name: existing.name, category: key, current: existing.accountId });
     setToggling(key);
     try {
-      const r = await api.outreachSetCategory(key, on, acknowledge, accountId || undefined);
+      let r = await api.outreachSetCategory(key, on, acknowledge, accountId || undefined);
+      // Switching on only switches the category on (paused). From the
+      // account window, its Start button starts it (with the user's yes to
+      // WhatsApp's rules).
+      if (r.ok && on && accountId && r.id) r = { ...(await api.outreachStart(r.id, acknowledge, accountId)), id: r.id };
       if (!r.ok && r.needsAcknowledgement) {
         setAck({ category: key, accountId });
         return;
@@ -1555,8 +1560,8 @@ export default function OutreachView({ notify, hidden }) {
                     </button>
                   )}
                   {paused && (
-                    <button type="button" className="btn btn-primary" disabled={busy} onClick={() => act(() => api.outreachResume(snap.id))}>
-                      <Icon name="play" /> Resume
+                    <button type="button" className="btn btn-primary" disabled={busy} onClick={() => (snap.pauseReason === 'not_started' ? start() : act(() => api.outreachResume(snap.id)))}>
+                      <Icon name="play" /> {snap.pauseReason === 'not_started' ? 'Start campaign' : 'Resume'}
                     </button>
                   )}
                   {!snap.category && (running || paused) && (

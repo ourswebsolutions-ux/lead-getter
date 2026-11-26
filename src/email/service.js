@@ -260,7 +260,7 @@ function registerEmailIpc({ handle, email, requirePlan, pickFiles, send, listCat
     for (const k of ['delaySeconds', 'dailyLimit']) if (p[k] != null) clean[k] = Number(p[k]);
     if (typeof p.allowPrevious === 'boolean') clean.allowPrevious = p.allowPrevious;
     if (typeof p.aiWrite === 'boolean') clean.aiWrite = p.aiWrite;
-    if (p.writer === 'api' || p.writer === 'claude') clean.writer = p.writer;
+    if (['api', 'claude', 'desktop'].includes(p.writer)) clean.writer = p.writer;
     if (typeof p.trackClicks === 'boolean') clean.trackClicks = p.trackClicks;
     if (Array.isArray(p.accountIds)) clean.accountIds = p.accountIds.map(String).slice(0, 50);
     if (Array.isArray(p.attachments)) clean.attachments = p.attachments.map((a) => (typeof a === 'string' ? a : str(a?.id))).slice(0, 20);

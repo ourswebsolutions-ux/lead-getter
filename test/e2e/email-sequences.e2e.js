@@ -90,6 +90,10 @@ test('Email sequences: a category campaign with follow-up days, schedule, its ow
 
   // Switched on: the first emails, each lead's follow-up 1 scheduled.
   await cats.getByRole('switch', { name: 'Agencies email campaign' }).click();
+  // Switched on: paused, nothing sent until Start.
+  await win.getByRole('button', { name: 'Start campaign' }).waitFor();
+  assert.equal(smtp.messages.length, 0, 'switching a category on sends nothing');
+  await win.getByRole('button', { name: 'Start campaign' }).click();
   await until(() => smtp.messages.length >= 1, 30_000, 'the first email');
   assert.match(smtp.messages[0].text, /We build websites\.\n\nBest,\nAli/);
   const rows = win.getByRole('region', { name: 'Recipients' });

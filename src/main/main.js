@@ -3308,9 +3308,10 @@ function initEmailAndAI() {
     send,
     // Tests only (never packaged): a local stand-in for Groq's API.
     base: !app.isPackaged ? process.env.LEAD_FINDER_TEST_GROQ_URL : undefined,
-    bases: !app.isPackaged ? { openrouter: process.env.LEAD_FINDER_TEST_OPENROUTER_URL } : {},
+    bases: !app.isPackaged ? { openrouter: process.env.LEAD_FINDER_TEST_OPENROUTER_URL, claude: process.env.LEAD_FINDER_TEST_CLAUDE_URL } : {},
     toolDeps: {
       version: app.getVersion(),
+      claudeMode: () => ai?.mode,
       store,
       outreach: () => outreach,
       waAccounts: () => (waAccounts ? waAccounts.list().map((a) => ({ id: a.id, label: a.label, number: a.number, state: a.state })) : []),
@@ -3356,6 +3357,8 @@ function initEmailAndAI() {
   // Emails written by the AI (the campaign's "Write with AI" switch).
   email.campaigns.writer = (x) => ai.writeEmail(x);
   email.campaigns.writerReady = () => ai.available();
+  // Campaigns written by Claude need a way to reach it (OpenRouter or Anthropic key).
+  email.campaigns.claudeReady = () => ai.mode.ready();
   initClaude();
 }
 
@@ -3366,7 +3369,7 @@ let claude = null;
 function initClaude() {
   const { createClaude } = require('../claude/service');
   const { buildClaudeTools } = require('../claude/tools');
-  const leadTools = buildClaudeTools({ store, email, checkEmail: (x) => ai.checkEmail(x) });
+  const leadTools = buildClaudeTools({ store, email, checkEmail: (x) => ai.checkEmail(x), insight: (id) => ai.mode.insight(id) });
   claude = createClaude({
     app,
     state: { get: (k) => store.getState(k), set: (k, v) => store.setState(k, v) },

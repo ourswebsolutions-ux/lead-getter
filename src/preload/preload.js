@@ -227,8 +227,8 @@ contextBridge.exposeInMainWorld('leadFinder', {
   onInbox: (cb) => subscribe('inbox:state', cb),
   // The Groq assistant (the key goes in, never comes back)
   aiSettings: () => ipcRenderer.invoke('ai:settings'),
-  aiSaveKey: (key, provider) => ipcRenderer.invoke('ai:saveKey', String(key ?? ''), provider === 'openrouter' ? 'openrouter' : 'groq'),
-  aiTest: (provider) => ipcRenderer.invoke('ai:test', provider === 'openrouter' ? 'openrouter' : 'groq'),
+  aiSaveKey: (key, provider) => ipcRenderer.invoke('ai:saveKey', String(key ?? ''), ['openrouter', 'claude'].includes(provider) ? provider : 'groq'),
+  aiTest: (provider) => ipcRenderer.invoke('ai:test', ['openrouter', 'claude'].includes(provider) ? provider : 'groq'),
   aiSetMain: (provider) => ipcRenderer.invoke('ai:setMain', provider === 'openrouter' ? 'openrouter' : 'groq'),
   aiSetEmailModel: (id) => ipcRenderer.invoke('ai:setEmailModel', String(id ?? '')),
   aiHistory: () => ipcRenderer.invoke('ai:history'),

@@ -947,8 +947,8 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
               </button>
             )}
             {snap.status === 'paused' && (
-              <button type="button" className="btn btn-primary btn-sm" onClick={() => act('resume')}>
-                <Icon name="play" size={13} /> Resume
+              <button type="button" className="btn btn-primary btn-sm" onClick={() => act(snap.pauseReason === 'not_started' ? 'start' : 'resume')}>
+                <Icon name="play" size={13} /> {snap.pauseReason === 'not_started' ? 'Start campaign' : 'Resume'}
               </button>
             )}
             {['running', 'paused'].includes(snap.status) && (
@@ -1095,8 +1095,9 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
         {d.aiWrite && (
           <div className="st-choice em-writer" role="radiogroup" aria-label="Who writes the emails">
             {[
-              ['api', 'Automatic', 'Written by itself while the campaign sends, with the model chosen in Settings > AI Integrations (e.g. Claude Sonnet through OpenRouter).'],
-              ['claude', 'Claude Desktop (by hand)', 'You ask Claude in Claude Desktop to write them; only written emails are sent.'],
+              ['claude', 'Claude', 'When the campaign sends, Lead Finder gives Claude each lead’s details and your prompt; Claude writes the email and follow-ups.'],
+              ['api', 'Other AI', 'Written with the model chosen in Settings > AI Integrations.'],
+              ...(d.writer === 'desktop' ? [['desktop', 'Claude Desktop (by hand)', 'You ask Claude in Claude Desktop to write them; only written emails are sent.']] : []),
             ].map(([id, label, help]) => (
               <button key={id} type="button" role="radio" aria-checked={d.writer === id} className={d.writer === id ? 'on' : ''} disabled={running} onClick={() => set('writer', id)}>
                 <span className="st-radio" />
@@ -1106,7 +1107,7 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
             ))}
           </div>
         )}
-        {d.aiWrite && d.writer === 'claude' && snap.writer === 'claude' && snap.claude && (
+        {d.aiWrite && d.writer === 'desktop' && snap.writer === 'desktop' && snap.claude && (
           <div className="em-claude" role="status">
             <Icon name="sparkle" size={14} />
             <span>
@@ -1140,7 +1141,7 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
             placeholder={d.aiWrite ? 'e.g. We are Axora Web, we build fast websites and online stores. Offer a free homepage design. Friendly, short, English. Mention it if they have no website. Sign as Ali.' : 'Hello {name},\n\nWe help businesses like {business} with…'}
             onChange={(e) => set('body', e.target.value)}
           />
-          <small className="muted">{d.aiWrite ? `Each business’s name, category, area, website, phone and description go to ${d.writer === 'claude' ? 'Claude' : 'the AI'} with this prompt. Every written email is checked against it, kept and shown with its recipient.` : 'Plain text or HTML. An unsubscribe line is added to every email.'}</small>
+          <small className="muted">{d.aiWrite ? `Each business’s name, category, area, website, phone and description go to ${d.writer === 'api' ? 'the AI' : 'Claude'} with this prompt. Every written email is checked against it, kept and shown with its recipient.` : 'Plain text or HTML. An unsubscribe line is added to every email.'}</small>
         </label>
         <div className="em-attach">
           {snap.attachments.map((a) => (

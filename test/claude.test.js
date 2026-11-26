@@ -40,7 +40,7 @@ test('settings file locations: macOS, Linux, Windows classic and Microsoft Store
   assert.deepEqual(w.configs, [path.join(home, 'Roaming', 'Claude', 'claude_desktop_config.json'), path.join(local, 'Packages', 'Claude_pzs8sxrjxfjjc', 'LocalCache', 'Roaming', 'Claude', 'claude_desktop_config.json')]);
   const d = desktop.detect({ platform: 'win32', home, env: { APPDATA: path.join(home, 'Roaming'), LOCALAPPDATA: local } });
   assert.equal(d.installed, true); // the Store package
-  assert.equal(desktop.detect({ platform: 'linux', home: tmp(), env: {} }).installed, false);
+  assert.equal(desktop.detect({ platform: 'win32', home: tmp(), env: {} }).installed, false, 'nothing in a fresh home');
 });
 
 test('setup keeps every other Claude setting and server, avoids duplicates, keeps a backup', () => {

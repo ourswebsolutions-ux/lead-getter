@@ -100,7 +100,7 @@ const FILTERS = {
 
 // email: the email service (campaigns); checkEmail(): the app's check of an
 // email against its campaign prompt (ai/service.js).
-function buildClaudeTools({ store, email = null, checkEmail = null }) {
+function buildClaudeTools({ store, email = null, checkEmail = null, insight = () => null }) {
   function categoryId(name) {
     if (name == null || name === '') return { ok: true, id: null };
     const raw = String(name).trim();
@@ -175,7 +175,7 @@ function buildClaudeTools({ store, email = null, checkEmail = null }) {
           name: 'emails_to_write',
           kind: 'read',
           title: 'Emails to write',
-          description: 'For an email campaign whose AI emails are written by Claude (writer "claude"): the campaign prompt and the next emails to write, up to 25: first emails in sending order and follow-ups, each with the recipient’s email, step (0 = first email), the business facts (lead) and, for a follow-up, the earlier emails and its subject. Write each one yourself following the prompt exactly, using only the given facts (never invent compliments, reviews or website details), then save them with save_written_emails.',
+          description: 'For an email campaign whose AI emails are written by hand in Claude Desktop (writer "desktop"): the campaign prompt and the next emails to write, up to 25: first emails in sending order and follow-ups, each with the recipient’s email, step (0 = first email), the business facts (lead) and, for a follow-up, the earlier emails and its subject. Write each one yourself following the prompt exactly, using only the given facts (never invent compliments, reviews or website details), then save them with save_written_emails.',
           parameters: obj({ campaign_id: { type: 'integer', minimum: 1, description: 'The email campaign id (list_campaigns)' }, limit: { type: 'integer', minimum: 1, maximum: 25, description: 'How many, 1-25 (default 10)' } }, ['campaign_id']),
           run: (a) => email.campaigns.toWrite(a.campaign_id, { limit: a.limit }),
         },
@@ -183,7 +183,7 @@ function buildClaudeTools({ store, email = null, checkEmail = null }) {
           name: 'save_written_emails',
           kind: 'config',
           title: 'Save written emails',
-          description: 'Saves emails you wrote for a Claude-written campaign (from emails_to_write). Lead Finder makes each ready like its own AI emails (greeting and sign-off exactly as the prompt says) and checks the prompt’s rules (required lines, bullet points, questions, length, the business name); an email that misses one is not saved and its reasons come back: fix it and save it again. Saving sends nothing: the running campaign sends saved emails in its order, with its delays and limits.',
+          description: 'Saves emails you wrote for a campaign written in Claude Desktop (writer "desktop", from emails_to_write). Lead Finder makes each ready like its own AI emails (greeting and sign-off exactly as the prompt says) and checks the prompt’s rules (required lines, bullet points, questions, length, the business name); an email that misses one is not saved and its reasons come back: fix it and save it again. Saving sends nothing: the running campaign sends saved emails in its order, with its delays and limits.',
           parameters: obj(
             {
               campaign_id: { type: 'integer', minimum: 1 },
@@ -257,6 +257,7 @@ function buildClaudeTools({ store, email = null, checkEmail = null }) {
             calls: l.callStatus === 'dnc' ? 'do not call' : l.callStatus === 'seen' ? 'called' : 'not called',
           }),
           writing_facts: leadFacts(l, { email: emailOf(l) || undefined }),
+          claude_analysis: insight(l.id) || undefined,
         };
       },
     },

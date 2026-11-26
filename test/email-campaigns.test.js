@@ -445,17 +445,28 @@ test('Accounts from text: the password on its own line, before the address, or c
   for (const t of ['ali@gmail.com pe kaam karo abhi sath', 'ali@gmail.com ko email bhejo aur kaam karo abhi jaldi']) assert.equal(extractAccounts(t).accounts.length, 0, t);
 });
 
-test('Category campaigns: every category with emails is listed; ON sends to its leads and picks up new ones by itself; it never completes', async (t) => {
+test('Category campaigns: every category with emails is listed; ON only switches it on (paused, nothing sent) until Start; then it sends and picks up new ones by itself; it never completes', async (t) => {
   const { smtp, campaigns, account, time } = await setup(t);
   const cats = [{ id: 1, name: 'Real Estate' }, { id: 2, name: 'People' }, { id: 3, name: 'Empty' }];
   const stats = campaigns.categoryStats(cats);
   assert.deepEqual(stats.map((x) => [x.name, x.withEmail, x.notEmailed]), [['Real Estate', 3, 3], ['People', 1, 1]], 'a category without emails is not listed');
   const cc = campaigns.categoryCampaign('1', 'Real Estate');
   assert.equal(campaigns.categoryCampaign('1', 'Real Estate').id, cc.id, 'one campaign per category');
-  assert.equal((await campaigns.setCategoryEnabled('1', 'Real Estate', true)).ok, false, 'not ready: no account, subject or email');
+  // Switched on before it is ready: on and paused, nothing sent.
+  assert.equal((await campaigns.setCategoryEnabled('1', 'Real Estate', true)).ok, true);
+  assert.equal(campaigns.summary(cc.id).status, 'paused');
+  assert.equal(campaigns.summary(cc.id).pauseReason, 'not_started');
+  assert.match((await campaigns.start(cc.id)).error, /account/i, 'Start says what is missing');
   campaigns.update(cc.id, { accountIds: [account.id], subject: 'Hi {business}', body: 'Hello {name}', delaySeconds: 10 });
   assert.ok((await campaigns.setCategoryEnabled('1', 'Real Estate', true)).ok);
   assert.equal(campaigns.counts(cc.id).total, 2, 'its leads with an email, added by themselves');
+  for (let i = 0; i < 5; i++) {
+    await campaigns.tick();
+    time.now += 11_000;
+  }
+  assert.equal(smtp.messages.length, 0, 'switching a category on never sends');
+  assert.equal(campaigns.summary(cc.id).status, 'paused');
+  assert.ok((await campaigns.start(cc.id)).ok, 'Start');
   await campaigns.tick();
   time.now += 11_000;
   await campaigns.tick();

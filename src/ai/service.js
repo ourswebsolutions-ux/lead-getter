@@ -6,6 +6,8 @@
 // saved and whether it works, never the key.
 
 const { Groq, OpenRouter, Providers } = require('./groq');
+const { Claude } = require('./claude');
+const { createClaudeMode, anthropicId } = require('./claude-mode');
 const { buildTools } = require('./tools');
 const { Operator } = require('./operator');
 const crypto = require('node:crypto');
@@ -16,7 +18,12 @@ const { RULES_SYSTEM, sanitizeRules, fallbackRules, mergeRules, firstName, expec
 const PROVIDERS = {
   groq: { Class: Groq, statusKey: 'ai.settings', vaultName: 'groq', hint: 'it starts with gsk_' },
   openrouter: { Class: OpenRouter, statusKey: 'ai.openrouter', vaultName: 'openrouter', hint: 'it starts with sk-or-' },
+  claude: { Class: Claude, statusKey: 'ai.claude', vaultName: 'anthropic', hint: 'it starts with sk-ant-' },
 };
+// What Claude returns for an email (structured output).
+const ANALYSIS_SCHEMA = { type: 'object', properties: { summary: { type: 'string' }, needs: { type: 'array', items: { type: 'string' } }, angle: { type: 'string' } }, required: ['summary', 'needs', 'angle'], additionalProperties: false };
+const EMAIL_SCHEMA = { type: 'object', properties: { analysis: ANALYSIS_SCHEMA, subject: { type: 'string' }, body: { type: 'string' } }, required: ['analysis', 'subject', 'body'], additionalProperties: false };
+const WHATSAPP_SCHEMA = { type: 'object', properties: { analysis: ANALYSIS_SCHEMA, message: { type: 'string' } }, required: ['analysis', 'message'], additionalProperties: false };
 const MAIN_KEY = 'ai.main';
 // The rules read from email prompts (per prompt).
 const RULES_KEY = 'ai.emailRules';
@@ -71,8 +78,12 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
   const status = (id) => ({ status: 'none', testedAt: null, error: null, ...(store.getState(PROVIDERS[id].statusKey) || {}) });
   const setStatus = (id, s) => store.setState(PROVIDERS[id].statusKey, { ...status(id), ...s });
   const apis = {};
+  let mode = null; // the AI Assistant switch (claude-mode.js)
   for (const [id, p] of Object.entries(PROVIDERS)) {
-    apis[id] = new p.Class({ key: () => vault.get(p.vaultName), fetchImpl, base: (id === 'groq' ? base || bases.groq : bases[id]) || undefined, log, fallback: () => status(id).fallbackModel || null, setFallback: (m) => setStatus(id, { fallbackModel: m }) });
+    apis[id] =
+      id === 'claude'
+        ? new Claude({ key: () => vault.get(p.vaultName), base: bases.claude || undefined, log, model: () => anthropicId(claudeModel()) })
+        : new p.Class({ key: () => vault.get(p.vaultName), fetchImpl, base: (id === 'groq' ? base || bases.groq : bases[id]) || undefined, log, fallback: () => status(id).fallbackModel || null, setFallback: (m) => setStatus(id, { fallbackModel: m }) });
   }
   // The main AI: the one chosen, else whichever has a key (Groq first).
   const mainId = () => {
@@ -80,12 +91,32 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
     if (chosen && vault.has(PROVIDERS[chosen]?.vaultName)) return chosen;
     return Object.keys(PROVIDERS).find((id) => vault.has(PROVIDERS[id].vaultName)) || 'groq';
   };
-  const ai = new Providers([apis.groq, apis.openrouter], () => apis[mainId()].label);
+  const ai = new Providers([apis.groq, apis.openrouter, apis.claude], () => apis[mainId()].label);
   const groq = apis.groq;
   const tools = buildTools(toolDeps);
+  mode = createClaudeMode({ store, vault, model: () => claudeModel(), log });
+  // A request for Claude only (the AI Assistant): its outcome keeps the
+  // connection status true.
+  async function claudeChat(messages, specs, o) {
+    try {
+      const r = await ai.chat(messages, specs, o);
+      mode.noteCall(true);
+      return r;
+    } catch (err) {
+      mode.noteCall(false, err);
+      throw err;
+    }
+  }
+  // The assistant's AI: Claude when a Claude model is chosen in Settings (or
+  // an Anthropic key is saved), else as before.
+  const claudeForAssistant = () => vault.has('anthropic') || /^anthropic\/claude-/.test(store.getState(EMAIL_MODEL_KEY) || '');
+  const assistantAI = {
+    configured: () => ai.configured(),
+    chat: (messages, specs) => (claudeForAssistant() && mode.ready() ? claudeChat(messages, specs, mode.opts({ reasoning: 'medium', maxTokens: 16000 })) : ai.chat(messages, specs)),
+  };
   const statusTool = tools.find((t) => t.name === 'get_status');
   const operator = new Operator({
-    groq: ai,
+    groq: assistantAI,
     tools,
     state: { get: (k) => store.getState(k), set: (k, v) => store.setState(k, v) },
     log,
@@ -110,7 +141,7 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
     const orV = providerView('openrouter');
     const main = mainId();
     const mv = main === 'groq' ? groqV : orV;
-    return { configured: groqV.configured || orV.configured, status: mv.status, testedAt: mv.testedAt, error: mv.error, main, groq: groqV, openrouter: orV, persistent: vault.persistent, emailModel: emailModel(), emailModels: EMAIL_MODELS, emailModelLast: store.getState('ai.emailModelLast') || null };
+    return { configured: groqV.configured || orV.configured || providerView('claude').configured, claude: providerView('claude'), status: mv.status, testedAt: mv.testedAt, error: mv.error, main, groq: groqV, openrouter: orV, persistent: vault.persistent, emailModel: emailModel(), emailModels: EMAIL_MODELS, emailModelLast: store.getState('ai.emailModelLast') || null };
   };
   const idOf = (p) => (PROVIDERS[p] ? p : 'groq');
 
@@ -120,6 +151,9 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
     return EMAIL_MODELS.some((m) => m.id === v) ? v : 'auto';
   };
   const modelOpt = () => (emailModel() !== 'auto' && vault.has(PROVIDERS.openrouter.vaultName) ? { model: emailModel() } : {});
+  // The Claude model campaigns written by Claude use: the one chosen in
+  // Settings, else Claude Opus 5.5 (OpenRouter's id).
+  const claudeModel = () => (/^anthropic\/claude-/.test(emailModel()) ? emailModel() : 'anthropic/claude-opus-5.5');
   // Which model wrote the last email, and why a chosen one was not used.
   const LAST_KEY = 'ai.emailModelLast';
   function noteModel(wanted, answer) {
@@ -174,7 +208,7 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
   // bullets, questions, length; see email-rules.js), read once by the AI and
   // kept per prompt.
   const rulesSeen = new Map();
-  async function emailRules(prompt) {
+  async function emailRules(prompt, chatOpts = null) {
     const p = String(prompt || '').trim();
     if (!p) return {};
     const key = crypto.createHash('sha256').update(p).digest('hex').slice(0, 32);
@@ -186,7 +220,7 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
     }
     let read = null;
     try {
-      const { message } = await ai.chat([{ role: 'system', content: RULES_SYSTEM }, { role: 'user', content: p }], [], { maxTokens: 1500, ...modelOpt() });
+      const { message } = chatOpts ? await claudeChat([{ role: 'system', content: RULES_SYSTEM }, { role: 'user', content: p }], [], chatOpts) : await ai.chat([{ role: 'system', content: RULES_SYSTEM }, { role: 'user', content: p }], [], { maxTokens: 1500, ...modelOpt() });
       read = parseJson(message?.content);
     } catch (err) {
       if (['no_key', 'invalid_key', 'credits'].includes(err.code)) throw err;
@@ -215,10 +249,13 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
   //   anything else that is wrong is sent back to the AI to rewrite, at most
   //   twice; the best answer is used and what it still misses is in `problems`.
   // followup: { step, note, earlier: [text] } for a follow-up in the thread.
-  async function writeEmail({ instructions, subject = '', sender = {}, business = {}, followup = null }) {
+  // claude: written by Claude (the AI Assistant) from the business profile,
+  // with its analysis of the business (kept per lead: leadId).
+  async function writeEmail({ instructions, subject = '', sender = {}, business = {}, followup = null, claude = false, leadId = null }) {
+    if (claude && !mode.ready()) throw Object.assign(new Error('Claude needs an OpenRouter key (or an Anthropic key) in Settings > AI Integrations'), { code: 'no_key' });
     // Windows line endings (a prompt pasted from a file) read like any other.
     const brief = String(instructions || '').replace(/\r\n?/g, '\n').slice(0, 30_000).trim();
-    const rules = await emailRules(brief);
+    const rules = await emailRules(brief, claude ? mode.opts({ reasoning: 'low', maxTokens: 4000 }) : null);
     const kind = followup ? 'followup' : 'email';
     const first = firstName(business);
     const greeting = expectedGreeting(rules, first);
@@ -241,7 +278,9 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
       'Language: the brief’s (Roman Urdu stays Roman Urdu), unless it says otherwise.',
       'Formatting: plain text, except: put **double asterisks** around 2 to 4 short key phrases to show them in bold (this business’s need, the main benefit, the offer), never whole sentences; write lists as lines starting with "- ". No other markdown (no #, no _, no tables), no emojis unless the brief uses them, no placeholders left, no subject line inside the body, no unsubscribe line (the app adds one). The app designs the email: bold phrases, a clean list and the closing question highlighted.',
       subject ? `Subject: exactly this, filling {name} / {business} from the facts (drop a placeholder whose value is unknown): ${subject}` : 'Subject: as the brief says; otherwise short and specific to this business (at most 9 words), no clickbait, no ALL CAPS.',
-      'Reply with JSON only, nothing before or after it: {"subject": "...", "body": "..."}',
+      claude
+        ? 'Reply with JSON only: {"analysis": {"summary": "what this business does and for whom, from the facts", "needs": ["its likely needs we can meet"], "angle": "why we reach out to it"}, "subject": "...", "body": "..."}'
+        : 'Reply with JSON only, nothing before or after it: {"subject": "...", "body": "..."}',
     ].filter(Boolean);
     const system = [
       '=== THE SENDER’S BRIEF (follow it exactly; it overrides everything below) ===',
@@ -267,14 +306,19 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
     const finish = (out) => finishEmail(out, { rules, greeting, first, business, sender, subject, kind });
     // A chosen (Claude) model does not think first: 1500 tokens is plenty
     // for an email and keeps OpenRouter's credit reservation small.
-    const chosen = modelOpt();
-    const opts = { maxTokens: chosen.model ? 1500 : 4000, reasoning: 'medium', ...chosen };
+    const chosen = claude ? mode.opts() : modelOpt();
+    const opts = claude ? mode.opts({ reasoning: 'medium', maxTokens: 8000, schema: EMAIL_SCHEMA }) : { maxTokens: chosen.model ? 1500 : 4000, reasoning: 'medium', ...chosen };
     const messages = [{ role: 'system', content: system }, { role: 'user', content: user }];
     let best = null;
+    let analysis = null;
     for (let attempt = 0; attempt < 3; attempt++) {
-      const answer = await ai.chat(messages, [], opts);
-      noteModel(chosen.model, answer);
+      const answer = claude ? await claudeChat(messages, [], opts) : await ai.chat(messages, [], opts);
+      if (!claude) noteModel(chosen.model, answer);
       const out = read(answer.message);
+      if (claude && out?.analysis) {
+        analysis = out.analysis;
+        mode.saveInsight(leadId, analysis, answer.model);
+      }
       const got = out ? finish(out) : null;
       if (got && (!best || got.problems.length < best.problems.length)) best = got;
       if (best && !best.problems.length) break;
@@ -282,6 +326,7 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
       messages.push({ role: 'user', content: got ? `This email does not follow the brief yet:\n${got.problems.map((p) => `- ${p}`).join('\n')}\nRewrite it so it follows every rule of the brief and the notes, for the same business, and answer with the JSON only.` : 'Answer with the JSON only: {"subject": "...", "body": "..."}, following the brief.' });
     }
     if (!best) throw Object.assign(new Error('the AI did not answer in the expected form'), { code: 'ai_empty' });
+    if (claude) mode.activity({ type: followup ? 'followup' : 'email', ok: true, title: `${followup ? `Follow-up ${followup.step}` : 'Email'} for ${business.business_name || business.contact_name || 'a lead'}`, subject: best.subject, preview: best.body.slice(0, 1200), analysis: analysis?.summary || null, leadId, problems: best.problems });
     return best;
   }
 
@@ -313,16 +358,18 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
   }
 
   // One personalised WhatsApp message: the user's prompt + the business's facts.
-  async function writeWhatsApp({ instructions, sender = {}, business = {} }) {
+  async function writeWhatsApp({ instructions, sender = {}, business = {}, followup = null, claude = false, leadId = null }) {
+    if (claude) return claudeWhatsApp({ instructions, sender, business, followup, leadId });
     const system = [
       'You write ONE short, personal WhatsApp message from the sender to one business, following the sender’s instructions (their offer, tone and language — write in the language of the instructions; Roman Urdu if they write Roman Urdu).',
       'Use the business facts to make it specific (their name, category, area, whether they have a website). Never invent anything that is not in the facts or the instructions: no made-up names, numbers, reviews, prices or claims.',
       'Greet the contact by first name only if contact_name is given and looks like a person’s name.',
       'Plain text, 20 to 70 words, at most one emoji, no links unless the instructions give one, no placeholders like [Name], like a real person writing on WhatsApp (not an advert).',
+      followup ? `This is follow-up ${followup.step}: the business has not replied to the earlier message(s) (earlier_messages). Write a short, polite nudge (15 to 50 words) that refers back naturally and adds one new helpful point or a simple question; never repeat the earlier wording.` : '',
       'Reply with JSON only: {"message": "..."}',
-    ].join('\n');
-    const user = JSON.stringify({ instructions: String(instructions || '').slice(0, 4000), sender, business });
-    const { message } = await ai.chat([{ role: 'system', content: system }, { role: 'user', content: user }], []);
+    ].filter(Boolean).join('\n');
+    const user = JSON.stringify({ instructions: String(instructions || '').slice(0, 4000), sender, business, ...(followup ? { earlier_messages: (followup.earlier || []).map((t) => String(t).slice(0, 1500)) } : {}) });
+    const { message } = await ai.chat([{ role: 'system', content: system }, { role: 'user', content: user }], [], { ...modelOpt() });
     const text = String(message?.content || '');
     let out = null;
     try {
@@ -331,6 +378,37 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
     const msg = typeof out?.message === 'string' ? out.message : !text.includes('{') ? text : '';
     if (!msg.trim()) throw Object.assign(new Error('the AI did not answer in the expected form'), { code: 'ai_empty' });
     return msg.replace(/\r\n/g, '\n').trim();
+  }
+
+  // A WhatsApp message (or follow-up) by Claude: the lead's details and the
+  // campaign's prompt in, the message (and a short analysis of the business,
+  // kept per lead) out.
+  async function claudeWhatsApp({ instructions = '', sender = {}, business = {}, followup = null, leadId = null }) {
+    if (!mode.ready()) throw Object.assign(new Error('Claude needs an OpenRouter key (or an Anthropic key) in Settings > AI Integrations'), { code: 'no_key' });
+    const first = firstName(business);
+    const facts = { ...business, ...(first ? { first_name: first } : {}) };
+    delete facts.email;
+    const system = [
+      '=== THE SENDER’S INSTRUCTIONS (follow them exactly) ===',
+      String(instructions || '').slice(0, 4000) || '(none: a short, friendly introduction of the sender’s services)',
+      '=== END ===',
+      '',
+      'Understand this business from its facts (what it does, its likely needs), then write ONE WhatsApp message from the sender that is clearly about it, not a template. Never invent compliments, reviews, numbers or details about its website.',
+      followup
+        ? `This is follow-up ${followup.step}: the business has not replied to the earlier message(s) in the user message. A short, polite nudge (15 to 50 words) that refers back naturally and adds one new helpful point or one simple question; never repeat the earlier wording.`
+        : 'Like a real person on WhatsApp (not an advert): 20 to 70 words, at most one emoji, no links unless the instructions give one, no placeholders.',
+      first ? `The contact’s first name is ${first}.` : 'No person’s name is known: never greet the business name as a person.',
+      'Language: the instructions’ (Roman Urdu stays Roman Urdu).',
+      'Reply with JSON only: {"analysis": {"summary": "...", "needs": ["..."], "angle": "..."}, "message": "..."}',
+    ].join('\n');
+    const user = JSON.stringify({ business: facts, sender_name: sender.name || '', ...(followup ? { earlier_messages: (followup.earlier || []).map((t) => String(t).slice(0, 1500)) } : {}) });
+    const answer = await claudeChat([{ role: 'system', content: system }, { role: 'user', content: user }], [], mode.opts({ reasoning: 'medium', maxTokens: 6000, schema: WHATSAPP_SCHEMA }));
+    const out = parseJson(answer.message?.content);
+    const msg = String(out?.message || '').replace(/\r\n/g, '\n').replace(/\*\*(.+?)\*\*/g, '$1').trim();
+    if (msg.length < 5) throw Object.assign(new Error('Claude did not write a usable message'), { code: 'ai_empty' });
+    if (out?.analysis) mode.saveInsight(leadId, out.analysis, answer.model);
+    mode.activity({ type: followup ? 'wa_followup' : 'whatsapp', ok: true, title: `WhatsApp ${followup ? `follow-up ${followup.step}` : 'message'} for ${business.business_name || business.contact_name || 'a lead'}`, preview: msg.slice(0, 800), analysis: out?.analysis?.summary || null, leadId });
+    return msg;
   }
 
   function registerIpc(handle, pickFiles) {
@@ -372,7 +450,7 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
     return r.ok ? r.reply : `Sorry, I could not do that: ${r.error}`;
   }
 
-  return { groq, apis, operator, tools, view, test, saveKey, setMain, setEmailModel, emailModel, registerIpc, whatsappReply, writeEmail, checkEmail, writeWhatsApp, available: () => ai.configured() };
+  return { groq, apis, mode, claudeChat, operator, tools, view, test, saveKey, setMain, setEmailModel, emailModel, registerIpc, whatsappReply, writeEmail, checkEmail, writeWhatsApp, available: () => ai.configured() };
 }
 
 module.exports = { createAI };
