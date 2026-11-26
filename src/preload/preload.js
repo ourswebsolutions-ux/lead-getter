@@ -230,6 +230,7 @@ contextBridge.exposeInMainWorld('leadFinder', {
   aiSaveKey: (key, provider) => ipcRenderer.invoke('ai:saveKey', String(key ?? ''), provider === 'openrouter' ? 'openrouter' : 'groq'),
   aiTest: (provider) => ipcRenderer.invoke('ai:test', provider === 'openrouter' ? 'openrouter' : 'groq'),
   aiSetMain: (provider) => ipcRenderer.invoke('ai:setMain', provider === 'openrouter' ? 'openrouter' : 'groq'),
+  aiSetEmailModel: (id) => ipcRenderer.invoke('ai:setEmailModel', String(id ?? '')),
   aiHistory: () => ipcRenderer.invoke('ai:history'),
   aiSend: (text, fileIds) => ipcRenderer.invoke('ai:send', String(text ?? ''), Array.isArray(fileIds) ? fileIds.map(String).slice(0, 10) : []),
   aiClear: () => ipcRenderer.invoke('ai:clear'),

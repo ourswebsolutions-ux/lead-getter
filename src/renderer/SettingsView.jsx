@@ -243,6 +243,7 @@ function ProviderKey({ id, label, placeholder, st, onSettings, notify }) {
 // and the other takes over when it fails.
 function AiKeys({ notify }) {
   const [st, setSt] = useState(null);
+  const [modelError, setModelError] = useState('');
   useEffect(() => {
     api.aiSettings().then(setSt).catch(() => {});
   }, []);
@@ -265,6 +266,47 @@ function AiKeys({ notify }) {
             ))}
           </div>
           <span className="muted small">The other one takes over if it fails.</span>
+        </div>
+      )}
+      {st && (
+        <div className="st-group st-groq st-email-model" role="group" aria-label="Email writing model">
+          <div className="st-groq-row">
+            <label className="st-groq-field">
+              <span>Model that writes campaign emails</span>
+              <select
+                className="st-select"
+                aria-label="Model that writes campaign emails"
+                value={st.emailModel || 'auto'}
+                onChange={async (e) => {
+                  const r = await api.aiSetEmailModel(e.target.value);
+                  setSt(r.settings);
+                  setModelError(r.ok ? '' : r.error);
+                  if (r.ok) notify?.({ type: 'ok', text: 'Campaign emails will be written with this model.' });
+                }}
+              >
+                {(st.emailModels || []).map((m) => (
+                  <option key={m.id} value={m.id} disabled={m.id !== 'auto' && !st.openrouter?.configured}>
+                    {m.label} · {m.cost}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <span className="muted small">
+            Claude models write each email automatically while a campaign sends, through your OpenRouter key (paid from its credit; a Claude Pro plan cannot be used by other apps). The Assistant keeps the usual models.
+            {!st.openrouter?.configured ? ' Save an OpenRouter key above to choose Claude.' : ''}
+          </span>
+          {modelError && (
+            <p className="st-error" role="alert">
+              <Icon name="alert" size={14} /> {modelError}
+            </p>
+          )}
+          {st.emailModelLast?.used && (
+            <p className={`st-note ${st.emailModelLast.problem ? 'warn' : ''}`} role="status">
+              Last email written by {(st.emailModels || []).find((m) => m.id === st.emailModelLast.used)?.label || st.emailModelLast.used} · {new Date(st.emailModelLast.at).toLocaleString()}
+              {st.emailModelLast.problem ? `. ${(st.emailModels || []).find((m) => m.id === st.emailModelLast.wanted)?.label || 'The chosen model'} could not be used: ${st.emailModelLast.problem}` : ''}
+            </p>
+          )}
         </div>
       )}
     </>

@@ -170,14 +170,58 @@ function render(template, values) {
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const looksHtml = (s) => /<\/?(p|div|br|a|b|strong|i|em|u|ul|ol|li|h[1-6]|table|tr|td|span|img|hr|blockquote)\b[^>]*>/i.test(String(s || ''));
 
-// Plain text as simple HTML: paragraphs, line breaks, links.
+// Plain text as a clean, light email design (inline styles only, no
+// images, so it reads well everywhere and does not look like a newsletter):
+// paragraphs, links, **bold** phrases, "- " lines as a list, and the
+// closing question (the call to action) in a soft highlighted box.
+const ACCENT = '#2f6fed';
 function textToHtml(text) {
-  const linkify = (s) => esc(s).replace(/\bhttps?:\/\/[^\s<]+[^\s<.,;:!?)\]'"]/g, (u) => `<a href="${u}">${u}</a>`);
-  return String(text)
-    .split(/\n{2,}/)
-    .map((p) => `<p>${linkify(p).replace(/\n/g, '<br>')}</p>`)
+  const inline = (s) =>
+    esc(s)
+      .replace(/\*\*(.+?)\*\*/g, '<strong style="color:#111827">$1</strong>')
+      .replace(/\bhttps?:\/\/[^\s<]+[^\s<.,;:!?)\]'"]/g, (u) => `<a href="${u}" style="color:${ACCENT}">${u}</a>`);
+  const LIST = /^\s*[-•*]\s+(?!\*\s)/;
+  const GREETING = /^(?:hi|hello|hey|dear|salam|assalam[^\n,]*|good (?:morning|afternoon|evening))\b[^\n]{0,60},$/i;
+  // Blocks: runs of text lines, and lists (two or more "- " lines in a row).
+  const blocks = [];
+  for (const p of String(text).split(/\n{2,}/)) {
+    const lines = p.split('\n').filter((l, i, all) => l.trim() || (i > 0 && i < all.length - 1));
+    let i = 0;
+    while (i < lines.length) {
+      let j = i;
+      while (j < lines.length && LIST.test(lines[j])) j++;
+      if (j - i >= 2) {
+        blocks.push({ list: lines.slice(i, j).map((l) => l.replace(LIST, '')) });
+        i = j;
+        continue;
+      }
+      const t = [lines[i++]];
+      while (i < lines.length && !(LIST.test(lines[i]) && LIST.test(lines[i + 1] || ''))) t.push(lines[i++]);
+      blocks.push({ text: t });
+    }
+  }
+  // The greeting as its own paragraph.
+  if (blocks[0]?.text?.length > 1 && GREETING.test(blocks[0].text[0].trim())) blocks.splice(0, 1, { text: [blocks[0].text[0]] }, { text: blocks[0].text.slice(1) });
+  // The call to action: the last text after the opening that ends with a question.
+  let cta = -1;
+  for (let k = blocks.length - 1; k > 0; k--) {
+    if (blocks[k].text && /\?\s*$/.test(blocks[k].text.join(' ').trim())) {
+      cta = k;
+      break;
+    }
+  }
+  return blocks
+    .map((b, k) => {
+      if (b.list) return `<ul style="margin:4px 0 16px;padding-left:22px">${b.list.map((l) => `<li style="margin:0 0 6px">${inline(l)}</li>`).join('')}</ul>`;
+      const body = inline(b.text.join('\n')).replace(/\n/g, '<br>');
+      if (k === cta) return `<p style="margin:18px 0;padding:12px 16px;background:#f3f6ff;border-left:3px solid ${ACCENT};border-radius:6px;color:#111827">${body}</p>`;
+      return `<p style="margin:0 0 ${blocks[k + 1]?.list ? 6 : 14}px">${body}</p>`;
+    })
     .join('\n');
 }
+
+// The plain-text version: **bold** marks removed.
+const plainText = (t) => String(t || '').replace(/\*\*(.+?)\*\*/g, '$1');
 
 // The user's HTML without what email clients block anyway (scripts,
 // event handlers, javascript: links).
@@ -215,11 +259,11 @@ function compose({ subject, body }, values) {
   const s = render(subject, values).replace(/[\r\n]+/g, ' ').trim();
   const b = render(body, values);
   const html = looksHtml(b) ? cleanHtml(b) : textToHtml(b);
-  const text = looksHtml(b) ? htmlToText(b) : b;
+  const text = looksHtml(b) ? htmlToText(b) : plainText(b);
   return {
     subject: s,
     text: `${text.trim()}\n\n--\n${UNSUBSCRIBE_TEXT}`,
-    html: `<!doctype html><html><body style="font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.5;color:#1f2328">${html}<hr style="border:none;border-top:1px solid #ddd;margin:24px 0 12px"><p style="font-size:12px;color:#666">${esc(UNSUBSCRIBE_TEXT)}</p></body></html>`,
+    html: `<!doctype html><html><body style="margin:0;padding:0;background:#ffffff"><div style="max-width:600px;padding:8px 4px;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.6;color:#1f2328">${html}<hr style="border:none;border-top:1px solid #e5e7eb;margin:24px 0 12px"><p style="margin:0;font-size:12px;color:#6b7280">${esc(UNSUBSCRIBE_TEXT)}</p></div></body></html>`,
   };
 }
 
@@ -1715,7 +1759,7 @@ class EmailCampaigns extends EventEmitter {
   lastSentTo(email) {
     const r = this.db.prepare("SELECT r.*, c.name AS campaign_name, c.subject AS c_subject, c.body AS c_body FROM email_recipients r JOIN email_campaigns c ON c.id = r.campaign_id WHERE r.email = ? AND r.state IN ('sent', 'uncertain') ORDER BY r.sent_at DESC LIMIT 1").get(String(email || '').toLowerCase());
     if (!r) return null;
-    const msg = r.sent_text ? { subject: r.sent_subject, text: r.sent_text } : r.ai_body ? { subject: r.ai_subject, text: r.ai_body } : compose({ subject: r.c_subject, body: r.c_body }, { name: r.name, business: r.business, email: r.email });
+    const msg = r.sent_text ? { subject: r.sent_subject, text: r.sent_text } : r.ai_body ? { subject: r.ai_subject, text: plainText(r.ai_body) } : compose({ subject: r.c_subject, body: r.c_body }, { name: r.name, business: r.business, email: r.email });
     return { campaignId: r.campaign_id, campaignName: r.campaign_name, leadId: r.lead_id, name: r.name || r.business || null, business: r.business, subject: msg.subject, text: String(msg.text).split('\n--\n')[0] };
   }
 

@@ -85,7 +85,7 @@ test('Personalisation: {name}, {business}, {email}; missing values removed clean
   assert.equal(m.subject, 'For Zahid Properties');
   assert.match(m.text, /^Hello Zahid,/);
   assert.match(m.text, /unsubscribe/);
-  assert.match(m.html, /<a href="https:\/\/axora\.pk">/);
+  assert.match(m.html, /<a href="https:\/\/axora\.pk"[ >]/);
   const h = compose({ subject: 's', body: '<p>Hi <b>{name}</b></p><script>alert(1)</script><a href="javascript:x" onclick="y">x</a>' }, { name: 'Sara' });
   assert.ok(!/script|onclick|javascript:/i.test(h.html));
   assert.match(h.text, /Hi Sara/);

@@ -1095,8 +1095,8 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
         {d.aiWrite && (
           <div className="st-choice em-writer" role="radiogroup" aria-label="Who writes the emails">
             {[
-              ['api', 'Lead Finder (Groq / OpenRouter key)', 'Written automatically while the campaign sends.'],
-              ['claude', 'Claude (your Claude plan, no key)', 'You ask Claude in Claude Desktop to write them; only written emails are sent.'],
+              ['api', 'Automatic', 'Written by itself while the campaign sends, with the model chosen in Settings > AI Integrations (e.g. Claude Sonnet through OpenRouter).'],
+              ['claude', 'Claude Desktop (by hand)', 'You ask Claude in Claude Desktop to write them; only written emails are sent.'],
             ].map(([id, label, help]) => (
               <button key={id} type="button" role="radio" aria-checked={d.writer === id} className={d.writer === id ? 'on' : ''} disabled={running} onClick={() => set('writer', id)}>
                 <span className="st-radio" />
@@ -1183,7 +1183,7 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
                 <Icon name="x" size={12} />
               </button>
             </div>
-            <pre>{preview.text}</pre>
+            {preview.html ? <iframe className="em-preview-frame" title="Email preview" sandbox="" srcDoc={preview.html} /> : <pre>{preview.text}</pre>}
           </div>
         )}
         <div className="em-test">
@@ -1297,7 +1297,11 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
                         <details className="em-ai-sent">
                           <summary>AI email</summary>
                           <strong>{r.aiSubject}</strong>
-                          <pre>{r.aiBody}</pre>
+                          <pre>
+                            {String(r.aiBody)
+                              .split(/\*\*(.+?)\*\*/g)
+                              .map((part, i) => (i % 2 ? <strong key={i}>{part}</strong> : part))}
+                          </pre>
                         </details>
                       )}
                     </td>

@@ -117,14 +117,24 @@ class ChatAPI {
     return { model, messages, temperature: 0.2, max_tokens: opts.maxTokens || 1200, ...(tools?.length ? { tools, tool_choice: 'auto' } : {}) };
   }
 
+  // A model this provider can be asked for by name (opts.model).
+  accepts() {
+    return false;
+  }
+
   // One chat completion: { message: { content, tool_calls }, model, provider }.
+  // opts.model: a model chosen for this kind of work (e.g. a Claude model for
+  // emails), tried first; the usual models stay the stand-ins, and the
+  // provider's current model is not changed by it.
   async chat(messages, tools, opts = {}) {
     let lastErr = null;
-    for (const model of this.models.slice(Math.max(0, this.models.indexOf(this.model)))) {
+    const chosen = opts.model && this.accepts(opts.model) ? opts.model : null;
+    const list = chosen ? [chosen, ...this.models.filter((m) => m !== chosen)] : this.models.slice(Math.max(0, this.models.indexOf(this.model)));
+    for (const model of list) {
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
           const data = await this.request('/chat/completions', { method: 'POST', body: this.body(model, messages, tools, opts) });
-          this.model = model;
+          if (!chosen) this.model = model;
           const message = data?.choices?.[0]?.message;
           if (!message) throw new GroqError(`${this.label} returned an empty answer.`, 'empty');
           return { message, model, provider: this.label };
@@ -166,6 +176,11 @@ class OpenRouter extends ChatAPI {
     return { ...super.headers(key), 'X-Title': 'Lead Finder' };
   }
 
+  // Any model of OpenRouter's catalogue ("vendor/model").
+  accepts(model) {
+    return /^[a-z0-9-]+\/[\w.:-]+$/i.test(String(model || ''));
+  }
+
   // The key is checked on its own (the model list needs none); then the
   // models that can call tools.
   async availableModels(key) {
@@ -193,13 +208,21 @@ class Providers {
     return this.list.some((p) => p.configured());
   }
 
-  async chat(messages, tools, opts) {
+  // The answer has skipped: [{ provider, code, error }] when a provider
+  // failed and the next one answered (so a chosen model not used is known).
+  async chat(messages, tools, opts = {}) {
     let lastErr = null;
-    for (const p of this.ordered()) {
+    const skipped = [];
+    // A chosen model goes to the provider that offers it first.
+    const list = this.ordered();
+    if (opts.model) list.sort((a, b) => b.accepts(opts.model) - a.accepts(opts.model));
+    for (const p of list) {
       try {
-        return await p.chat(messages, tools, opts);
+        const r = await p.chat(messages, tools, opts);
+        return skipped.length ? { ...r, skipped } : r;
       } catch (err) {
         lastErr = err;
+        skipped.push({ provider: p.label, code: err.code, error: err.message });
         if (!['rate_limit', 'server', 'network', 'invalid_key', 'credits', 'model', 'empty', 'no_key'].includes(err.code)) throw err;
       }
     }

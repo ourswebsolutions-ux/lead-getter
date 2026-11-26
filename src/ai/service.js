@@ -20,6 +20,16 @@ const PROVIDERS = {
 const MAIN_KEY = 'ai.main';
 // The rules read from email prompts (per prompt).
 const RULES_KEY = 'ai.emailRules';
+// The model that writes campaign emails (OpenRouter): 'auto' = the usual
+// cheap models; else one of EMAIL_MODELS (Claude). Only email writing uses
+// it; the assistant and everything else keep the usual models.
+const EMAIL_MODEL_KEY = 'ai.emailModel';
+const EMAIL_MODELS = [
+  { id: 'auto', label: 'Automatic (cheapest models)', cost: 'about $0.0005 an email' },
+  { id: 'anthropic/claude-sonnet-5.5', label: 'Claude Sonnet 5.5 (recommended)', cost: 'about $0.01 an email' },
+  { id: 'anthropic/claude-haiku-5.5', label: 'Claude Haiku 5.5 (low cost)', cost: 'about $0.001 an email' },
+  { id: 'anthropic/claude-opus-5.5', label: 'Claude Opus 5.5 (best writing)', cost: 'about $0.025 an email' },
+];
 
 // The JSON object in an answer (even inside a code block), or null.
 function parseJson(content) {
@@ -33,16 +43,25 @@ function parseJson(content) {
 
 // bases: { groq, openrouter } API addresses (tests only).
 // An email's text made ready: placeholders left in it filled from the
-// facts, markdown removed, the greeting and sign-off set by the app; then
-// what still misses the prompt's rules.
+// facts, markdown other than **bold** removed (bold is kept for at most 5
+// phrases; the email's HTML shows it), the greeting and sign-off set by the
+// app; then what still misses the prompt's rules.
 function finishEmail(out, { rules, greeting, first, business = {}, sender = {}, subject = '', kind = 'email' }) {
   const fill = (t) =>
     String(t || '')
       .replace(/\{\s*(business(?:[ _]name)?|company)\s*\}|\[\s*(business|company)(?: name)?\s*\]/gi, business.business_name || business.company || '')
       .replace(/\{\s*(name|first[ _]name|contact)\s*\}|\[\s*(name|first name|contact(?: name)?)\s*\]/gi, first || '')
       .replace(/\{\s*(sender|your name)\s*\}|\[\s*(your name|sender(?: name)?)\s*\]/gi, sender.name || '');
-  let body = fill(out.body).replace(/\r\n/g, '\n').replace(/\*\*(.+?)\*\*/g, '$1').replace(/^#+\s*/gm, '').trim();
+  let bold = 0;
+  let body = fill(out.body)
+    .replace(/\r\n/g, '\n')
+    .replace(/^#+\s*/gm, '')
+    .replace(/__(.+?)__/g, '$1')
+    .replace(/\*\*\s*(.+?)\s*\*\*/g, (_, t) => (++bold <= 5 && t.length <= 80 && !/\n/.test(t) ? `**${t}**` : t))
+    .trim();
   body = setGreeting(body, greeting);
+  // The greeting on its own line, then a blank line.
+  body = body.replace(/^((?:hi|hello|hey|dear|salam|assalam[^\n,]*|good (?:morning|afternoon|evening))\b[^\n]{0,60},)\n(?!\n)/i, '$1\n\n');
   body = setSignoff(body, rules.signoff, [sender.name, business.contact_name]);
   const email = { subject: fill(String(out.subject || subject || '')).replace(/\s+/g, ' ').trim(), body };
   return { ...email, problems: problems(email, rules, business, { kind }) };
@@ -91,9 +110,34 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
     const orV = providerView('openrouter');
     const main = mainId();
     const mv = main === 'groq' ? groqV : orV;
-    return { configured: groqV.configured || orV.configured, status: mv.status, testedAt: mv.testedAt, error: mv.error, main, groq: groqV, openrouter: orV, persistent: vault.persistent };
+    return { configured: groqV.configured || orV.configured, status: mv.status, testedAt: mv.testedAt, error: mv.error, main, groq: groqV, openrouter: orV, persistent: vault.persistent, emailModel: emailModel(), emailModels: EMAIL_MODELS, emailModelLast: store.getState('ai.emailModelLast') || null };
   };
   const idOf = (p) => (PROVIDERS[p] ? p : 'groq');
+
+  // The model chosen for campaign emails (needs the OpenRouter key).
+  const emailModel = () => {
+    const v = store.getState(EMAIL_MODEL_KEY);
+    return EMAIL_MODELS.some((m) => m.id === v) ? v : 'auto';
+  };
+  const modelOpt = () => (emailModel() !== 'auto' && vault.has(PROVIDERS.openrouter.vaultName) ? { model: emailModel() } : {});
+  // Which model wrote the last email, and why a chosen one was not used.
+  const LAST_KEY = 'ai.emailModelLast';
+  function noteModel(wanted, answer) {
+    const used = answer?.model || null;
+    const why = wanted && used !== wanted ? answer?.skipped?.find((x) => x.provider === 'OpenRouter') || answer?.skipped?.[0] : null;
+    const prev = store.getState(LAST_KEY);
+    const next = { used, wanted: wanted || null, at: Date.now(), problem: why ? why.error : null };
+    if (why && prev?.problem !== why.error) log(`email writer: ${wanted} not used (${why.error}); written with ${used}`);
+    store.setState(LAST_KEY, next);
+  }
+
+  function setEmailModel(id) {
+    if (!EMAIL_MODELS.some((m) => m.id === id)) return { ok: false, error: 'Unknown model.', settings: view() };
+    if (id !== 'auto' && !vault.has(PROVIDERS.openrouter.vaultName)) return { ok: false, error: 'Claude models are used through OpenRouter: save an OpenRouter API key first.', settings: view() };
+    store.setState(EMAIL_MODEL_KEY, id);
+    log(`assistant: email writing model ${id}`);
+    return { ok: true, settings: view() };
+  }
 
   async function test(provider = 'groq') {
     const id = idOf(provider);
@@ -142,7 +186,7 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
     }
     let read = null;
     try {
-      const { message } = await ai.chat([{ role: 'system', content: RULES_SYSTEM }, { role: 'user', content: p }], [], { maxTokens: 1500 });
+      const { message } = await ai.chat([{ role: 'system', content: RULES_SYSTEM }, { role: 'user', content: p }], [], { maxTokens: 1500, ...modelOpt() });
       read = parseJson(message?.content);
     } catch (err) {
       if (['no_key', 'invalid_key', 'credits'].includes(err.code)) throw err;
@@ -195,7 +239,7 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
             has('words') ? `Length: ${rules.words.min} to ${rules.words.max} words in the body (aim for about ${Math.round((rules.words.min + rules.words.max) / 2)}; count them before you answer).` : 'Length: as the brief says; if it says nothing, about 80 to 180 words.',
           ]),
       'Language: the brief’s (Roman Urdu stays Roman Urdu), unless it says otherwise.',
-      'Plain text only: no markdown, no ** or #, no placeholders left, no subject line inside the body, no unsubscribe line (the app adds one).',
+      'Formatting: plain text, except: put **double asterisks** around 2 to 4 short key phrases to show them in bold (this business’s need, the main benefit, the offer), never whole sentences; write lists as lines starting with "- ". No other markdown (no #, no _, no tables), no emojis unless the brief uses them, no placeholders left, no subject line inside the body, no unsubscribe line (the app adds one). The app designs the email: bold phrases, a clean list and the closing question highlighted.',
       subject ? `Subject: exactly this, filling {name} / {business} from the facts (drop a placeholder whose value is unknown): ${subject}` : 'Subject: as the brief says; otherwise short and specific to this business (at most 9 words), no clickbait, no ALL CAPS.',
       'Reply with JSON only, nothing before or after it: {"subject": "...", "body": "..."}',
     ].filter(Boolean);
@@ -221,11 +265,16 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
       return out && typeof out.body === 'string' && out.body.trim() ? out : null;
     };
     const finish = (out) => finishEmail(out, { rules, greeting, first, business, sender, subject, kind });
-    const opts = { maxTokens: 4000, reasoning: 'medium' };
+    // A chosen (Claude) model does not think first: 1500 tokens is plenty
+    // for an email and keeps OpenRouter's credit reservation small.
+    const chosen = modelOpt();
+    const opts = { maxTokens: chosen.model ? 1500 : 4000, reasoning: 'medium', ...chosen };
     const messages = [{ role: 'system', content: system }, { role: 'user', content: user }];
     let best = null;
     for (let attempt = 0; attempt < 3; attempt++) {
-      const out = read((await ai.chat(messages, [], opts)).message);
+      const answer = await ai.chat(messages, [], opts);
+      noteModel(chosen.model, answer);
+      const out = read(answer.message);
       const got = out ? finish(out) : null;
       if (got && (!best || got.problems.length < best.problems.length)) best = got;
       if (best && !best.problems.length) break;
@@ -289,6 +338,7 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
     handle('ai:saveKey', (key, provider) => saveKey(key, provider));
     handle('ai:test', (provider) => test(provider));
     handle('ai:setMain', (provider) => setMain(provider));
+    handle('ai:setEmailModel', (id) => setEmailModel(String(id || '')));
     handle('ai:history', () => ({ ok: true, ...operator.view('app') }));
     handle('ai:clear', () => {
       operator.clear('app');
@@ -322,7 +372,7 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
     return r.ok ? r.reply : `Sorry, I could not do that: ${r.error}`;
   }
 
-  return { groq, apis, operator, tools, view, test, saveKey, setMain, registerIpc, whatsappReply, writeEmail, checkEmail, writeWhatsApp, available: () => ai.configured() };
+  return { groq, apis, operator, tools, view, test, saveKey, setMain, setEmailModel, emailModel, registerIpc, whatsappReply, writeEmail, checkEmail, writeWhatsApp, available: () => ai.configured() };
 }
 
 module.exports = { createAI };
