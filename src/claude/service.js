@@ -128,6 +128,8 @@ function createClaude({ app, state, tools, isLocked, onLocked, confirm, log = ()
       connection: conn,
       tools: kinds,
       canRestart: platform === 'darwin' || platform === 'win32',
+      // While Claude has not connected: what Claude itself logged about starting Lead Finder.
+      claudeLog: s.enabled && st !== 'connected' ? desktop.serverLog(found) : null,
     };
   }
 

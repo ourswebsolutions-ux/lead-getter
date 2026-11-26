@@ -319,3 +319,22 @@ test('the self-check starts the server the way Claude does and needs Lead Finder
   const missing = await desktop.selfTest({ ...e, command: '/no/such/program' }, { clientName: 'x' });
   assert.equal(missing.ok, false);
 });
+
+test('Claude’s own log about starting Lead Finder is found and its error shown', () => {
+  const home = tmp();
+  const roaming = path.join(home, 'Roaming');
+  const local = path.join(home, 'Local');
+  const pkgLogs = path.join(local, 'Packages', 'Claude_pzs8sxrjxfjjc', 'LocalCache', 'Roaming', 'Claude', 'logs');
+  fs.mkdirSync(path.join(roaming, 'Claude', 'logs'), { recursive: true });
+  fs.mkdirSync(pkgLogs, { recursive: true });
+  fs.writeFileSync(path.join(roaming, 'Claude', 'logs', 'mcp-server-lead-finder.log'), 'old\n');
+  const old = Date.now() / 1000 - 3600;
+  fs.utimesSync(path.join(roaming, 'Claude', 'logs', 'mcp-server-lead-finder.log'), old, old);
+  fs.writeFileSync(path.join(pkgLogs, 'mcp-server-lead-finder.log'), '2026-11-26 [lead-finder] Initializing server...\n2026-11-26 [lead-finder] Server transport closed unexpectedly, this is likely due to the process exiting early.\n2026-11-26 [lead-finder] Server disconnected.\n');
+  const found = desktop.detect({ platform: 'win32', home, env: { APPDATA: roaming, LOCALAPPDATA: local } });
+  const log = desktop.serverLog(found);
+  assert.equal(log.file, path.join(pkgLogs, 'mcp-server-lead-finder.log'), 'the newest log (the Store app’s)');
+  assert.equal(log.tail.length, 3);
+  assert.match(log.error, /closed unexpectedly/);
+  assert.equal(desktop.serverLog(desktop.detect({ platform: 'linux', home: tmp(), env: {} })), null);
+});

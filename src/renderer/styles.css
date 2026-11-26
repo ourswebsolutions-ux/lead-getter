@@ -2805,3 +2805,21 @@ td.details-cell { max-width: 260px; }
   .cl-step { flex-wrap: wrap; }
   .cl-recent-row { flex-wrap: wrap; }
 }
+
+/* Email campaign: who writes the AI emails (EmailView.jsx) */
+.em-writer { margin-top: 10px; }
+.em-writer button { padding: 11px 14px 11px 40px; }
+.em-writer .st-radio { top: 13px; left: 14px; }
+.em-writer strong { font-size: 13px; }
+.em-claude { display: flex; align-items: flex-start; gap: 10px; margin-top: 10px; padding: 10px 12px; border: 1px solid var(--accent-line); border-radius: 12px; background: var(--accent-soft); color: var(--accent); font-size: 12.5px; line-height: 1.5; }
+.em-claude span { color: var(--text-2); }
+.em-claude strong { color: var(--text); }
+.em-claude .icon { flex: none; margin-top: 2px; }
+@media (max-width: 640px) { .em-writer { grid-template-columns: 1fr; } }
+.cl-diag summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; font-size: 13px; font-weight: 500; cursor: pointer; list-style: none; }
+.cl-diag summary::-webkit-details-marker { display: none; }
+.cl-diag[open] summary { border-bottom: 1px solid var(--line); }
+.cl-diag-body { display: flex; flex-direction: column; gap: 6px; padding: 12px 16px; }
+.cl-diag-body .cl-tool-title { margin: 6px 0 0; }
+.cl-path { font: 11.5px var(--mono); color: var(--text-2); overflow-wrap: anywhere; }
+.cl-log { max-height: 220px; margin: 0; padding: 10px; overflow: auto; border-radius: 8px; background: var(--sunken); font: 11px/1.5 var(--mono); color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere; }

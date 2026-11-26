@@ -42,33 +42,68 @@ const list = (dir) => {
 function locations({ platform = process.platform, env = process.env, home = require('node:os').homedir() } = {}) {
   const configs = [];
   const apps = [];
+  const logs = [];
   if (platform === 'darwin') {
+    logs.push(path.join(home, 'Library', 'Logs', 'Claude'));
     configs.push(path.join(home, 'Library', 'Application Support', 'Claude', CONFIG));
     apps.push('/Applications/Claude.app', path.join(home, 'Applications', 'Claude.app'));
   } else if (platform === 'win32') {
     const roaming = env.APPDATA || path.join(home, 'AppData', 'Roaming');
     const local = env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
     configs.push(path.join(roaming, 'Claude', CONFIG));
+    logs.push(path.join(roaming, 'Claude', 'logs'));
     for (const pkg of list(path.join(local, 'Packages'))) {
       if (!/^(Claude|AnthropicPBC\.Claude|Anthropic\.Claude)_/i.test(pkg)) continue;
       configs.push(path.join(local, 'Packages', pkg, 'LocalCache', 'Roaming', 'Claude', CONFIG));
+      logs.push(path.join(local, 'Packages', pkg, 'LocalCache', 'Roaming', 'Claude', 'logs'));
       apps.push(path.join(local, 'Packages', pkg));
     }
     apps.push(path.join(local, 'AnthropicClaude', 'claude.exe'), path.join(local, 'Programs', 'Claude', 'Claude.exe'), path.join(env.ProgramFiles || 'C:\\Program Files', 'Claude', 'Claude.exe'));
   } else {
     configs.push(path.join(env.XDG_CONFIG_HOME || path.join(home, '.config'), 'Claude', CONFIG));
+    logs.push(path.join(env.XDG_CONFIG_HOME || path.join(home, '.config'), 'Claude', 'logs'));
     apps.push('/usr/bin/claude-desktop', '/usr/local/bin/claude-desktop', '/opt/Claude/claude-desktop', '/opt/claude-desktop/claude-desktop', '/usr/lib/claude-desktop', '/snap/bin/claude-desktop', path.join(home, '.local', 'bin', 'claude-desktop'), '/usr/share/applications/claude-desktop.desktop', path.join(home, '.local', 'share', 'applications', 'claude-desktop.desktop'));
     for (const dir of [path.join(home, 'Applications'), path.join(home, 'Downloads')]) for (const f of list(dir)) if (/^claude.*\.appimage$/i.test(f)) apps.push(path.join(dir, f));
   }
-  return { configs, apps };
+  return { configs, apps, logs };
 }
 
 function detect(opts = {}) {
-  const { configs, apps } = locations(opts);
+  const { configs, apps, logs } = locations(opts);
   const app = apps.find(exists) || null;
   const used = configs.filter((f) => exists(path.dirname(f)));
   // Claude makes its settings folder the first time it runs.
-  return { installed: Boolean(app || used.length), app, configs, used, downloadUrl: DOWNLOAD_URL };
+  return { installed: Boolean(app || used.length), app, configs, used, logs, downloadUrl: DOWNLOAD_URL };
+}
+
+// What Claude Desktop last wrote about starting Lead Finder (its own log,
+// mcp-server-lead-finder.log): when, and the last lines. Shown while
+// Claude has not connected, so a failure can be seen and fixed.
+function serverLog(found) {
+  let best = null;
+  for (const dir of found.logs || []) {
+    const file = path.join(dir, `mcp-server-${NAME}.log`);
+    try {
+      const st = fs.statSync(file);
+      if (!best || st.mtimeMs > best.at) best = { file, at: st.mtimeMs, size: st.size };
+    } catch {}
+  }
+  if (!best) return null;
+  try {
+    const fd = fs.openSync(best.file, 'r');
+    const len = Math.min(best.size, 16_384);
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, best.size - len);
+    fs.closeSync(fd);
+    const lines = buf.toString('utf8').split(/\r?\n/).filter((l) => l.trim());
+    const tail = lines.slice(-14).map((l) => l.slice(0, 400));
+    // The most telling line: an actual error before a plain "disconnected".
+    const last = (re) => [...lines].reverse().find((l) => re.test(l));
+    const error = last(/error|fail|exited|exiting early|unexpectedly|ENOENT|EACCES|not found|cannot|refused|bad option/i) || last(/disconnected/i) || null;
+    return { file: best.file, at: best.at, tail, error: error && error.slice(0, 400) };
+  } catch {
+    return null;
+  }
 }
 
 // --- the settings file -------------------------------------------------------------
@@ -271,4 +306,4 @@ async function restartClaude({ platform = process.platform } = {}) {
   return { ok: false, manual: true, error: 'Close Claude completely and open it again.' };
 }
 
-module.exports = { NAME, CONFIG, DOWNLOAD_URL, locations, detect, readConfig, install, uninstall, inspect, withEntry, withoutEntry, isOurs, selfTest, restartClaude };
+module.exports = { NAME, CONFIG, DOWNLOAD_URL, locations, detect, serverLog, readConfig, install, uninstall, inspect, withEntry, withoutEntry, isOurs, selfTest, restartClaude };

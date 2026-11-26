@@ -37,10 +37,14 @@ const VERIFY_LABEL = { valid: 'Valid', invalid: 'Invalid', risky: 'Risky', unkno
 // accountIds: the accounts it sends from, in turn (each with its own delay and daily limit).
 // aiWrite: each email written by the AI from the body (the user's instructions)
 // and the business's details; the text is kept on the recipient.
+// writer: who writes the AI emails and the follow-ups: 'api' (the app, with
+// the Groq / OpenRouter key) or 'claude' (Claude Desktop, with the user's
+// own Claude plan: Claude reads them with emails_to_write and saves them
+// with save_written_emails; only written emails are sent, the others wait).
 // trackClicks: links go through the user's click tracking address (tracking.js), when it is set up.
 // followups: steps after the first email; schedule: sending days/hours; delayMaxSeconds: a random
 // pause up to this; maxPerDay: the campaign's emails a day (all accounts).
-const DEFAULTS = { delaySeconds: 60, delayMaxSeconds: null, dailyLimit: 100, maxPerDay: null, allowPrevious: false, attachments: [], html: null, accountIds: [], senderNext: {}, senderDown: {}, aiWrite: false, trackClicks: true, followups: FOLLOWUP_DEFAULTS, schedule: SCHEDULE_DEFAULTS };
+const DEFAULTS = { delaySeconds: 60, delayMaxSeconds: null, dailyLimit: 100, maxPerDay: null, allowPrevious: false, attachments: [], html: null, accountIds: [], senderNext: {}, senderDown: {}, aiWrite: false, writer: 'api', trackClicks: true, followups: FOLLOWUP_DEFAULTS, schedule: SCHEDULE_DEFAULTS };
 const SYNC_EVERY = 60_000; // category campaigns look for new leads with an email
 const LIMITS = { delay: { min: 10, max: 3600 }, daily: { min: 1, max: 2000 }, attachments: 10, attachmentBytes: 20 * 1024 * 1024, recipients: 20_000 };
 const MAX_ATTEMPTS = 3;
@@ -460,6 +464,7 @@ class EmailCampaigns extends EventEmitter {
     }
     if (patch.allowPrevious !== undefined) config.allowPrevious = Boolean(patch.allowPrevious);
     if (patch.aiWrite !== undefined) config.aiWrite = Boolean(patch.aiWrite);
+    if (patch.writer !== undefined) config.writer = patch.writer === 'claude' ? 'claude' : 'api';
     if (patch.trackClicks !== undefined) config.trackClicks = Boolean(patch.trackClicks);
     if (patch.attachments !== undefined) {
       const list = [];
@@ -670,7 +675,7 @@ class EmailCampaigns extends EventEmitter {
       if (noPass.length === senders.length) errs.push('The password of its email account is not saved on this computer.');
     }
     if (c.config.aiWrite) {
-      if (!this.writer || (this.writerReady && !this.writerReady())) errs.push('Writing with AI needs a Groq or OpenRouter key in Settings > AI.');
+      if (!this.byClaude(c) && (!this.writer || (this.writerReady && !this.writerReady()))) errs.push('Writing with AI needs a Groq or OpenRouter key in Settings > AI (or choose Claude to write them).');
       if (!c.body.trim()) errs.push('Write the instructions for the AI (what you offer, the tone, the language).');
     } else {
       if (!c.subject.trim()) errs.push('Write the subject.');
@@ -855,6 +860,11 @@ class EmailCampaigns extends EventEmitter {
         // Nobody left: completed at once (no delay to wait for). A category
         // campaign stays on and waits for the category's new leads.
         if (!next.length && !due.length) {
+          // Claude writes them: the next ones wait until Claude has written them.
+          if (this.byClaude(c) && this.claudeOpen(c, this.clock())) {
+            this.waiting.set(c.id, 'claude');
+            continue;
+          }
           if (this.db.prepare("SELECT 1 FROM email_recipients WHERE campaign_id = ? AND state = 'sending' LIMIT 1").get(c.id) || this.db.prepare("SELECT 1 FROM email_followups WHERE campaign_id = ? AND state = 'sending' LIMIT 1").get(c.id)) continue;
           const n = this.counts(c.id);
           const fu = this.followupCounts(c.id);
@@ -976,10 +986,24 @@ class EmailCampaigns extends EventEmitter {
 
   nextRecipients(c, now, n) {
     const v = this.verifiedSql(now);
+    // Written by Claude: only the emails Claude has written so far.
+    const w = c.config.aiWrite && this.byClaude(c) ? ' AND ai_body IS NOT NULL' : '';
     return [
-      ...this.db.prepare(`SELECT * FROM email_recipients WHERE campaign_id = ? AND state = 'queued' AND ${v.sql} ORDER BY priority DESC, added_at, email LIMIT ?`).all(c.id, ...v.params, n),
-      ...this.db.prepare(`SELECT * FROM email_recipients WHERE campaign_id = ? AND state = 'failed' AND attempts < ? AND retry_at IS NOT NULL AND retry_at <= ? AND ${v.sql} ORDER BY retry_at LIMIT ?`).all(c.id, MAX_ATTEMPTS, now, ...v.params, n),
+      ...this.db.prepare(`SELECT * FROM email_recipients WHERE campaign_id = ? AND state = 'queued'${w} AND ${v.sql} ORDER BY priority DESC, added_at, email LIMIT ?`).all(c.id, ...v.params, n),
+      ...this.db.prepare(`SELECT * FROM email_recipients WHERE campaign_id = ? AND state = 'failed'${w} AND attempts < ? AND retry_at IS NOT NULL AND retry_at <= ? AND ${v.sql} ORDER BY retry_at LIMIT ?`).all(c.id, MAX_ATTEMPTS, now, ...v.params, n),
     ].slice(0, n);
+  }
+
+  byClaude(c) {
+    return c?.config?.writer === 'claude';
+  }
+
+  // Emails Claude has still to write that would be sent now: first emails
+  // waiting (AI writing on) and follow-ups due.
+  claudeOpen(c, now) {
+    const first = c.config.aiWrite ? this.db.prepare("SELECT COUNT(*) AS n FROM email_recipients WHERE campaign_id = ? AND ai_body IS NULL AND stopped_at IS NULL AND (state = 'queued' OR (state = 'failed' AND attempts < ? AND retry_at IS NOT NULL))").get(c.id, MAX_ATTEMPTS).n : 0;
+    const fu = c.config.followups?.on ? this.db.prepare("SELECT COUNT(*) AS n FROM email_followups WHERE campaign_id = ? AND body IS NULL AND state IN ('queued', 'failed') AND due_at <= ?").get(c.id, now).n : 0;
+    return first + fu;
   }
 
   nextRecipient(c, now) {
@@ -1057,6 +1081,7 @@ class EmailCampaigns extends EventEmitter {
     if (!(await this.canSend())) return this.pause(c.id, 'subscription');
     // Written by the AI first (nothing is reserved if that fails).
     let text = null;
+    if (c.config.aiWrite && this.byClaude(c) && !r.ai_body) return; // Claude has not written it yet
     if (c.config.aiWrite) {
       try {
         text = await this.aiText(c, r);
@@ -1186,7 +1211,7 @@ class EmailCampaigns extends EventEmitter {
     if (!c.config.followups?.on) return [];
     const v = this.verifiedSql(now, 'f.email');
     return this.db
-      .prepare(`SELECT f.* FROM email_followups f WHERE f.campaign_id = ? AND ((f.state = 'queued' AND f.due_at <= ?) OR (f.state = 'failed' AND f.attempts < ? AND f.retry_at IS NOT NULL AND f.retry_at <= ?)) AND ${v.sql} ORDER BY f.due_at, f.step, f.email LIMIT ?`)
+      .prepare(`SELECT f.* FROM email_followups f WHERE f.campaign_id = ? AND ((f.state = 'queued' AND f.due_at <= ?) OR (f.state = 'failed' AND f.attempts < ? AND f.retry_at IS NOT NULL AND f.retry_at <= ?))${this.byClaude(c) ? ' AND f.body IS NOT NULL' : ''} AND ${v.sql} ORDER BY f.due_at, f.step, f.email LIMIT ?`)
       .all(c.id, now, MAX_ATTEMPTS, now, ...v.params, n);
   }
 
@@ -1279,6 +1304,7 @@ class EmailCampaigns extends EventEmitter {
     const values = { name: r.name, business: r.business, email: r.email };
     const thread = `Re: ${String(r.sent_subject || render(c.subject, values) || '').replace(/^(re:\s*)+/i, '')}`.trim();
     if (f.body) return { subject: f.subject || thread, body: f.body, ai: true };
+    if (this.byClaude(c)) throw Object.assign(new Error('Claude has not written this follow-up yet'), { code: 'claude_pending' });
     if (!this.writer) throw Object.assign(new Error('no AI key is saved (follow-ups are written by the AI)'), { code: 'no_key' });
     const earlier = [r.sent_text, ...this.db.prepare("SELECT body FROM email_followups WHERE campaign_id = ? AND email = ? AND step < ? AND state = 'sent' ORDER BY step").all(c.id, r.email, f.step).map((x) => x.body)].filter((t) => t).map((t) => String(t).split('\n--\n')[0]);
     const sender = this.accounts.get(this.senders(c)[0]);
@@ -1311,6 +1337,7 @@ class EmailCampaigns extends EventEmitter {
       return;
     }
     if (!(await this.canSend())) return this.pause(c.id, 'subscription');
+    if (this.byClaude(c) && !f.body) return; // Claude has not written it yet
     let text;
     try {
       text = await this.followupText(c, r, f);
@@ -1567,6 +1594,98 @@ class EmailCampaigns extends EventEmitter {
     return on ? this.start(cc.id) : this.stop(cc.id);
   }
 
+  // --- emails written by Claude (writer 'claude') ------------------------------------
+
+  // Written and still to write, first emails and follow-ups (not sent yet).
+  claudeCounts(c) {
+    const one = (sql, ...a) => this.db.prepare(sql).get(...a).n;
+    const open = "(state = 'queued' OR (state = 'failed' AND attempts < " + MAX_ATTEMPTS + ' AND retry_at IS NOT NULL))';
+    return {
+      written: c.config.aiWrite ? one(`SELECT COUNT(*) AS n FROM email_recipients WHERE campaign_id = ? AND ai_body IS NOT NULL AND ${open}`, c.id) : 0,
+      toWrite: c.config.aiWrite ? one(`SELECT COUNT(*) AS n FROM email_recipients WHERE campaign_id = ? AND ai_body IS NULL AND stopped_at IS NULL AND ${open}`, c.id) : 0,
+      followupsWritten: c.config.followups?.on ? one("SELECT COUNT(*) AS n FROM email_followups WHERE campaign_id = ? AND body IS NOT NULL AND state IN ('queued', 'failed')", c.id) : 0,
+      followupsToWrite: c.config.followups?.on ? one("SELECT COUNT(*) AS n FROM email_followups WHERE campaign_id = ? AND body IS NULL AND state IN ('queued', 'failed')", c.id) : 0,
+    };
+  }
+
+  // The next emails for Claude to write: first emails in sending order,
+  // then follow-ups (soonest first), each with exactly what is known about
+  // the business, and for a follow-up the earlier emails of its thread.
+  toWrite(id, { limit = 10 } = {}) {
+    const c = this.row(id);
+    if (!c) return { ok: false, error: `There is no email campaign with id ${id}.` };
+    if (!this.byClaude(c)) return { ok: false, error: 'Claude does not write this campaign’s emails. Set it first: update_email_campaign with ai_write true and writer "claude".' };
+    const n = Math.min(25, Math.max(1, Number(limit) || 10));
+    const items = [];
+    if (c.config.aiWrite) {
+      for (const r of this.db.prepare(`SELECT * FROM email_recipients WHERE campaign_id = ? AND ai_body IS NULL AND stopped_at IS NULL AND (state = 'queued' OR (state = 'failed' AND attempts < ? AND retry_at IS NOT NULL)) ORDER BY priority DESC, added_at, email LIMIT ?`).all(c.id, MAX_ATTEMPTS, n)) {
+        items.push({ type: 'first_email', email: r.email, step: 0, lead: this.leadDetails(r) });
+      }
+    }
+    if (c.config.followups?.on && items.length < n) {
+      for (const f of this.db.prepare("SELECT * FROM email_followups WHERE campaign_id = ? AND body IS NULL AND state IN ('queued', 'failed') ORDER BY due_at, step, email LIMIT ?").all(c.id, n * 2)) {
+        if (items.length >= n) break;
+        const r = this.db.prepare('SELECT * FROM email_recipients WHERE campaign_id = ? AND email = ?').get(c.id, f.email);
+        if (!r || this.stopReason(r)) continue;
+        const step = c.config.followups.steps[f.step - 1] || {};
+        const values = { name: r.name, business: r.business, email: r.email };
+        const earlier = [r.sent_text, ...this.db.prepare("SELECT body FROM email_followups WHERE campaign_id = ? AND email = ? AND step < ? AND state = 'sent' ORDER BY step").all(c.id, r.email, f.step).map((x) => x.body)].filter(Boolean).map((t) => String(t).split('\n--\n')[0].slice(0, 2500));
+        items.push({ type: 'follow_up', email: f.email, step: f.step, due: new Date(f.due_at).toISOString().slice(0, 10), subject: step.subject ? render(step.subject, values) : `Re: ${String(r.sent_subject || '').replace(/^(re:\s*)+/i, '')}`.trim(), note: step.body ? render(step.body, values) : undefined, earlier_emails: earlier, lead: this.leadDetails(r) });
+      }
+    }
+    const counts = this.claudeCounts(c);
+    return { ok: true, campaign: { id: c.id, name: c.name, status: c.status }, prompt: c.config.aiWrite ? c.body : '', items, still_to_write: { first_emails: counts.toWrite, follow_ups: counts.followupsToWrite } };
+  }
+
+  // Emails Claude wrote, each checked like the app's own AI emails
+  // (check(): greeting and sign-off set exactly, then the prompt's rules);
+  // one that misses a rule is not saved and its reasons are returned.
+  // Saving sends nothing: the campaign sends them in its order when it runs.
+  async saveWritten(id, list, check) {
+    const c = this.row(id);
+    if (!c) return { ok: false, error: `There is no email campaign with id ${id}.` };
+    if (!this.byClaude(c)) return { ok: false, error: 'Claude does not write this campaign’s emails.' };
+    const sender = this.accounts.get(this.senders(c)[0]);
+    const results = [];
+    for (const e of list.slice(0, 25)) {
+      const email = String(e.email || '').trim().toLowerCase();
+      const step = Number(e.step) || 0;
+      const r = this.db.prepare('SELECT * FROM email_recipients WHERE campaign_id = ? AND email = ?').get(c.id, email);
+      if (!r) {
+        results.push({ email, step, saved: false, problems: ['Not a recipient of this campaign.'] });
+        continue;
+      }
+      const f = step > 0 ? this.db.prepare('SELECT * FROM email_followups WHERE campaign_id = ? AND email = ? AND step = ?').get(c.id, email, step) : null;
+      const open = step > 0 ? f && ['queued', 'failed'].includes(f.state) : ['queued', 'failed'].includes(r.state) && c.config.aiWrite;
+      if (!open) {
+        results.push({ email, step, saved: false, problems: [step > 0 ? 'This follow-up is not waiting to be sent.' : c.config.aiWrite ? 'This email was already sent or is no longer waiting.' : 'This campaign’s first email is its own text (AI writing is off).'] });
+        continue;
+      }
+      const out = await check({ instructions: c.config.aiWrite ? c.body : '', business: this.leadDetails(r), sender: { name: sender?.senderName || sender?.name || '', email: sender?.email || '' }, subject: String(e.subject || ''), body: String(e.body || ''), followup: step > 0 });
+      const body = String(out.body || '').trim().slice(0, 8000);
+      const subject = String(out.subject || '').replace(/[\r\n]+/g, ' ').trim().slice(0, 200);
+      const missing = [...(out.problems || [])];
+      if (body.length < 20) missing.push('The email is empty or too short.');
+      if (step === 0 && !subject) missing.push('Write a subject.');
+      if (missing.length) {
+        results.push({ email, step, saved: false, problems: missing });
+        continue;
+      }
+      if (step > 0) {
+        const st = c.config.followups.steps[step - 1] || {};
+        this.db.prepare('UPDATE email_followups SET subject = ?, body = ?, updated_at = ? WHERE campaign_id = ? AND email = ? AND step = ?').run(st.subject ? subject : null, body, this.clock(), c.id, email, step);
+      } else this.db.prepare('UPDATE email_recipients SET ai_subject = ?, ai_body = ?, updated_at = ? WHERE campaign_id = ? AND email = ?').run(subject, body, this.clock(), c.id, email);
+      results.push({ email, step, saved: true, subject, body });
+    }
+    const saved = results.filter((x) => x.saved).length;
+    if (saved) {
+      this.log(c.id, 'info', `Claude wrote ${saved} email${saved === 1 ? '' : 's'}`);
+      this.emit('change', { id: c.id });
+    }
+    const counts = this.claudeCounts(this.row(id));
+    return { ok: true, saved, not_saved: results.filter((x) => !x.saved), still_to_write: { first_emails: counts.toWrite, follow_ups: counts.followupsToWrite }, campaign_status: c.status };
+  }
+
   // --- AI-written emails -------------------------------------------------------------
 
   // What the AI may use about a business (only what the lead has).
@@ -1578,6 +1697,7 @@ class EmailCampaigns extends EventEmitter {
   // The AI's email for a recipient: written once, kept, reused on retries.
   async aiText(c, r, { save = true } = {}) {
     if (r.ai_body) return { subject: r.ai_subject || c.subject, body: r.ai_body };
+    if (this.byClaude(c)) throw Object.assign(new Error('Claude has not written this email yet (ask Claude in Claude Desktop: “write the emails of this campaign”)'), { code: 'claude_pending' });
     if (!this.writer) throw Object.assign(new Error('no AI key is saved'), { code: 'no_key' });
     const sender = this.accounts.get(this.senders(c)[0]);
     const out = await this.writer({ instructions: c.body, subject: '', sender: { name: sender?.senderName || sender?.name || '', email: sender?.email || '' }, business: this.leadDetails(r) });
@@ -1746,6 +1866,8 @@ class EmailCampaigns extends EventEmitter {
       senders,
       category: c.category,
       aiWrite: Boolean(c.config.aiWrite),
+      writer: this.byClaude(c) ? 'claude' : 'api',
+      claude: this.byClaude(c) ? this.claudeCounts(c) : null,
       subject: c.subject,
       delaySeconds: c.config.delaySeconds,
       dailyLimit: c.config.dailyLimit,
@@ -1849,6 +1971,11 @@ class EmailCampaigns extends EventEmitter {
     const c = this.row(id);
     if (!c) return { ok: false, error: 'That email campaign no longer exists.' };
     const r = this.db.prepare("SELECT * FROM email_recipients WHERE campaign_id = ? ORDER BY CASE WHEN state = 'queued' THEN 0 ELSE 1 END, priority DESC, added_at LIMIT 1").get(c.id);
+    if (c.config.aiWrite && this.byClaude(c)) {
+      const w = this.db.prepare("SELECT * FROM email_recipients WHERE campaign_id = ? AND ai_body IS NOT NULL ORDER BY CASE WHEN state = 'queued' THEN 0 ELSE 1 END, priority DESC, added_at LIMIT 1").get(c.id);
+      if (!w) return { ok: false, error: 'Claude has not written any email of this campaign yet. In Claude Desktop, ask: “Write the emails of my Lead Finder campaign ' + JSON.stringify(c.name) + '.”' };
+      return { ok: true, to: w.email, ai: true, ...compose({ subject: w.ai_subject, body: w.ai_body }, { name: w.name, business: w.business, email: w.email }) };
+    }
     if (c.config.aiWrite) {
       if (!r) return { ok: false, error: 'Add recipients first: the AI writes for a real business.' };
       try {

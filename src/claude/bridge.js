@@ -36,6 +36,7 @@ const INSTRUCTIONS = `Lead Finder is the user's lead-generation app on this comp
 - Use these tools for every fact about the user's leads, campaigns and replies; never invent numbers, names or results.
 - search_leads filters by country, city, category, name, email, website and more; get_lead shows one lead in full; lead_report summarises a list.
 - To write outreach for a lead, read it with get_lead (its writing_facts are exactly what is known about it) and write from those facts only. Campaign texts can be saved with update_email_campaign / update_whatsapp_campaign; nothing is sent by preparing.
+- Email campaigns can have each email written by Claude (update_email_campaign: ai_write true, writer "claude"; the body is the user's prompt). Then: emails_to_write gives the next emails with each business's facts; write every one following the prompt exactly, and save them with save_written_emails (fix and save again any it refuses). Keep going in batches when the user asks for all of them. Only emails Claude has written are sent.
 - Tools that send messages, start or stop campaigns, start searches, delete or change settings show a window in Lead Finder: they run only if the user clicks Allow there. If the result says the user did not allow it, nothing was done.
 - Lead Finder may be locked with its PIN: then ask the user to unlock it in the Lead Finder window.`;
 

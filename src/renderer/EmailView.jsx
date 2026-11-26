@@ -8,7 +8,7 @@ const api = window.leadFinder;
 
 const STATUS = { draft: 'Draft', running: 'Running', paused: 'Paused', stopped: 'Stopped', completed: 'Completed' };
 const STATE = { queued: 'Waiting', sending: 'Sending', sent: 'Sent', failed: 'Failed', skipped: 'Skipped', uncertain: 'Uncertain' };
-const WAITING = { delay: 'waiting for the delay between emails', daily_limit: 'daily limit reached; continues tomorrow', retry_later: 'retrying failed emails later', verifying: 'verifying the next email addresses before sending', followups: 'waiting for the next follow-ups', schedule: 'outside its sending days and hours', accounts_off: 'its sending accounts are switched off', accounts_failing: 'its sending accounts are failing (test them)', new_leads: 'waiting for new leads in the category' };
+const WAITING = { delay: 'waiting for the delay between emails', daily_limit: 'daily limit reached; continues tomorrow', retry_later: 'retrying failed emails later', verifying: 'verifying the next email addresses before sending', followups: 'waiting for the next follow-ups', schedule: 'outside its sending days and hours', accounts_off: 'its sending accounts are switched off', accounts_failing: 'its sending accounts are failing (test them)', new_leads: 'waiting for new leads in the category', claude: 'waiting for Claude to write the next emails (ask Claude in Claude Desktop)' };
 // A lead's status in a campaign (from its records).
 const LEAD_STATUS = {
   new: ['Verifying', 'checking'],
@@ -837,7 +837,7 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
   const sendersKey = snap.accountIds.join(',');
   useEffect(() => setSenderIds(sendersKey ? sendersKey.split(',') : []), [sendersKey]);
   useEffect(() => {
-    if (!dirty) setD({ name: snap.name, aiWrite: snap.aiWrite, trackClicks: snap.trackClicks, delayMinutes: Math.round((snap.delaySeconds / 60) * 10) / 10, delayMaxMinutes: snap.delayMaxSeconds ? Math.round((snap.delayMaxSeconds / 60) * 10) / 10 : '', maxPerDay: snap.maxPerDay || '', subject: snap.subject, body: snap.body, delaySeconds: snap.delaySeconds, dailyLimit: snap.dailyLimit, allowPrevious: snap.allowPrevious });
+    if (!dirty) setD({ name: snap.name, aiWrite: snap.aiWrite, writer: snap.writer || 'api', trackClicks: snap.trackClicks, delayMinutes: Math.round((snap.delaySeconds / 60) * 10) / 10, delayMaxMinutes: snap.delayMaxSeconds ? Math.round((snap.delayMaxSeconds / 60) * 10) / 10 : '', maxPerDay: snap.maxPerDay || '', subject: snap.subject, body: snap.body, delaySeconds: snap.delaySeconds, dailyLimit: snap.dailyLimit, allowPrevious: snap.allowPrevious });
   }, [snap, dirty]);
   if (!d) return null;
   const running = snap.status === 'running';
@@ -891,7 +891,7 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
   }
   async function showPreview() {
     setBusy('preview');
-    if (dirty && d.aiWrite !== snap.aiWrite) await save();
+    if (dirty && (d.aiWrite !== snap.aiWrite || d.writer !== snap.writer)) await save();
     const r = await api.emailRender(snap.id, d.subject, d.body);
     setBusy('');
     if (r.ok) setPreview(r);
@@ -1092,6 +1092,29 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
             <span className="switch-knob" />
           </button>
         </div>
+        {d.aiWrite && (
+          <div className="st-choice em-writer" role="radiogroup" aria-label="Who writes the emails">
+            {[
+              ['api', 'Lead Finder (Groq / OpenRouter key)', 'Written automatically while the campaign sends.'],
+              ['claude', 'Claude (your Claude plan, no key)', 'You ask Claude in Claude Desktop to write them; only written emails are sent.'],
+            ].map(([id, label, help]) => (
+              <button key={id} type="button" role="radio" aria-checked={d.writer === id} className={d.writer === id ? 'on' : ''} disabled={running} onClick={() => set('writer', id)}>
+                <span className="st-radio" />
+                <strong>{label}</strong>
+                <span>{help}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        {d.aiWrite && d.writer === 'claude' && snap.writer === 'claude' && snap.claude && (
+          <div className="em-claude" role="status">
+            <Icon name="sparkle" size={14} />
+            <span>
+              <strong>{snap.claude.written}</strong> written by Claude, <strong>{snap.claude.toWrite}</strong> to write
+              {snap.followups?.on ? ` · follow-ups: ${snap.claude.followupsWritten} written, ${snap.claude.followupsToWrite} to write` : ''}. In Claude Desktop, ask: “Write the emails of my Lead Finder campaign {snap.name}.”
+            </span>
+          </div>
+        )}
         {!d.aiWrite && (
           <label className="em-field">
             <span>Subject</span>
@@ -1117,7 +1140,7 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
             placeholder={d.aiWrite ? 'e.g. We are Axora Web, we build fast websites and online stores. Offer a free homepage design. Friendly, short, English. Mention it if they have no website. Sign as Ali.' : 'Hello {name},\n\nWe help businesses like {business} with…'}
             onChange={(e) => set('body', e.target.value)}
           />
-          <small className="muted">{d.aiWrite ? 'Each business’s name, category, area, website, phone and description go to the AI with this prompt. Every written email is kept and shown with its recipient.' : 'Plain text or HTML. An unsubscribe line is added to every email.'}</small>
+          <small className="muted">{d.aiWrite ? `Each business’s name, category, area, website, phone and description go to ${d.writer === 'claude' ? 'Claude' : 'the AI'} with this prompt. Every written email is checked against it, kept and shown with its recipient.` : 'Plain text or HTML. An unsubscribe line is added to every email.'}</small>
         </label>
         <div className="em-attach">
           {snap.attachments.map((a) => (
@@ -1145,7 +1168,7 @@ function Editor({ snap, accounts, categories, notify, reload, onImportPeople }) 
           </label>
           <span className="grow" />
           <button type="button" className="btn btn-ghost btn-sm" disabled={busy === 'preview'} onClick={showPreview}>
-            <Icon name={d.aiWrite ? 'sparkle' : 'eye'} size={13} /> {busy === 'preview' ? 'Writing…' : d.aiWrite ? 'Preview AI email' : 'Preview'}
+            <Icon name={d.aiWrite ? 'sparkle' : 'eye'} size={13} /> {busy === 'preview' ? 'Writing…' : d.aiWrite ? (d.writer === 'claude' ? 'Preview Claude’s email' : 'Preview AI email') : 'Preview'}
           </button>
           <button type="button" className="btn btn-primary btn-sm" disabled={!dirty || running} onClick={save}>
             <Icon name="check" size={13} /> Save

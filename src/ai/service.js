@@ -32,6 +32,22 @@ function parseJson(content) {
 }
 
 // bases: { groq, openrouter } API addresses (tests only).
+// An email's text made ready: placeholders left in it filled from the
+// facts, markdown removed, the greeting and sign-off set by the app; then
+// what still misses the prompt's rules.
+function finishEmail(out, { rules, greeting, first, business = {}, sender = {}, subject = '', kind = 'email' }) {
+  const fill = (t) =>
+    String(t || '')
+      .replace(/\{\s*(business(?:[ _]name)?|company)\s*\}|\[\s*(business|company)(?: name)?\s*\]/gi, business.business_name || business.company || '')
+      .replace(/\{\s*(name|first[ _]name|contact)\s*\}|\[\s*(name|first name|contact(?: name)?)\s*\]/gi, first || '')
+      .replace(/\{\s*(sender|your name)\s*\}|\[\s*(your name|sender(?: name)?)\s*\]/gi, sender.name || '');
+  let body = fill(out.body).replace(/\r\n/g, '\n').replace(/\*\*(.+?)\*\*/g, '$1').replace(/^#+\s*/gm, '').trim();
+  body = setGreeting(body, greeting);
+  body = setSignoff(body, rules.signoff, [sender.name, business.contact_name]);
+  const email = { subject: fill(String(out.subject || subject || '')).replace(/\s+/g, ' ').trim(), body };
+  return { ...email, problems: problems(email, rules, business, { kind }) };
+}
+
 function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fetchImpl, base, bases = {} }) {
   const status = (id) => ({ status: 'none', testedAt: null, error: null, ...(store.getState(PROVIDERS[id].statusKey) || {}) });
   const setStatus = (id, s) => store.setState(PROVIDERS[id].statusKey, { ...status(id), ...s });
@@ -204,20 +220,7 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
       const out = parseJson(message?.content);
       return out && typeof out.body === 'string' && out.body.trim() ? out : null;
     };
-    // Placeholders the AI left: filled from the facts.
-    const fill = (t) =>
-      String(t || '')
-        .replace(/\{\s*(business(?:[ _]name)?|company)\s*\}|\[\s*(business|company)(?: name)?\s*\]/gi, business.business_name || business.company || '')
-        .replace(/\{\s*(name|first[ _]name|contact)\s*\}|\[\s*(name|first name|contact(?: name)?)\s*\]/gi, first || '')
-        .replace(/\{\s*(sender|your name)\s*\}|\[\s*(your name|sender(?: name)?)\s*\]/gi, sender.name || '');
-    // The greeting and sign-off set by the app; then what is still wrong.
-    const finish = (out) => {
-      let body = fill(out.body).replace(/\r\n/g, '\n').replace(/\*\*(.+?)\*\*/g, '$1').replace(/^#+\s*/gm, '').trim();
-      body = setGreeting(body, greeting);
-      body = setSignoff(body, rules.signoff, [sender.name, business.contact_name]);
-      const email = { subject: fill(String(out.subject || subject || '')).replace(/\s+/g, ' ').trim(), body };
-      return { ...email, problems: problems(email, rules, business, { kind }) };
-    };
+    const finish = (out) => finishEmail(out, { rules, greeting, first, business, sender, subject, kind });
     const opts = { maxTokens: 4000, reasoning: 'medium' };
     const messages = [{ role: 'system', content: system }, { role: 'user', content: user }];
     let best = null;
@@ -231,6 +234,33 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
     }
     if (!best) throw Object.assign(new Error('the AI did not answer in the expected form'), { code: 'ai_empty' });
     return best;
+  }
+
+  // The prompt's rules without asking an AI: as read before, else what the
+  // app finds in it by itself (sign-off, length).
+  function knownRules(prompt) {
+    const p = String(prompt || '').trim();
+    if (!p) return {};
+    const key = crypto.createHash('sha256').update(p).digest('hex').slice(0, 32);
+    if (rulesSeen.has(key)) return rulesSeen.get(key);
+    const kept = store.getState(RULES_KEY) || {};
+    return kept[key] ? kept[key].rules : fallbackRules(p);
+  }
+
+  // An email written elsewhere (by Claude, in Claude Desktop) made ready
+  // like the app's own: placeholders filled, the greeting and sign-off set
+  // exactly, and what still misses the prompt's rules. Resolves
+  // { subject, body, problems }.
+  async function checkEmail({ instructions, business = {}, sender = {}, subject = '', body = '', followup = false }) {
+    const brief = String(instructions || '').replace(/\r\n?/g, '\n').slice(0, 30_000).trim();
+    let rules;
+    try {
+      rules = ai.configured() ? await emailRules(brief) : knownRules(brief);
+    } catch {
+      rules = knownRules(brief);
+    }
+    const first = firstName(business);
+    return finishEmail({ subject, body }, { rules, greeting: expectedGreeting(rules, first), first, business, sender, subject, kind: followup ? 'followup' : 'email' });
   }
 
   // One personalised WhatsApp message: the user's prompt + the business's facts.
@@ -292,7 +322,7 @@ function createAI({ store, vault, toolDeps, log = () => {}, send = () => {}, fet
     return r.ok ? r.reply : `Sorry, I could not do that: ${r.error}`;
   }
 
-  return { groq, apis, operator, tools, view, test, saveKey, setMain, registerIpc, whatsappReply, writeEmail, writeWhatsApp, available: () => ai.configured() };
+  return { groq, apis, operator, tools, view, test, saveKey, setMain, registerIpc, whatsappReply, writeEmail, checkEmail, writeWhatsApp, available: () => ai.configured() };
 }
 
 module.exports = { createAI };

@@ -138,6 +138,8 @@ function buildTools(d) {
       sending_accounts: s.senders.map((x) => ({ id: x.id, name: x.name, email: x.email, sent_today: x.sentToday, failing: x.down || undefined })),
       category_campaign: c.category ? true : undefined,
       ai_writes_each_email: Boolean(c.config.aiWrite),
+      ai_writer: c.config.writer === 'claude' ? 'claude (written in Claude Desktop with emails_to_write / save_written_emails)' : 'the app (Groq / OpenRouter key)',
+      written_by_claude: s.claude ? { written_not_sent: s.claude.written, still_to_write: s.claude.toWrite, follow_ups_written: s.claude.followupsWritten, follow_ups_to_write: s.claude.followupsToWrite } : undefined,
       subject: c.subject || null,
       body: c.body ? c.body.slice(0, 1500) : null,
       attachments: (c.config.attachments || []).map((a) => ({ id: a.id, name: a.name })),
@@ -537,11 +539,12 @@ function buildTools(d) {
       name: 'update_email_campaign',
       kind: 'config',
       description: 'Changes an email campaign that is not running: name, account, subject, body (plain text or HTML; placeholders {name}, {business}, {email}), seconds between emails, daily limit.',
-      parameters: obj({ campaign_id: CAMPAIGN_ID, ai_write: { type: 'boolean', description: 'On: the AI writes each email from the body (used as the instructions/prompt) and the business’s details' }, name: { type: 'string' }, account_id: { type: 'string' }, account_ids: { type: 'array', items: { type: 'string' }, description: 'All the accounts it sends from, in turn (replaces the list)' }, subject: { type: 'string' }, body: { type: 'string' }, seconds_between_emails: { type: 'integer' }, minutes_between_emails: { type: 'number' }, daily_limit: { type: 'integer', description: 'Emails per day per sending account' } }, ['campaign_id']),
+      parameters: obj({ campaign_id: CAMPAIGN_ID, ai_write: { type: 'boolean', description: 'On: the AI writes each email from the body (used as the instructions/prompt) and the business’s details' }, writer: { type: 'string', enum: ['api', 'claude'], description: 'Who writes the AI emails and follow-ups: "api" (the app itself, with the Groq / OpenRouter key) or "claude" (Claude, in Claude Desktop: only emails Claude has written are sent)' }, name: { type: 'string' }, account_id: { type: 'string' }, account_ids: { type: 'array', items: { type: 'string' }, description: 'All the accounts it sends from, in turn (replaces the list)' }, subject: { type: 'string' }, body: { type: 'string' }, seconds_between_emails: { type: 'integer' }, minutes_between_emails: { type: 'number' }, daily_limit: { type: 'integer', description: 'Emails per day per sending account' } }, ['campaign_id']),
       run: (a) => {
         const patch = {};
         if (Array.isArray(a.account_ids)) patch.accountIds = a.account_ids;
         if (typeof a.ai_write === 'boolean') patch.aiWrite = a.ai_write;
+        if (a.writer === 'api' || a.writer === 'claude') patch.writer = a.writer;
         if (a.name != null) patch.name = a.name;
         if (a.account_id != null) patch.accountId = a.account_id;
         if (a.subject != null) patch.subject = a.subject;

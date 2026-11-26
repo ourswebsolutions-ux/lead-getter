@@ -89,6 +89,8 @@ export default function ClaudeIntegration() {
   const check = st.server.check;
   const live = st.connection.live;
   const seen = st.connection.lastSeen;
+  const log = st.claudeLog;
+  const tried = Boolean(log && st.configuredAt && log.at >= st.configuredAt - 1000);
   const total = st.tools.read.length + st.tools.config.length + st.tools.confirm.length;
   const setupText = (r) => (r.restartNeeded ? 'Lead Finder is set up in Claude and checked.' : 'Lead Finder is connected to Claude.');
 
@@ -130,9 +132,34 @@ export default function ClaudeIntegration() {
           done={st.state === 'connected'}
           warn={st.enabled && st.state === 'connecting'}
           title="Connection"
-          text={live.length ? `${live.map((c) => c.client).join(', ')} connected now` : st.state === 'connected' && seen ? `Ready · last used by ${seen.client} ${ago(seen.at)}` : st.enabled && st.state === 'connecting' ? 'Waiting for Claude to load Lead Finder' : 'Not connected'}
+          text={live.length ? `${live.map((c) => c.client).join(', ')} connected now` : st.state === 'connected' && seen ? `Ready · last used by ${seen.client} ${ago(seen.at)}` : st.enabled && st.state === 'connecting' ? (tried ? `Claude tried to start Lead Finder ${ago(log.at)}${log.error ? ' and reported a problem (below)' : ''}` : 'Waiting for Claude to load Lead Finder. Claude has not tried yet: quit Claude completely (also from the tray) and open it again.') : 'Not connected'}
         />
       </div>
+
+      {st.enabled && st.state !== 'connected' && (
+        <details className="st-group cl-diag">
+          <summary>
+            <span>Details for support</span>
+            <span className="muted small">{tried ? (log.error ? 'Claude reported a problem' : 'Claude’s log') : 'Claude’s settings files'}</span>
+          </summary>
+          <div className="cl-diag-body">
+            <span className="cl-tool-title">Lead Finder is in these Claude settings files</span>
+            {st.claude.files.map((f) => (
+              <code key={f.file} className="cl-path">
+                {f.state === 'current' ? '✓ ' : f.state === 'missing' ? '✗ ' : '! '}
+                {f.file}
+              </code>
+            ))}
+            {log && (
+              <>
+                <span className="cl-tool-title">Claude’s log ({ago(log.at)})</span>
+                <code className="cl-path">{log.file}</code>
+                <pre className="cl-log">{log.tail.join('\n')}</pre>
+              </>
+            )}
+          </div>
+        </details>
+      )}
 
       {st.detail && st.state === 'not_connected' && <p className={`cl-detail ${st.enabled && st.state === 'not_connected' ? 'bad' : ''}`}>{st.detail}</p>}
 

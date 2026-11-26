@@ -3366,7 +3366,7 @@ let claude = null;
 function initClaude() {
   const { createClaude } = require('../claude/service');
   const { buildClaudeTools } = require('../claude/tools');
-  const leadTools = buildClaudeTools({ store });
+  const leadTools = buildClaudeTools({ store, email, checkEmail: (x) => ai.checkEmail(x) });
   claude = createClaude({
     app,
     state: { get: (k) => store.getState(k), set: (k, v) => store.setState(k, v) },

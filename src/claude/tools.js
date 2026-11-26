@@ -98,7 +98,9 @@ const FILTERS = {
   lead_ids: { type: 'array', items: { type: 'integer', minimum: 1 }, maxItems: 1000, description: 'Only these leads' },
 };
 
-function buildClaudeTools({ store }) {
+// email: the email service (campaigns); checkEmail(): the app's check of an
+// email against its campaign prompt (ai/service.js).
+function buildClaudeTools({ store, email = null, checkEmail = null }) {
   function categoryId(name) {
     if (name == null || name === '') return { ok: true, id: null };
     const raw = String(name).trim();
@@ -167,7 +169,39 @@ function buildClaudeTools({ store }) {
   };
   const top = (o, n) => Object.fromEntries(Object.entries(o).slice(0, n));
 
+  const EMAIL_TOOLS = email
+    ? [
+        {
+          name: 'emails_to_write',
+          kind: 'read',
+          title: 'Emails to write',
+          description: 'For an email campaign whose AI emails are written by Claude (writer "claude"): the campaign prompt and the next emails to write, up to 25: first emails in sending order and follow-ups, each with the recipient’s email, step (0 = first email), the business facts (lead) and, for a follow-up, the earlier emails and its subject. Write each one yourself following the prompt exactly, using only the given facts (never invent compliments, reviews or website details), then save them with save_written_emails.',
+          parameters: obj({ campaign_id: { type: 'integer', minimum: 1, description: 'The email campaign id (list_campaigns)' }, limit: { type: 'integer', minimum: 1, maximum: 25, description: 'How many, 1-25 (default 10)' } }, ['campaign_id']),
+          run: (a) => email.campaigns.toWrite(a.campaign_id, { limit: a.limit }),
+        },
+        {
+          name: 'save_written_emails',
+          kind: 'config',
+          title: 'Save written emails',
+          description: 'Saves emails you wrote for a Claude-written campaign (from emails_to_write). Lead Finder makes each ready like its own AI emails (greeting and sign-off exactly as the prompt says) and checks the prompt’s rules (required lines, bullet points, questions, length, the business name); an email that misses one is not saved and its reasons come back: fix it and save it again. Saving sends nothing: the running campaign sends saved emails in its order, with its delays and limits.',
+          parameters: obj(
+            {
+              campaign_id: { type: 'integer', minimum: 1 },
+              emails: {
+                type: 'array',
+                maxItems: 25,
+                items: obj({ email: { type: 'string', maxLength: 320, description: 'The recipient’s email (from emails_to_write)' }, step: { type: 'integer', minimum: 0, maximum: 10, description: '0 for the first email, else the follow-up step' }, subject: { type: 'string', maxLength: 250 }, body: { type: 'string', maxLength: 8000, description: 'Plain text, no unsubscribe line (the app adds one)' } }, ['email', 'step', 'body']),
+              },
+            },
+            ['campaign_id', 'emails'],
+          ),
+          run: (a) => email.campaigns.saveWritten(a.campaign_id, a.emails, checkEmail),
+        },
+      ]
+    : [];
+
   return [
+    ...EMAIL_TOOLS,
     {
       name: 'search_leads',
       kind: 'read',
